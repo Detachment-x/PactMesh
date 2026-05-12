@@ -299,6 +299,7 @@ fn test_cli_daemon_online_invite_establishes_peer() {
     assert!(member_network_dir.join("member_cert.pem").is_file());
     assert!(member_network_dir.join("sk_self.age").is_file());
     assert!(member_network_dir.join("network_state.cbor.pem").is_file());
+    assert!(member_network_dir.join("network_bootstrap.cbor.pem").is_file());
 
     let _member = ChildGuard(spawn_core(
         &root_b,
@@ -306,7 +307,7 @@ fn test_cli_daemon_online_invite_establishes_peer() {
         "node-b",
         member_rpc_port,
         None,
-        Some(listener_port),
+        None,
     ));
     wait_for_port(member_rpc_port);
 

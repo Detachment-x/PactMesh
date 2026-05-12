@@ -33,6 +33,28 @@ use strum::VariantArray;
 use tokio::io::AsyncReadExt;
 
 use crate::tunnel::IpScheme;
+use crate::trust::NetworkBootstrap;
+
+const NETWORK_BOOTSTRAP_FILE_NAME: &str = "network_bootstrap.cbor.pem";
+
+fn load_local_network_bootstrap(
+    domain_dir: &std::path::Path,
+    network_local_id: &str,
+) -> anyhow::Result<Option<NetworkBootstrap>> {
+    let path = domain_dir
+        .join("networks")
+        .join(network_local_id)
+        .join(NETWORK_BOOTSTRAP_FILE_NAME);
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let bootstrap = NetworkBootstrap::from_pem(&text)
+        .map_err(|err| anyhow::anyhow!("failed to decode {}: {err}", path.display()))?;
+    Ok(Some(bootstrap))
+}
 #[cfg(feature = "jemalloc-prof")]
 use jemalloc_ctl::{Access as _, AsName as _, epoch, stats};
 
@@ -920,6 +942,27 @@ impl NetworkOptions {
                 });
             }
             cfg.set_peers(peers);
+        }
+
+        if cfg.get_peers().is_empty()
+            && let Some(trust_domain) = cfg.get_trust_domain()
+            && let Some(bootstrap) = load_local_network_bootstrap(
+                trust_domain.domain_dir.as_path(),
+                &trust_domain.network_local_id,
+            )?
+        {
+            let peers = bootstrap
+                .bootstrap_seeds
+                .into_iter()
+                .map(|uri| PeerConfig {
+                    uri,
+                    peer_public_key: None,
+                    target_bootstrap_path: None,
+                })
+                .collect::<Vec<_>>();
+            if !peers.is_empty() {
+                cfg.set_peers(peers);
+            }
         }
 
         if self.no_listener || !self.listeners.is_empty() {

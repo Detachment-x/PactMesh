@@ -3327,6 +3327,13 @@ async fn handle_trust_accept_invite(
         .with_context(|| format!("failed to write {}", network_dir.join("device_id").display()))?;
     std::fs::copy(device_dir.join("sk_self.age"), network_dir.join("sk_self.age"))
         .with_context(|| format!("failed to write {}", network_dir.join("sk_self.age").display()))?;
+    std::fs::write(network_dir.join("network_bootstrap.cbor.pem"), bootstrap.to_pem())
+        .with_context(|| {
+            format!(
+                "failed to write {}",
+                network_dir.join("network_bootstrap.cbor.pem").display()
+            )
+        })?;
     let jr = JoinRequest::new_signed(
         bootstrap.trust_domain_id,
         bootstrap.network_local_id.clone(),
