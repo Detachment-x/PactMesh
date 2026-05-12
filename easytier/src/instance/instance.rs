@@ -1489,6 +1489,10 @@ impl Instance {
                         "config-sync service is not available"
                     ))
                 })?;
+                let (td_id, network_local_id) = parse_trust_target(
+                    &request.trust_domain_id,
+                    &request.network_local_id,
+                )?;
                 let selector = ConfigResourceSelector {
                     selector: Some(config_resource_selector::Selector::PendingCertFor(
                         PendingCertKey {
@@ -1509,16 +1513,27 @@ impl Instance {
                     )
                     .await
                 {
-                    Ok(response) => Ok(FetchPendingMemberCertResponse {
-                        found: true,
-                        member_cert_cbor: response.payload_cbor,
-                    }),
+                    Ok(response) => {
+                        let network_state_cbor = service
+                            .trust_pool
+                            .read()
+                            .await
+                            .network_state(&td_id, &network_local_id)
+                            .map(to_canonical_cbor)
+                            .unwrap_or_default();
+                        Ok(FetchPendingMemberCertResponse {
+                            found: true,
+                            member_cert_cbor: response.payload_cbor,
+                            network_state_cbor,
+                        })
+                    }
                     Err(rpc_types::error::Error::ExecutionError(err))
                         if err.to_string().contains("pending cert not found") =>
                     {
                         Ok(FetchPendingMemberCertResponse {
                             found: false,
                             member_cert_cbor: Vec::new(),
+                            network_state_cbor: Vec::new(),
                         })
                     }
                     Err(err) => Err(err),

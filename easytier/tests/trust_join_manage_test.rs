@@ -10,8 +10,9 @@ use easytier::{
     },
     rpc_service::InstanceRpcService,
     trust::{
-        JoinRequest, MemberCert, NetworkLocalId, SignKey, TrustDomainPool, TrustDomainRoot,
-        from_cbor, to_canonical_cbor, wrap_armored,
+        JoinRequest, MemberCert, NetworkLocalId, NetworkStatePayload, SignKey, SignedNetworkState,
+        TrustDomainPool, TrustDomainRoot, UnsignedNetworkState, from_cbor, to_canonical_cbor,
+        wrap_armored,
     },
 };
 use tokio::sync::RwLock;
@@ -48,7 +49,24 @@ fn test_config(domain_dir: &std::path::Path) -> TomlConfigLoader {
 fn test_pool(root: &TrustDomainRoot) -> Arc<RwLock<TrustDomainPool>> {
     let mut pool = TrustDomainPool::new();
     pool.add_root(root.public_key().into());
+    pool.apply_network_state(network_state(root)).unwrap();
     Arc::new(RwLock::new(pool))
+}
+
+fn network_state(root: &TrustDomainRoot) -> SignedNetworkState {
+    UnsignedNetworkState {
+        trust_domain_id: root.id(),
+        network_local_id: NetworkLocalId::try_from_str(NETWORK_LOCAL_ID).unwrap(),
+        version: 1,
+        payload: NetworkStatePayload {
+            member_cert_index: Vec::new(),
+            revoked_certs: Vec::new(),
+            disabled_certs: Vec::new(),
+            acl: Vec::new(),
+            routes: Vec::new(),
+        },
+    }
+    .sign(root)
 }
 
 fn join_request(root: &TrustDomainRoot) -> JoinRequest {
@@ -127,6 +145,7 @@ async fn test_fetch_pending_member_cert_returns_not_found_before_approve() {
 
     assert!(!response.found);
     assert!(response.member_cert_cbor.is_empty());
+    assert!(response.network_state_cbor.is_empty());
 }
 
 #[tokio::test]
@@ -164,6 +183,8 @@ async fn test_fetch_pending_member_cert_returns_cert_after_approve() {
     assert!(response.found);
     let decoded: MemberCert = from_cbor(&response.member_cert_cbor).unwrap();
     assert_eq!(decoded, expected);
+    let decoded_state: SignedNetworkState = from_cbor(&response.network_state_cbor).unwrap();
+    assert_eq!(decoded_state, network_state(&root));
 }
 
 #[tokio::test]
@@ -220,6 +241,8 @@ async fn test_approve_join_request_via_rpc_signs_and_returns_cert() {
     assert!(fetched.found);
     let fetched_cert: MemberCert = from_cbor(&fetched.member_cert_cbor).unwrap();
     assert_eq!(fetched_cert, cert);
+    let fetched_state: SignedNetworkState = from_cbor(&fetched.network_state_cbor).unwrap();
+    assert_eq!(fetched_state, network_state(&root));
 }
 
 #[tokio::test]

@@ -38,7 +38,7 @@ use easytier::{
     },
     trust::{
         ACL_SCHEMA_VERSION, AclPolicy, Action, HostnameLabel, JoinRequest, MemberCertIndexEntry,
-        NetworkLocalId, NetworkStatePayload, SignKey, TrustDomainRoot, UnsignedNetworkState,
+        NetworkLocalId, NetworkStatePayload, SignKey, SignedNetworkState, TrustDomainRoot, UnsignedNetworkState,
         from_cbor, hostname::check_hostname_unique,
         network_bootstrap::{NetworkBootstrap, bootstrap_to_qr_svg},
         revocation::RevocationReason, to_canonical_cbor, wrap_armored,
@@ -3319,6 +3319,8 @@ async fn handle_trust_accept_invite(
         .with_context(|| format!("failed to create {}", network_dir.display()))?;
     std::fs::write(network_dir.join("device_id"), format!("{}\n", device_id))
         .with_context(|| format!("failed to write {}", network_dir.join("device_id").display()))?;
+    std::fs::copy(device_dir.join("sk_self.age"), network_dir.join("sk_self.age"))
+        .with_context(|| format!("failed to write {}", network_dir.join("sk_self.age").display()))?;
     let jr = JoinRequest::new_signed(
         bootstrap.trust_domain_id,
         bootstrap.network_local_id.clone(),
@@ -3399,6 +3401,20 @@ async fn submit_join_request_online(
                 .context("daemon returned invalid member cert CBOR")?;
             std::fs::write(&cert_path, cert.to_pem())
                 .with_context(|| format!("failed to write {}", cert_path.display()))?;
+            if response.network_state_cbor.is_empty() {
+                anyhow::bail!("daemon returned member cert without network_state");
+            }
+            let state: SignedNetworkState = from_cbor(&response.network_state_cbor)
+                .context("daemon returned invalid network_state CBOR")?;
+            if state.details.trust_domain_id != jr.trust_domain_id {
+                anyhow::bail!("daemon returned network_state for a different trust domain");
+            }
+            if state.details.network_local_id != jr.network_local_id {
+                anyhow::bail!("daemon returned network_state for a different network");
+            }
+            let state_path = network_dir.join("network_state.cbor.pem");
+            std::fs::write(&state_path, state.to_pem())
+                .with_context(|| format!("failed to write {}", state_path.display()))?;
             println!("Got member cert: {}", cert_path.display());
             return Ok(());
         }

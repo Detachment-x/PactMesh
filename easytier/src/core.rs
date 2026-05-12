@@ -1392,9 +1392,7 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
     }
     let config_file_count = config_files.len();
     let mut crate_cli_network = {
-        if cli.daemon {
-            false
-        } else if config_file_count == 0 {
+        if config_file_count == 0 {
             true
         } else {
             cli.network_options.network_name.is_some()

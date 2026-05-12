@@ -101,6 +101,7 @@ message FetchPendingMemberCertRequest {
 message FetchPendingMemberCertResponse {
   bool found = 1;
   bytes member_cert_cbor = 2;
+  bytes network_state_cbor = 3;
 }
 
 message PendingJoinRequestSummary {

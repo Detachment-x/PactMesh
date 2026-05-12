@@ -60,6 +60,7 @@ fn test_accept_invite_url_succeeds_with_mock_root() {
     assert!(domain_dir.join("pk_root.pem").is_file());
     assert!(devices_dir(dir.path()).join("default/sk_self.age").is_file());
     assert!(devices_dir(dir.path()).join("default/pk_self.pem").is_file());
+    assert!(domain_dir.join("networks/office-net/sk_self.age").is_file());
     let join_path = domain_dir.join("networks/office-net/pending_join_request.cbor.pem");
     let armored = std::fs::read_to_string(join_path).unwrap();
     let payload = unwrap_armored(&armored, "PNW-JOIN-REQUEST").unwrap();
