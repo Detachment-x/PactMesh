@@ -465,7 +465,7 @@ enum TrustSubCommand {
         json: bool,
     },
     CreateNetwork {
-        #[arg(help = "trust-domain id")]
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
         #[arg(help = "network-local id")]
         network_local_id: String,
@@ -477,7 +477,7 @@ enum TrustSubCommand {
         passphrase_file: Option<PathBuf>,
     },
     BootstrapSelf {
-        #[arg(help = "trust-domain id")]
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
         #[arg(help = "network-local id")]
         network_local_id: String,
@@ -491,7 +491,7 @@ enum TrustSubCommand {
         device_passphrase_file: Option<PathBuf>,
     },
     Invite {
-        #[arg(help = "trust-domain id")]
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
         #[arg(help = "network-local id")]
         network_local_id: String,
@@ -519,11 +519,11 @@ enum TrustSubCommand {
         poll_secs: u64,
     },
     Revoke {
-        #[arg(help = "trust-domain id")]
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
         #[arg(help = "network-local id")]
         network_local_id: String,
-        #[arg(help = "member-cert fingerprint")]
+        #[arg(help = "member-cert fingerprint", allow_hyphen_values = true)]
         fingerprint: String,
         #[arg(long, value_enum, default_value = "unspecified", help = "revocation reason")]
         reason: RevokeReasonArg,
@@ -533,11 +533,11 @@ enum TrustSubCommand {
         passphrase_file: Option<PathBuf>,
     },
     Disable {
-        #[arg(help = "trust-domain id")]
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
         #[arg(help = "network-local id")]
         network_local_id: String,
-        #[arg(help = "member-cert fingerprint")]
+        #[arg(help = "member-cert fingerprint", allow_hyphen_values = true)]
         fingerprint: String,
         #[arg(long, help = "RFC3339 timestamp when disable should expire")]
         until: Option<String>,
@@ -549,11 +549,11 @@ enum TrustSubCommand {
         passphrase_file: Option<PathBuf>,
     },
     Enable {
-        #[arg(help = "trust-domain id")]
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
         #[arg(help = "network-local id")]
         network_local_id: String,
-        #[arg(help = "member-cert fingerprint")]
+        #[arg(help = "member-cert fingerprint", allow_hyphen_values = true)]
         fingerprint: String,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
@@ -561,7 +561,7 @@ enum TrustSubCommand {
         passphrase_file: Option<PathBuf>,
     },
     ListMembers {
-        #[arg(help = "trust-domain id")]
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
         #[arg(help = "network-local id")]
         network_local_id: String,
@@ -571,11 +571,11 @@ enum TrustSubCommand {
         json: bool,
     },
     SetHostname {
-        #[arg(help = "trust-domain id")]
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
         #[arg(help = "network-local id")]
         network_local_id: String,
-        #[arg(help = "member-cert fingerprint")]
+        #[arg(help = "member-cert fingerprint", allow_hyphen_values = true)]
         fingerprint: String,
         #[arg(help = "DNS hostname label")]
         hostname: String,
@@ -585,21 +585,24 @@ enum TrustSubCommand {
         passphrase_file: Option<PathBuf>,
     },
     UnsetHostname {
-        #[arg(help = "trust-domain id")]
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
         #[arg(help = "network-local id")]
         network_local_id: String,
-        #[arg(help = "member-cert fingerprint")]
+        #[arg(help = "member-cert fingerprint", allow_hyphen_values = true)]
         fingerprint: String,
         #[arg(long, help = "file containing the root passphrase")]
         passphrase_file: Option<PathBuf>,
     },
     Approve {
-        #[arg(help = "trust-domain id")]
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
         #[arg(help = "network-local id")]
         network_local_id: String,
-        #[arg(help = "applicant pubkey (base64 URL-safe, no padding) from 'trust list-pending'")]
+        #[arg(
+            help = "applicant pubkey (base64 URL-safe, no padding) from 'trust list-pending'",
+            allow_hyphen_values = true
+        )]
         applicant_pk: String,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
@@ -607,15 +610,18 @@ enum TrustSubCommand {
         passphrase_file: Option<PathBuf>,
     },
     Reject {
-        #[arg(help = "trust-domain id")]
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
         #[arg(help = "network-local id")]
         network_local_id: String,
-        #[arg(help = "applicant pubkey (base64 URL-safe, no padding) from 'trust list-pending'")]
+        #[arg(
+            help = "applicant pubkey (base64 URL-safe, no padding) from 'trust list-pending'",
+            allow_hyphen_values = true
+        )]
         applicant_pk: String,
     },
     ListPending {
-        #[arg(help = "trust-domain id")]
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
         #[arg(long, help = "filter by network-local id")]
         network_local_id: Option<String>,
