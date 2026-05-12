@@ -186,6 +186,7 @@ async fn load_pool(cfg: &TomlConfigLoader) -> Arc<RwLock<TrustDomainPool>> {
         .await
         .unwrap()
         .unwrap()
+        .0
 }
 
 #[tokio::test]

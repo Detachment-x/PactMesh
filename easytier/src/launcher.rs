@@ -149,7 +149,13 @@ fn load_network_bootstrap(
 pub async fn inject_trust_pool_from_config(
     cfg: &TomlConfigLoader,
     global_ctx: Arc<crate::common::global_ctx::GlobalCtx>,
-) -> Result<Option<Arc<tokio::sync::RwLock<crate::trust::TrustDomainPool>>>, anyhow::Error> {
+) -> Result<
+    Option<(
+        Arc<tokio::sync::RwLock<crate::trust::TrustDomainPool>>,
+        Arc<TrustDomainContext>,
+    )>,
+    anyhow::Error,
+> {
     let Some(trust_domain) = cfg.get_trust_domain() else {
         return Ok(None);
     };
@@ -225,7 +231,10 @@ pub async fn inject_trust_pool_from_config(
         }
     }
 
-    Ok(Some(Arc::new(tokio::sync::RwLock::new(pool))))
+    Ok(Some((
+        Arc::new(tokio::sync::RwLock::new(pool)),
+        Arc::new(trust_ctx),
+    )))
 }
 
 pub struct EasyTierLauncher {
@@ -300,12 +309,19 @@ impl EasyTierLauncher {
         data: Arc<EasyTierData>,
     ) -> Result<(), anyhow::Error> {
         let preload_ctx = Arc::new(crate::common::global_ctx::GlobalCtx::new(cfg.clone()));
-        let trust_pool = inject_trust_pool_from_config(&cfg, preload_ctx).await?;
+        let trust_bundle = inject_trust_pool_from_config(&cfg, preload_ctx).await?;
+        let (trust_pool, trust_ctx) = match trust_bundle {
+            Some((pool, ctx)) => (Some(pool), Some(ctx)),
+            None => (None, None),
+        };
         let mut instance = Instance::new_with_trust_pool(cfg.clone(), trust_pool);
         let mut tasks = JoinSet::new();
 
         // Subscribe to global context events
         let global_ctx = instance.get_global_ctx();
+        if let Some(trust_ctx) = trust_ctx {
+            global_ctx.set_trust_context(trust_ctx).await;
+        }
         let data_c = data.clone();
         tasks.spawn(async move {
             let mut receiver = global_ctx.subscribe();

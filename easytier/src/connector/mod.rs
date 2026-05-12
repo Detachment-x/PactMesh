@@ -88,6 +88,10 @@ async fn set_bind_addr_for_peer_connector(
     let _ = connector;
 }
 
+fn should_bind_device_for_dst(dst_addr: SocketAddr) -> bool {
+    !dst_addr.ip().is_loopback()
+}
+
 pub async fn create_connector_by_url(
     url: &str,
     global_ctx: &ArcGlobalCtx,
@@ -125,7 +129,7 @@ pub async fn create_connector_by_url(
                 #[cfg(feature = "faketcp")]
                 IpScheme::FakeTcp => tunnel::fake_tcp::FakeTcpTunnelConnector::new(url).boxed(),
             };
-            if global_ctx.config.get_flags().bind_device {
+            if global_ctx.config.get_flags().bind_device && should_bind_device_for_dst(dst_addr) {
                 set_bind_addr_for_peer_connector(
                     &mut connector,
                     dst_addr.is_ipv4(),
