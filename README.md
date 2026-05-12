@@ -1,12 +1,14 @@
-# privateNetwork
+# PactMesh
 
-privateNetwork is an EasyTier fork that keeps EasyTier's decentralized data plane and adds a signed trust/configuration layer for small private networks.
+PactMesh is the product name for this EasyTier fork. It keeps EasyTier's decentralized data plane and adds a signed trust/configuration layer for small private networks.
 
-This repository is based on EasyTier commit `5a1668c` (2026-04-25). EasyTier provides the P2P transport, NAT traversal, routing, tunnels, and RPC substrate; privateNetwork adds self-managed trust domains, member certificates, signed network configuration, ACLs, MagicDNS host rendering, and cross-trust-domain relay borrowing.
+This repository is based on EasyTier commit `5a1668c` (2026-04-25). EasyTier provides the P2P transport, NAT traversal, routing, tunnels, and RPC substrate; PactMesh adds self-managed trust domains, member certificates, signed network configuration, ACLs, MagicDNS host rendering, and cross-trust-domain relay borrowing.
+
+The current binaries and local config path still use the inherited names (`easytier-cli`, `easytier-core`, and `~/.config/privateNetwork`). Renaming crates, binaries, or on-disk paths is intentionally deferred so the Alpha workflow can stabilize first.
 
 ## Status
 
-This fork is intended for private and small-team use. It is not an enterprise IAM product, a hosted control plane, or a multi-tenant SaaS system.
+PactMesh is currently Alpha software for private and small-team use. A VPS + NAT device + online join + TUN path has been validated, but this is not yet a polished end-user product, an enterprise IAM product, a hosted control plane, or a multi-tenant SaaS system.
 
 The core implementation is currently focused on:
 
@@ -22,9 +24,11 @@ Each user owns a trust domain. A trust domain is identified by `trust_domain_id 
 
 Configuration distribution does not need to be trusted. Nodes verify signatures locally before accepting a `NetworkState`, `TrustDomainMeta`, member certificate, or join-related payload. This keeps the network usable over ordinary EasyTier paths, relays, files, QR/bootstrap payloads, or future sync channels without giving those channels authority.
 
+Device roles are governance identities, not feature toggles: a Root device can unlock this trust domain's `SK_root`, a Member device has this domain's `member_cert.pem`, and an External device is referenced by this domain without being a member. Network functions such as relay, holepunch assistance, and subnet proxying are capabilities. Tags are human grouping labels. ACLs only decide data-plane traffic permission.
+
 ## Cross-Trust-Domain Relay Borrowing
 
-A small-team trust domain often has only a handful of nodes, none of which sit on a stable public address. privateNetwork lets one trust domain explicitly lend its relays to another, without merging the two domains or sharing private keys.
+A small-team trust domain often has only a handful of nodes, none of which sit on a stable public address. PactMesh lets one trust domain explicitly lend its relays to another, without merging the two domains or sharing private keys.
 
 The mechanism layers on top of `TrustDomainMeta`:
 
@@ -87,7 +91,7 @@ Some integration and e2e tests exercise EasyTier tunnel behavior and may need Li
 
 ## Relationship To EasyTier
 
-privateNetwork is a fork, not a replacement for the upstream EasyTier project. The fork keeps EasyTier's core networking architecture and changes the governance layer from shared network secrets toward explicit trust domains and signed configuration.
+PactMesh is a fork, not a replacement for the upstream EasyTier project. The fork keeps EasyTier's core networking architecture and changes the governance layer from shared network secrets toward explicit trust domains and signed configuration.
 
 Upstream EasyTier remains the origin of the transport and routing stack. See the original project at <https://github.com/EasyTier/EasyTier>.
 
