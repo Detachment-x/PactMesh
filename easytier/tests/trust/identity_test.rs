@@ -4,9 +4,9 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+use easytier::trust::TrustDomainRoot;
 use easytier::trust::identity::{SignatureError, UnsealError, VerifyKey, verify_signature};
 use easytier::trust::types::TrustDomainId;
-use easytier::trust::TrustDomainRoot;
 
 #[test]
 fn test_root_generate_unique_each_call() {
@@ -46,7 +46,10 @@ fn test_seal_unseal_round_trip() {
     let unsealed = TrustDomainRoot::unseal(&sealed, "secret-passphrase").unwrap();
 
     assert_eq!(unsealed.id(), root.id());
-    assert_eq!(unsealed.public_key().to_bytes(), root.public_key().to_bytes());
+    assert_eq!(
+        unsealed.public_key().to_bytes(),
+        root.public_key().to_bytes()
+    );
 }
 
 #[test]

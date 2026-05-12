@@ -1,4 +1,7 @@
-use std::{collections::HashMap, time::{Duration, Instant}};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 const DEDUP_TTL: Duration = Duration::from_secs(10 * 60);
 const GC_INTERVAL: Duration = Duration::from_secs(30);

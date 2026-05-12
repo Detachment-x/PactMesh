@@ -1,13 +1,24 @@
 #![allow(dead_code)]
 
-use std::{path::{Path, PathBuf}, process::Command, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    sync::Arc,
+};
 
 use easytier::{
     common::config::{ConfigLoader, NetworkIdentity, TomlConfigLoader, TrustDomainConfig},
     instance::instance::Instance,
-    proto::{api::config::{FetchPendingMemberCertRequest, SubmitJoinRequestRequest}, rpc_types::controller::BaseController},
+    proto::{
+        api::config::{FetchPendingMemberCertRequest, SubmitJoinRequestRequest},
+        rpc_types::controller::BaseController,
+    },
     rpc_service::InstanceRpcService,
-    trust::{JoinRequest, MemberCert, NetworkBootstrap, MemberCertIndexEntry, NetworkLocalId, NetworkStatePayload, SignedNetworkState, TrustDomainPool, TrustDomainRoot, UnsignedNetworkState, from_cbor, to_canonical_cbor, unwrap_armored},
+    trust::{
+        JoinRequest, MemberCert, MemberCertIndexEntry, NetworkBootstrap, NetworkLocalId,
+        NetworkStatePayload, SignedNetworkState, TrustDomainPool, TrustDomainRoot,
+        UnsignedNetworkState, from_cbor, to_canonical_cbor, unwrap_armored,
+    },
 };
 use serde_json::Value;
 use tokio::sync::RwLock;
@@ -33,7 +44,9 @@ pub fn domain_dir(root: &Path, trust_domain_id: &str) -> PathBuf {
 }
 
 pub fn network_dir(root: &Path, trust_domain_id: &str) -> PathBuf {
-    domain_dir(root, trust_domain_id).join("networks").join(NETWORK_LOCAL_ID)
+    domain_dir(root, trust_domain_id)
+        .join("networks")
+        .join(NETWORK_LOCAL_ID)
 }
 
 pub fn create_domain(root: &Path) -> String {
@@ -47,7 +60,11 @@ pub fn create_domain(root: &Path) -> String {
         .arg("--json")
         .output()
         .unwrap();
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     value["trust_domain_id"].as_str().unwrap().to_owned()
 }
@@ -62,7 +79,11 @@ pub fn create_network(root: &Path, trust_domain_id: &str) {
         .arg(NETWORK_LOCAL_ID)
         .output()
         .unwrap();
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 pub fn invite_url(root: &Path, trust_domain_id: &str) -> String {
@@ -76,7 +97,11 @@ pub fn invite_url(root: &Path, trust_domain_id: &str) -> String {
         .arg("tcp://203.0.113.10:11010")
         .output()
         .unwrap();
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
@@ -93,7 +118,11 @@ pub fn accept_invite(root: &Path, invite: &str, device_label: &str) -> JoinReque
         .arg("three-node-e2e")
         .output()
         .unwrap();
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     read_join_request(root, invite)
 }
 
@@ -104,24 +133,28 @@ pub fn read_bootstrap(invite: &str) -> NetworkBootstrap {
 
 pub fn read_join_request(root: &Path, invite: &str) -> JoinRequest {
     let bootstrap = read_bootstrap(invite);
-    let join_path = network_dir(root, &bootstrap.trust_domain_id.to_string()).join("pending_join_request.cbor.pem");
+    let join_path = network_dir(root, &bootstrap.trust_domain_id.to_string())
+        .join("pending_join_request.cbor.pem");
     let armored = std::fs::read_to_string(join_path).unwrap();
     let payload = unwrap_armored(&armored, "PNW-JOIN-REQUEST").unwrap();
     from_cbor(&payload).unwrap()
 }
 
-
 pub fn read_network_state(root: &Path, trust_domain_id: &str) -> SignedNetworkState {
-    let pem = std::fs::read_to_string(network_dir(root, trust_domain_id).join("network_state.cbor.pem")).unwrap();
+    let pem =
+        std::fs::read_to_string(network_dir(root, trust_domain_id).join("network_state.cbor.pem"))
+            .unwrap();
     SignedNetworkState::from_pem(&pem).unwrap()
 }
 
 pub fn trust_pool(root: &Path, trust_domain_id: &str) -> Arc<RwLock<TrustDomainPool>> {
     let domain = domain_dir(root, trust_domain_id);
-    let root = TrustDomainRoot::load_from_file(&domain.join("sk_root.age"), ROOT_PASSPHRASE).unwrap();
+    let root =
+        TrustDomainRoot::load_from_file(&domain.join("sk_root.age"), ROOT_PASSPHRASE).unwrap();
     let mut pool = TrustDomainPool::new();
     pool.add_root(root.public_key().into());
-    pool.apply_network_state(read_network_state(root_parent(&domain), trust_domain_id)).unwrap();
+    pool.apply_network_state(read_network_state(root_parent(&domain), trust_domain_id))
+        .unwrap();
     Arc::new(RwLock::new(pool))
 }
 
@@ -190,12 +223,21 @@ pub async fn approve_join(instance: &Instance, jr: &JoinRequest) -> MemberCert {
 }
 
 pub fn write_member_cert(root: &Path, trust_domain_id: &str, cert: &MemberCert) {
-    std::fs::write(network_dir(root, trust_domain_id).join("member_cert.pem"), cert.to_pem()).unwrap();
+    std::fs::write(
+        network_dir(root, trust_domain_id).join("member_cert.pem"),
+        cert.to_pem(),
+    )
+    .unwrap();
 }
 
-pub fn rewrite_network_state_with_members(root: &Path, trust_domain_id: &str, certs: &[MemberCert]) {
+pub fn rewrite_network_state_with_members(
+    root: &Path,
+    trust_domain_id: &str,
+    certs: &[MemberCert],
+) {
     let domain = domain_dir(root, trust_domain_id);
-    let root_key = TrustDomainRoot::load_from_file(&domain.join("sk_root.age"), ROOT_PASSPHRASE).unwrap();
+    let root_key =
+        TrustDomainRoot::load_from_file(&domain.join("sk_root.age"), ROOT_PASSPHRASE).unwrap();
     let current = read_network_state(root, trust_domain_id);
     let payload = NetworkStatePayload {
         member_cert_index: certs
@@ -219,7 +261,11 @@ pub fn rewrite_network_state_with_members(root: &Path, trust_domain_id: &str, ce
         payload,
     }
     .sign(&root_key);
-    std::fs::write(network_dir(root, trust_domain_id).join("network_state.cbor.pem"), state.to_pem()).unwrap();
+    std::fs::write(
+        network_dir(root, trust_domain_id).join("network_state.cbor.pem"),
+        state.to_pem(),
+    )
+    .unwrap();
 }
 
 pub fn revoke_member(root: &Path, trust_domain_id: &str, cert: &MemberCert) {
@@ -235,13 +281,19 @@ pub fn revoke_member(root: &Path, trust_domain_id: &str, cert: &MemberCert) {
         .arg("removed")
         .output()
         .unwrap();
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
-
 
 pub fn assert_member_matches_join(cert: &MemberCert, jr: &JoinRequest, device_label: &str) {
     assert_eq!(cert.details.trust_domain_id, jr.trust_domain_id);
-    assert_eq!(cert.details.network_local_id, NetworkLocalId::try_from_str(NETWORK_LOCAL_ID).unwrap());
+    assert_eq!(
+        cert.details.network_local_id,
+        NetworkLocalId::try_from_str(NETWORK_LOCAL_ID).unwrap()
+    );
     assert_eq!(cert.details.device_pk.to_bytes(), jr.applicant_pk.0);
     assert_eq!(cert.details.device_label, device_label);
     jr.verify_self_signature().unwrap();

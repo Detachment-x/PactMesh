@@ -51,7 +51,8 @@ fn test_noise_msg2_round_trip_with_member_cert_cbor() {
     };
 
     let encoded = msg.encode_to_vec();
-    let decoded = easytier::proto::peer_rpc::PeerConnNoiseMsg2Pb::decode(encoded.as_slice()).unwrap();
+    let decoded =
+        easytier::proto::peer_rpc::PeerConnNoiseMsg2Pb::decode(encoded.as_slice()).unwrap();
 
     assert_eq!(decoded, msg);
 }

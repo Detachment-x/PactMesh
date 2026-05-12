@@ -29,9 +29,18 @@ fn setup_network(root_dir: &Path, version: u64) -> (String, String, MemberCertFi
     let domain_dir = trust_domains_dir(root_dir).join(&domain_id);
     let network_dir = domain_dir.join("networks").join(&network_id);
     std::fs::create_dir_all(&network_dir).unwrap();
-    root.save_to_file(&domain_dir.join("sk_root.age"), "long-enough-pass").unwrap();
-    std::fs::write(domain_dir.join("pk_root.pem"), easytier::trust::wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes())).unwrap();
-    std::fs::write(domain_dir.join("meta.toml"), "label = \"home\"\ncreated_at = \"1\"\ncurve = \"ed25519\"\n").unwrap();
+    root.save_to_file(&domain_dir.join("sk_root.age"), "long-enough-pass")
+        .unwrap();
+    std::fs::write(
+        domain_dir.join("pk_root.pem"),
+        easytier::trust::wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes()),
+    )
+    .unwrap();
+    std::fs::write(
+        domain_dir.join("meta.toml"),
+        "label = \"home\"\ncreated_at = \"1\"\ncurve = \"ed25519\"\n",
+    )
+    .unwrap();
 
     let fp = fingerprint(7);
     let acl = AclPolicy {
@@ -62,7 +71,13 @@ fn setup_network(root_dir: &Path, version: u64) -> (String, String, MemberCertFi
     (domain_id, network_id, fp)
 }
 
-fn run_revoke(root: &Path, domain_id: &str, network_id: &str, fp: MemberCertFingerprint, extra: &[&str]) -> std::process::Output {
+fn run_revoke(
+    root: &Path,
+    domain_id: &str,
+    network_id: &str,
+    fp: MemberCertFingerprint,
+    extra: &[&str],
+) -> std::process::Output {
     let mut cmd = cli();
     cmd.env("XDG_CONFIG_HOME", config_home(root))
         .env("PNW_ROOT_PASSPHRASE", "long-enough-pass")
@@ -94,13 +109,28 @@ fn test_revoke_basic() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, fp) = setup_network(dir.path(), 1);
 
-    let output = run_revoke(dir.path(), &domain_id, &network_id, fp, &["--reason", "removed", "--note", "left"]);
+    let output = run_revoke(
+        dir.path(),
+        &domain_id,
+        &network_id,
+        fp,
+        &["--reason", "removed", "--note", "left"],
+    );
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let state = read_state(dir.path(), &domain_id, &network_id);
     assert_eq!(state.details.payload.revoked_certs.len(), 1);
     assert_eq!(state.details.payload.revoked_certs[0].cert_fingerprint, fp);
-    assert_eq!(state.details.payload.revoked_certs[0].reason_note.as_deref(), Some("left"));
+    assert_eq!(
+        state.details.payload.revoked_certs[0]
+            .reason_note
+            .as_deref(),
+        Some("left")
+    );
 }
 
 #[test]
@@ -120,9 +150,16 @@ fn test_revoke_version_monotonic() {
     let (domain_id, network_id, fp) = setup_network(dir.path(), 4);
 
     let output = run_revoke(dir.path(), &domain_id, &network_id, fp, &[]);
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-    let network_dir = trust_domains_dir(dir.path()).join(&domain_id).join("networks").join(&network_id);
+    let network_dir = trust_domains_dir(dir.path())
+        .join(&domain_id)
+        .join("networks")
+        .join(&network_id);
     assert!(network_dir.join("network_state.v4.cbor.pem").is_file());
     let state = read_state(dir.path(), &domain_id, &network_id);
     assert_eq!(state.details.version, 5);
@@ -134,8 +171,15 @@ fn test_revoke_reason_code_default_unspecified() {
     let (domain_id, network_id, fp) = setup_network(dir.path(), 1);
 
     let output = run_revoke(dir.path(), &domain_id, &network_id, fp, &[]);
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let state = read_state(dir.path(), &domain_id, &network_id);
-    assert_eq!(state.details.payload.revoked_certs[0].reason_code, RevocationReason::Unspecified);
+    assert_eq!(
+        state.details.payload.revoked_certs[0].reason_code,
+        RevocationReason::Unspecified
+    );
 }

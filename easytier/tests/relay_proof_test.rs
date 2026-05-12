@@ -2,24 +2,26 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine as _, prelude::BASE64_STANDARD};
-use ed25519_dalek::VerifyingKey;
 use easytier::common::config::{ConfigLoader, NetworkIdentity, TomlConfigLoader};
 use easytier::common::error::Error;
 use easytier::common::global_ctx::{GlobalCtx, NetworkIdentity as GlobalNetworkIdentity};
 use easytier::common::trust_context::TrustDomainContext;
 use easytier::peers::create_packet_recv_chan;
-use easytier::peers::foreign_network_manager::{ForeignNetworkManager, GlobalForeignNetworkAccessor};
+use easytier::peers::foreign_network_manager::{
+    ForeignNetworkManager, GlobalForeignNetworkAccessor,
+};
 use easytier::peers::peer_conn::PeerConn;
 use easytier::peers::peer_session::PeerSessionStore;
 use easytier::proto::common::SecureModeConfig;
 use easytier::proto::peer_rpc::{PeerConnNoiseMsg1Pb, PeerConnNoiseMsg2Pb, PeerConnNoiseMsg3Pb};
 use easytier::trust::{
     BorrowedRelayProof, Capabilities, MemberCert, NetworkLocalId, NetworkStatePayload,
-    RelayCapabilities, RelayGrantEntry, RelayGrantTable, SignKey, TrustDomainPool,
-    TrustDomainRoot, UnsignedMemberCert, UnsignedNetworkState, from_cbor, to_canonical_cbor,
+    RelayCapabilities, RelayGrantEntry, RelayGrantTable, SignKey, TrustDomainPool, TrustDomainRoot,
+    UnsignedMemberCert, UnsignedNetworkState, from_cbor, to_canonical_cbor,
 };
 use easytier::tunnel::packet_def::{PacketType, ZCPacket};
 use easytier::tunnel::ring::create_ring_tunnel_pair;
+use ed25519_dalek::VerifyingKey;
 use futures::{SinkExt, StreamExt};
 use prost::Message;
 use rand::rngs::OsRng;
@@ -45,11 +47,7 @@ fn make_secure_mode_config(private: &x25519_dalek::StaticSecret) -> SecureModeCo
     }
 }
 
-fn sample_member_cert(
-    root: &TrustDomainRoot,
-    sk_self: &SignKey,
-    device_label: &str,
-) -> MemberCert {
+fn sample_member_cert(root: &TrustDomainRoot, sk_self: &SignKey, device_label: &str) -> MemberCert {
     let device_pk =
         VerifyingKey::from_bytes(&sk_self.verify_key().0).expect("verify key bytes valid");
     let now = now_unix();
@@ -71,7 +69,10 @@ fn sample_member_cert(
     .sign(root)
 }
 
-fn sample_network_state(root: &TrustDomainRoot, cert: &MemberCert) -> easytier::trust::SignedNetworkState {
+fn sample_network_state(
+    root: &TrustDomainRoot,
+    cert: &MemberCert,
+) -> easytier::trust::SignedNetworkState {
     UnsignedNetworkState {
         trust_domain_id: root.id(),
         network_local_id: cert.details.network_local_id.clone(),
@@ -87,11 +88,14 @@ fn sample_network_state(root: &TrustDomainRoot, cert: &MemberCert) -> easytier::
     .sign(root)
 }
 
-fn trust_pool_with_entries(entries: &[(&TrustDomainRoot, &MemberCert)]) -> Arc<RwLock<TrustDomainPool>> {
+fn trust_pool_with_entries(
+    entries: &[(&TrustDomainRoot, &MemberCert)],
+) -> Arc<RwLock<TrustDomainPool>> {
     let mut pool = TrustDomainPool::new();
     for (root, cert) in entries {
         pool.add_root(root.public_key().into());
-        pool.apply_network_state(sample_network_state(root, cert)).unwrap();
+        pool.apply_network_state(sample_network_state(root, cert))
+            .unwrap();
     }
     Arc::new(RwLock::new(pool))
 }
@@ -151,7 +155,11 @@ async fn run_noise_client_with_proof(
     let mut out = vec![0u8; 4096];
     let out_len = hs.write_message(&payload, &mut out).unwrap();
     let mut pkt = ZCPacket::new_with_payload(&out[..out_len]);
-    pkt.fill_peer_manager_hdr(client_peer_id, server_peer_id, PacketType::NoiseHandshakeMsg1 as u8);
+    pkt.fill_peer_manager_hdr(
+        client_peer_id,
+        server_peer_id,
+        PacketType::NoiseHandshakeMsg1 as u8,
+    );
     sink.send(pkt).await.unwrap();
 
     let msg2_pkt = stream.next().await.unwrap().unwrap();
@@ -169,7 +177,11 @@ async fn run_noise_client_with_proof(
     let mut out = vec![0u8; 4096];
     let out_len = hs.write_message(&payload, &mut out).unwrap();
     let mut pkt = ZCPacket::new_with_payload(&out[..out_len]);
-    pkt.fill_peer_manager_hdr(client_peer_id, server_peer_id, PacketType::NoiseHandshakeMsg3 as u8);
+    pkt.fill_peer_manager_hdr(
+        client_peer_id,
+        server_peer_id,
+        PacketType::NoiseHandshakeMsg3 as u8,
+    );
     sink.send(pkt).await.unwrap();
 }
 
@@ -222,7 +234,10 @@ struct EmptyAccessor;
 
 #[async_trait::async_trait]
 impl GlobalForeignNetworkAccessor for EmptyAccessor {
-    async fn list_global_foreign_peer(&self, _network_identity: &GlobalNetworkIdentity) -> Vec<u32> {
+    async fn list_global_foreign_peer(
+        &self,
+        _network_identity: &GlobalNetworkIdentity,
+    ) -> Vec<u32> {
         Vec::new()
     }
 }
@@ -340,9 +355,10 @@ async fn test_foreign_network_manager_admits_borrowed_client() {
     };
 
     let allowed_pool = trust_pool_with_entries(&[(&client_root, &client_cert)]);
-    let server_conn = perform_borrowed_handshake(Some(proof.clone()), client_cert.clone(), allowed_pool)
-        .await
-        .unwrap();
+    let server_conn =
+        perform_borrowed_handshake(Some(proof.clone()), client_cert.clone(), allowed_pool)
+            .await
+            .unwrap();
 
     let config = TomlConfigLoader::default();
     config.set_network_identity(NetworkIdentity::new("relay-net".to_owned()));
@@ -374,5 +390,8 @@ async fn test_foreign_network_manager_admits_borrowed_client() {
     );
     let err = denied_mgr.add_peer_conn(denied_conn).await.unwrap_err();
     let err_str = err.to_string();
-    assert!(err_str.contains("not permitted"), "unexpected error: {err_str}");
+    assert!(
+        err_str.contains("not permitted"),
+        "unexpected error: {err_str}"
+    );
 }

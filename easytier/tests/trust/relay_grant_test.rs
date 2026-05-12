@@ -64,5 +64,8 @@ fn test_permits_capabilities_relay_only_vs_holepunch_only() {
     ]);
 
     assert_eq!(table.permits(&tdid(1), 1_700_000_000), Some(&relay_only));
-    assert_eq!(table.permits(&tdid(2), 1_700_000_000), Some(&holepunch_only));
+    assert_eq!(
+        table.permits(&tdid(2), 1_700_000_000),
+        Some(&holepunch_only)
+    );
 }

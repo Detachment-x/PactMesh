@@ -8,7 +8,9 @@ use url::Url;
 
 use crate::common::trust_context::{PK_ROOT_PEM_LABEL, load_root_public_key};
 
-use super::{NetworkLocalId, TrustDomainId, from_cbor, to_canonical_cbor, unwrap_armored, wrap_armored};
+use super::{
+    NetworkLocalId, TrustDomainId, from_cbor, to_canonical_cbor, unwrap_armored, wrap_armored,
+};
 
 const BOOTSTRAP_PEM_LABEL: &str = "PNW-NETWORK-BOOTSTRAP";
 const BOOTSTRAP_URL_SCHEME: &str = "privatenetwork";
@@ -54,7 +56,8 @@ impl NetworkBootstrap {
     pub fn from_pem(text: &str) -> Result<Self, BootstrapError> {
         let payload = unwrap_armored(text, BOOTSTRAP_PEM_LABEL)
             .map_err(|err| BootstrapError::Pem(err.to_string()))?;
-        let bootstrap: Self = from_cbor(&payload).map_err(|err| BootstrapError::Cbor(err.to_string()))?;
+        let bootstrap: Self =
+            from_cbor(&payload).map_err(|err| BootstrapError::Cbor(err.to_string()))?;
         bootstrap.verify_self_consistency()?;
         Ok(bootstrap)
     }
@@ -94,7 +97,9 @@ impl NetworkBootstrap {
 
     pub fn from_url(url: &Url) -> Result<Self, BootstrapError> {
         if url.scheme() != BOOTSTRAP_URL_SCHEME || url.host_str() != Some(BOOTSTRAP_URL_HOST) {
-            return Err(BootstrapError::InvalidUrl("unsupported bootstrap URL".to_owned()));
+            return Err(BootstrapError::InvalidUrl(
+                "unsupported bootstrap URL".to_owned(),
+            ));
         }
 
         let mut td = None;
@@ -110,10 +115,10 @@ impl NetworkBootstrap {
                 "td" => td = Some(parse_trust_domain_id(&value)?),
                 "pk" => pk = Some(parse_verifying_key(&value)?),
                 "n" => {
-                    network_local_id = Some(
-                        NetworkLocalId::try_from_str(&value)
-                            .map_err(|err| BootstrapError::InvalidNetworkLocalId(err.to_string()))?,
-                    )
+                    network_local_id =
+                        Some(NetworkLocalId::try_from_str(&value).map_err(|err| {
+                            BootstrapError::InvalidNetworkLocalId(err.to_string())
+                        })?)
                 }
                 "ep" => bootstrap_seeds = parse_seed_list(&value)?,
                 "label" => trust_domain_label = Some(value.into_owned()),
@@ -124,7 +129,8 @@ impl NetworkBootstrap {
         }
 
         let bootstrap = Self {
-            trust_domain_id: td.ok_or_else(|| BootstrapError::InvalidUrl("missing td".to_owned()))?,
+            trust_domain_id: td
+                .ok_or_else(|| BootstrapError::InvalidUrl("missing td".to_owned()))?,
             pk_root: pk.ok_or_else(|| BootstrapError::InvalidUrl("missing pk".to_owned()))?,
             network_local_id: network_local_id
                 .ok_or_else(|| BootstrapError::InvalidUrl("missing n".to_owned()))?,
@@ -163,23 +169,27 @@ impl NetworkBootstrap {
         std::fs::create_dir_all(domain_dir).map_err(|err| BootstrapError::Io(err.to_string()))?;
         let pk_root_path = domain_dir.join("pk_root.pem");
         if pk_root_path.exists() {
-            let existing = load_root_public_key(&pk_root_path)
-                .map_err(|err| BootstrapError::Io(format!("failed to read existing pk_root.pem: {err}")))?;
+            let existing = load_root_public_key(&pk_root_path).map_err(|err| {
+                BootstrapError::Io(format!("failed to read existing pk_root.pem: {err}"))
+            })?;
             if existing.as_bytes() != self.pk_root.as_bytes() {
                 return Err(BootstrapError::PkRootAlreadyExistsAndMismatches);
             }
             return Ok(());
         }
 
-        std::fs::write(&pk_root_path, wrap_armored(PK_ROOT_PEM_LABEL, self.pk_root.as_bytes()))
-            .map_err(|err| BootstrapError::Io(err.to_string()))
+        std::fs::write(
+            &pk_root_path,
+            wrap_armored(PK_ROOT_PEM_LABEL, self.pk_root.as_bytes()),
+        )
+        .map_err(|err| BootstrapError::Io(err.to_string()))
     }
 }
 
 pub fn bootstrap_to_qr_svg(bootstrap: &NetworkBootstrap) -> Result<String, BootstrapError> {
     let url = bootstrap.to_url()?;
-    let code = QrCode::new(url.as_str().as_bytes())
-        .map_err(|err| BootstrapError::Qr(err.to_string()))?;
+    let code =
+        QrCode::new(url.as_str().as_bytes()).map_err(|err| BootstrapError::Qr(err.to_string()))?;
     Ok(code
         .render::<qrcode::render::svg::Color>()
         .min_dimensions(256, 256)
@@ -264,8 +274,8 @@ mod url_vec_cbor {
         let mut urls = Vec::with_capacity(len as usize);
         for _ in 0..len {
             let raw = decoder.str()?;
-            let url = Url::parse(raw)
-                .map_err(|err| minicbor::decode::Error::message(err.to_string()))?;
+            let url =
+                Url::parse(raw).map_err(|err| minicbor::decode::Error::message(err.to_string()))?;
             urls.push(url);
         }
         Ok(urls)
@@ -297,7 +307,8 @@ fn parse_seed_list(encoded: &str) -> Result<Vec<Url>, BootstrapError> {
     let bytes = URL_SAFE_NO_PAD
         .decode(encoded)
         .map_err(|err| BootstrapError::InvalidUrl(format!("invalid ep: {err}")))?;
-    let urls: UrlSeedListOwned = from_cbor(&bytes).map_err(|err| BootstrapError::Cbor(err.to_string()))?;
+    let urls: UrlSeedListOwned =
+        from_cbor(&bytes).map_err(|err| BootstrapError::Cbor(err.to_string()))?;
     Ok(urls.items)
 }
 

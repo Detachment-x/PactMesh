@@ -36,7 +36,11 @@ fn test_create_basic_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let output = run_create(dir.path(), "home", "long-enough-pass", false);
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Created trust domain"));
 }
 
@@ -76,7 +80,11 @@ fn test_create_writes_three_files() {
 fn test_create_json_output_parseable() {
     let dir = tempfile::tempdir().unwrap();
     let output = run_create(dir.path(), "json-net", "long-enough-pass", true);
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(value["trust_domain_id"].as_str().unwrap().len() > 8);

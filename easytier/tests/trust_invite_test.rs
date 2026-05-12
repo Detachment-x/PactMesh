@@ -23,7 +23,11 @@ fn create_domain(root: &Path) -> String {
         .arg("--json")
         .output()
         .unwrap();
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     value["trust_domain_id"].as_str().unwrap().to_owned()
 }
@@ -38,7 +42,11 @@ fn create_network(root: &Path, domain_id: &str) {
         .arg("office-net")
         .output()
         .unwrap();
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn setup_domain_with_network(root: &Path) -> String {
@@ -68,7 +76,11 @@ fn test_invite_url_format() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let url = Url::parse(stdout.trim()).unwrap();
     let bootstrap = NetworkBootstrap::from_url(&url).unwrap();
@@ -90,7 +102,11 @@ fn test_invite_qr_format_svg() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("<svg"));
     assert!(stdout.contains("path"));
@@ -112,7 +128,11 @@ fn test_invite_file_format_pem() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let pem = std::fs::read_to_string(out).unwrap();
     assert!(pem.contains("BEGIN PNW-NETWORK-BOOTSTRAP"));
     let bootstrap = NetworkBootstrap::from_pem(&pem).unwrap();
@@ -143,11 +163,21 @@ fn test_invite_multiple_seeds_encoded() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let url = Url::parse(stdout.trim()).unwrap();
     let bootstrap = NetworkBootstrap::from_url(&url).unwrap();
     assert_eq!(bootstrap.bootstrap_seeds.len(), 2);
-    assert_eq!(bootstrap.bootstrap_seeds[0].as_str(), "tcp://203.0.113.10:11010");
-    assert_eq!(bootstrap.bootstrap_seeds[1].as_str(), "udp://198.51.100.2:22020");
+    assert_eq!(
+        bootstrap.bootstrap_seeds[0].as_str(),
+        "tcp://203.0.113.10:11010"
+    );
+    assert_eq!(
+        bootstrap.bootstrap_seeds[1].as_str(),
+        "udp://198.51.100.2:22020"
+    );
 }

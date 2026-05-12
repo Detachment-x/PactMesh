@@ -25,9 +25,9 @@ pub(crate) mod secure_datagram;
 pub mod peer_task;
 
 #[cfg(test)]
-pub mod tests;
-#[cfg(test)]
 mod handshake_trust_tests;
+#[cfg(test)]
+pub mod tests;
 
 use crate::tunnel::packet_def::ZCPacket;
 

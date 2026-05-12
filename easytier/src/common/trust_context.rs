@@ -45,15 +45,15 @@ impl TrustDomainContext {
         network_local_id: &str,
         sk_self_password: &str,
     ) -> Result<Self, LoadError> {
-        let network_local_id =
-            NetworkLocalId::try_from_str(network_local_id).map_err(|_| LoadError::NetworkLocalIdInvalid)?;
+        let network_local_id = NetworkLocalId::try_from_str(network_local_id)
+            .map_err(|_| LoadError::NetworkLocalIdInvalid)?;
         let root_pk = load_root_public_key(&domain_dir.join("pk_root.pem"))?;
         let trust_domain_id = TrustDomainId::from_root_pubkey(&root_pk);
         let network_dir = domain_dir.join("networks").join(network_local_id.as_str());
 
         let member_cert_pem = std::fs::read_to_string(network_dir.join("member_cert.pem"))?;
-        let member_cert =
-            MemberCert::from_pem(&member_cert_pem).map_err(|err| LoadError::InvalidPem(err.to_string()))?;
+        let member_cert = MemberCert::from_pem(&member_cert_pem)
+            .map_err(|err| LoadError::InvalidPem(err.to_string()))?;
         if member_cert.details.network_local_id != network_local_id {
             return Err(LoadError::InvalidPem(
                 "member_cert network_local_id mismatch".to_owned(),
@@ -84,12 +84,11 @@ impl TrustDomainContext {
 
 pub(crate) fn load_root_public_key(path: &Path) -> Result<VerifyingKey, LoadError> {
     let pem = std::fs::read_to_string(path)?;
-    let payload =
-        unwrap_armored(&pem, PK_ROOT_PEM_LABEL).map_err(|err| LoadError::InvalidPem(err.to_string()))?;
-    let bytes: [u8; 32] = payload
-        .as_slice()
-        .try_into()
-        .map_err(|_| LoadError::InvalidPem("pk_root.pem must contain exactly 32 bytes".to_owned()))?;
+    let payload = unwrap_armored(&pem, PK_ROOT_PEM_LABEL)
+        .map_err(|err| LoadError::InvalidPem(err.to_string()))?;
+    let bytes: [u8; 32] = payload.as_slice().try_into().map_err(|_| {
+        LoadError::InvalidPem("pk_root.pem must contain exactly 32 bytes".to_owned())
+    })?;
     VerifyingKey::from_bytes(&bytes).map_err(|err| LoadError::InvalidPem(err.to_string()))
 }
 
@@ -114,7 +113,10 @@ fn load_sk_self_for_network(
         .and_then(Path::parent)
         .ok_or_else(|| LoadError::InvalidPem("domain_dir is not under trust-domains".to_owned()))?;
     load_sk_self(
-        &private_network_dir.join("devices").join(device_id).join("sk_self.age"),
+        &private_network_dir
+            .join("devices")
+            .join(device_id)
+            .join("sk_self.age"),
         password,
     )
 }

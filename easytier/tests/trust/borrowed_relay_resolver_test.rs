@@ -1,12 +1,12 @@
-use ed25519_dalek::SigningKey;
 use easytier::trust::relay_borrow::BorrowedRelayError;
 use easytier::trust::trust_domain_meta::ActiveRelay;
 use easytier::trust::{
     BorrowedRelayProof, BorrowedRelayResolver, Capabilities, MemberCert, NetworkBootstrap,
-    NetworkLocalId, NetworkStatePayload, RelayCapabilities, RelayCandidate, RelayGrantEntry,
+    NetworkLocalId, NetworkStatePayload, RelayCandidate, RelayCapabilities, RelayGrantEntry,
     RelayGrantTable, SignedTrustDomainMeta, TrustDomainId, TrustDomainPool, TrustDomainRoot,
     UnsignedMemberCert, UnsignedNetworkState, UnsignedTrustDomainMeta,
 };
+use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -118,7 +118,6 @@ fn test_validate_timestamp_skew_too_large() {
     );
 }
 
-
 fn sample_trust_domain_meta(
     root: &TrustDomainRoot,
     expires_at: u64,
@@ -177,8 +176,14 @@ fn pool_with_target(
 ) -> TrustDomainPool {
     let mut pool = TrustDomainPool::new();
     pool.add_root(root.public_key().into());
-    pool.apply_network_state(sample_network_state(root)).unwrap();
-    pool.apply_trust_domain_meta(sample_trust_domain_meta(root, relay_expires_at, can_relay_data)).unwrap();
+    pool.apply_network_state(sample_network_state(root))
+        .unwrap();
+    pool.apply_trust_domain_meta(sample_trust_domain_meta(
+        root,
+        relay_expires_at,
+        can_relay_data,
+    ))
+    .unwrap();
     if let Some(bootstrap) = bootstrap {
         pool.apply_network_bootstrap(&root.id(), bootstrap).unwrap();
     }
@@ -236,8 +241,10 @@ fn test_candidates_for_target_without_meta_returns_empty() {
     let root = TrustDomainRoot::generate();
     let mut pool = TrustDomainPool::new();
     pool.add_root(root.public_key().into());
-    pool.apply_network_state(sample_network_state(&root)).unwrap();
-    pool.apply_network_bootstrap(&root.id(), bootstrap_for(&root, "tcp://127.0.0.1:11010")).unwrap();
+    pool.apply_network_state(sample_network_state(&root))
+        .unwrap();
+    pool.apply_network_bootstrap(&root.id(), bootstrap_for(&root, "tcp://127.0.0.1:11010"))
+        .unwrap();
 
     let candidates = BorrowedRelayResolver::candidates_for_target(&root.id(), &pool);
 

@@ -106,13 +106,16 @@ mod cidr_vec_cbor {
                         .map_err(|err| minicbor::decode::Error::message(err.to_string()))?
                 }
                 [6, rest @ ..] if rest.len() == 17 => {
-                    let ip = IpAddr::from(
-                        <[u8; 16]>::try_from(&rest[..16]).expect("length checked"),
-                    );
+                    let ip =
+                        IpAddr::from(<[u8; 16]>::try_from(&rest[..16]).expect("length checked"));
                     IpNet::new(ip, rest[16])
                         .map_err(|err| minicbor::decode::Error::message(err.to_string()))?
                 }
-                _ => return Err(minicbor::decode::Error::message("invalid CIDR helper bytes")),
+                _ => {
+                    return Err(minicbor::decode::Error::message(
+                        "invalid CIDR helper bytes",
+                    ));
+                }
             };
             out.push(cidr);
         }
@@ -201,7 +204,11 @@ pub struct MemberCert {
 
 /// Wire-format wrapper for a 64-byte ed25519 signature.
 #[derive(minicbor::Encode, minicbor::Decode, Debug, Clone, PartialEq, Eq)]
-pub struct SignatureBytes32(#[n(0)] #[cbor(with = "minicbor::bytes")] pub Vec<u8>);
+pub struct SignatureBytes32(
+    #[n(0)]
+    #[cbor(with = "minicbor::bytes")]
+    pub Vec<u8>,
+);
 
 impl From<SignatureBytes> for SignatureBytes32 {
     fn from(s: SignatureBytes) -> Self {

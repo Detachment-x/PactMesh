@@ -23,12 +23,39 @@ fn fingerprint(byte: u8) -> MemberCertFingerprint {
     MemberCertFingerprint([byte; 32])
 }
 
-fn write_state(root_dir: &Path, root: &TrustDomainRoot, domain_id: &str, network_id: &str, state: SignedNetworkState) {
-    let network_dir = trust_domains_dir(root_dir).join(domain_id).join("networks").join(network_id);
+fn write_state(
+    root_dir: &Path,
+    root: &TrustDomainRoot,
+    domain_id: &str,
+    network_id: &str,
+    state: SignedNetworkState,
+) {
+    let network_dir = trust_domains_dir(root_dir)
+        .join(domain_id)
+        .join("networks")
+        .join(network_id);
     std::fs::create_dir_all(&network_dir).unwrap();
-    root.save_to_file(&trust_domains_dir(root_dir).join(domain_id).join("sk_root.age"), "long-enough-pass").unwrap();
-    std::fs::write(trust_domains_dir(root_dir).join(domain_id).join("pk_root.pem"), easytier::trust::wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes())).unwrap();
-    std::fs::write(trust_domains_dir(root_dir).join(domain_id).join("meta.toml"), "label = \"home\"\ncreated_at = \"1\"\ncurve = \"ed25519\"\n").unwrap();
+    root.save_to_file(
+        &trust_domains_dir(root_dir)
+            .join(domain_id)
+            .join("sk_root.age"),
+        "long-enough-pass",
+    )
+    .unwrap();
+    std::fs::write(
+        trust_domains_dir(root_dir)
+            .join(domain_id)
+            .join("pk_root.pem"),
+        easytier::trust::wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes()),
+    )
+    .unwrap();
+    std::fs::write(
+        trust_domains_dir(root_dir)
+            .join(domain_id)
+            .join("meta.toml"),
+        "label = \"home\"\ncreated_at = \"1\"\ncurve = \"ed25519\"\n",
+    )
+    .unwrap();
     std::fs::write(network_dir.join("network_state.cbor.pem"), state.to_pem()).unwrap();
 }
 
@@ -93,14 +120,33 @@ fn test_disable_basic() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, fp) = setup_network(dir.path());
 
-    let output = run_trust(dir.path(), &["disable", &domain_id, &network_id, &fp.to_string(), "--note", "maintenance"]);
+    let output = run_trust(
+        dir.path(),
+        &[
+            "disable",
+            &domain_id,
+            &network_id,
+            &fp.to_string(),
+            "--note",
+            "maintenance",
+        ],
+    );
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let state = read_state(dir.path(), &domain_id, &network_id);
     assert_eq!(state.details.version, 2);
     assert_eq!(state.details.payload.disabled_certs.len(), 1);
     assert_eq!(state.details.payload.disabled_certs[0].cert_fingerprint, fp);
-    assert_eq!(state.details.payload.disabled_certs[0].reason_note.as_deref(), Some("maintenance"));
+    assert_eq!(
+        state.details.payload.disabled_certs[0]
+            .reason_note
+            .as_deref(),
+        Some("maintenance")
+    );
 }
 
 #[test]
@@ -108,22 +154,53 @@ fn test_disable_with_until() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, fp) = setup_network(dir.path());
 
-    let output = run_trust(dir.path(), &["disable", &domain_id, &network_id, &fp.to_string(), "--until", "2030-01-01T00:00:00Z"]);
+    let output = run_trust(
+        dir.path(),
+        &[
+            "disable",
+            &domain_id,
+            &network_id,
+            &fp.to_string(),
+            "--until",
+            "2030-01-01T00:00:00Z",
+        ],
+    );
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let state = read_state(dir.path(), &domain_id, &network_id);
-    assert_eq!(state.details.payload.disabled_certs[0].expected_until, Some(1_893_456_000));
+    assert_eq!(
+        state.details.payload.disabled_certs[0].expected_until,
+        Some(1_893_456_000)
+    );
 }
 
 #[test]
 fn test_enable_restores() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, fp) = setup_network(dir.path());
-    assert!(run_trust(dir.path(), &["disable", &domain_id, &network_id, &fp.to_string()]).status.success());
+    assert!(
+        run_trust(
+            dir.path(),
+            &["disable", &domain_id, &network_id, &fp.to_string()]
+        )
+        .status
+        .success()
+    );
 
-    let output = run_trust(dir.path(), &["enable", &domain_id, &network_id, &fp.to_string()]);
+    let output = run_trust(
+        dir.path(),
+        &["enable", &domain_id, &network_id, &fp.to_string()],
+    );
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let state = read_state(dir.path(), &domain_id, &network_id);
     assert_eq!(state.details.payload.disabled_certs.len(), 0);
     assert_eq!(state.details.version, 3);
@@ -134,7 +211,10 @@ fn test_enable_without_prior_disable_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, fp) = setup_network(dir.path());
 
-    let output = run_trust(dir.path(), &["enable", &domain_id, &network_id, &fp.to_string()]);
+    let output = run_trust(
+        dir.path(),
+        &["enable", &domain_id, &network_id, &fp.to_string()],
+    );
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("not disabled"));
@@ -144,14 +224,27 @@ fn test_enable_without_prior_disable_rejected() {
 fn test_disable_already_revoked_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, fp) = setup_network(dir.path());
-    assert!(run_trust(dir.path(), &["revoke", &domain_id, &network_id, &fp.to_string()]).status.success());
+    assert!(
+        run_trust(
+            dir.path(),
+            &["revoke", &domain_id, &network_id, &fp.to_string()]
+        )
+        .status
+        .success()
+    );
 
-    let output = run_trust(dir.path(), &["disable", &domain_id, &network_id, &fp.to_string()]);
+    let output = run_trust(
+        dir.path(),
+        &["disable", &domain_id, &network_id, &fp.to_string()],
+    );
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("permanently revoked"));
     let state = read_state(dir.path(), &domain_id, &network_id);
-    assert_eq!(state.details.payload.revoked_certs[0].reason_code, RevocationReason::Unspecified);
+    assert_eq!(
+        state.details.payload.revoked_certs[0].reason_code,
+        RevocationReason::Unspecified
+    );
 }
 
 #[test]
@@ -159,9 +252,22 @@ fn test_disable_json_output() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, fp) = setup_network(dir.path());
 
-    let output = run_trust(dir.path(), &["disable", &domain_id, &network_id, &fp.to_string(), "--json"]);
+    let output = run_trust(
+        dir.path(),
+        &[
+            "disable",
+            &domain_id,
+            &network_id,
+            &fp.to_string(),
+            "--json",
+        ],
+    );
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["fingerprint"], fp.to_string());
     assert_eq!(value["old_version"], 1);

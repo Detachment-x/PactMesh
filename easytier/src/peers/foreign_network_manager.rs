@@ -38,8 +38,8 @@ use crate::{
         common::LimiterConfig,
         peer_rpc::{DirectConnectorRpcServer, PeerIdentityType},
     },
-    tunnel::packet_def::{PacketType, ZCPacket},
     trust::RelayGrantTable,
+    tunnel::packet_def::{PacketType, ZCPacket},
     use_global_var,
 };
 
@@ -1056,9 +1056,8 @@ pub mod tests {
         network: &str,
     ) -> Arc<PeerManager> {
         let (s, _r) = create_packet_recv_chan();
-        let global_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
-            network.to_string(),
-        )));
+        let global_ctx =
+            get_mock_global_ctx_with_network(Some(NetworkIdentity::new(network.to_string())));
         set_secure_mode_cfg(&global_ctx, true);
         let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, global_ctx, s, None));
         replace_stun_info_collector(peer_mgr.clone(), NatType::Unknown);
@@ -1074,7 +1073,8 @@ pub mod tests {
         network: &str,
     ) -> Arc<PeerManager> {
         let (s, _r) = create_packet_recv_chan();
-        let global_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(network.to_string())));
+        let global_ctx =
+            get_mock_global_ctx_with_network(Some(NetworkIdentity::new(network.to_string())));
         set_secure_mode_cfg(&global_ctx, true);
         let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, global_ctx, s, None));
         replace_stun_info_collector(peer_mgr.clone(), NatType::Unknown);
@@ -1527,7 +1527,8 @@ pub mod tests {
 
     #[tokio::test]
     async fn credential_pubkey_trust_requires_ospf_credential_source() {
-        let global_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("__access__".to_string())));
+        let global_ctx =
+            get_mock_global_ctx_with_network(Some(NetworkIdentity::new("__access__".to_string())));
         let foreign_network = NetworkIdentity::new("net1".to_string());
         let (pm_packet_sender, _pm_packet_recv) = create_packet_recv_chan();
         let entry = ForeignNetworkEntry::new(

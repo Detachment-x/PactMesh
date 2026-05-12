@@ -281,7 +281,6 @@ impl ManualConnectorManager {
         })
     }
 
-
     fn load_target_bootstrap(path: &std::path::Path) -> Result<NetworkBootstrap, Error> {
         let bytes = std::fs::read(path).map_err(|err| Error::AnyhowError(err.into()))?;
         if let Ok(text) = std::str::from_utf8(&bytes)
@@ -354,11 +353,10 @@ impl ManualConnectorManager {
             ))
         })?;
 
-        let trust_ctx = data
-            .global_ctx
-            .get_trust_context()
-            .await
-            .ok_or_else(|| Error::AnyhowError(anyhow::anyhow!("trust context not configured")))?;
+        let trust_ctx =
+            data.global_ctx.get_trust_context().await.ok_or_else(|| {
+                Error::AnyhowError(anyhow::anyhow!("trust context not configured"))
+            })?;
         let borrowed_proof = BorrowedRelayProof {
             trust_domain_id: trust_ctx.trust_domain_id,
             member_cert: trust_ctx.member_cert.clone(),

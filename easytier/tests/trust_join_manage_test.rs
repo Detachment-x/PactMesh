@@ -10,22 +10,25 @@ use easytier::{
     },
     rpc_service::InstanceRpcService,
     trust::{
-        JoinRequest, MemberCert, NetworkLocalId, NetworkStatePayload, SignKey, SignedNetworkState,
-        TrustDomainPool, TrustDomainRoot, UnsignedNetworkState, from_cbor, to_canonical_cbor,
-        wrap_armored,
+        Capabilities, JoinRequest, MemberCert, NetworkLocalId, NetworkStatePayload, SignKey,
+        SignedNetworkState, TrustDomainPool, TrustDomainRoot, UnsignedMemberCert,
+        UnsignedNetworkState, from_cbor, to_canonical_cbor, wrap_armored,
     },
 };
 use tokio::sync::RwLock;
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 const NETWORK_NAME: &str = "trust-join-manage-test";
 const NETWORK_LOCAL_ID: &str = "office-net";
 const ROOT_PASSPHRASE: &str = "long-enough-pass";
 
+static ROOT_PASSPHRASE_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
 fn write_root_files(domain_dir: &std::path::Path, root: &TrustDomainRoot) {
     std::fs::create_dir_all(domain_dir).unwrap();
-    root.save_to_file(&domain_dir.join("sk_root.age"), ROOT_PASSPHRASE).unwrap();
+    root.save_to_file(&domain_dir.join("sk_root.age"), ROOT_PASSPHRASE)
+        .unwrap();
     std::fs::write(
         domain_dir.join("pk_root.pem"),
         wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes()),
@@ -80,9 +83,37 @@ fn join_request(root: &TrustDomainRoot) -> JoinRequest {
 }
 
 fn root_capable_instance(domain_dir: &std::path::Path, root: &TrustDomainRoot) -> Instance {
+    let _guard = ROOT_PASSPHRASE_ENV_LOCK.lock().unwrap();
     // SAFETY: all tests in this file use the same passphrase value; Instance construction reads it synchronously.
     unsafe { std::env::set_var("PNW_ROOT_PASSPHRASE", ROOT_PASSPHRASE) };
     Instance::new_with_trust_pool(test_config(domain_dir), Some(test_pool(root)))
+}
+
+fn root_metadata_only_instance(domain_dir: &std::path::Path, root: &TrustDomainRoot) -> Instance {
+    let _guard = ROOT_PASSPHRASE_ENV_LOCK.lock().unwrap();
+    // SAFETY: Instance construction reads this environment variable synchronously.
+    unsafe { std::env::set_var("PNW_ROOT_PASSPHRASE", "wrong-root-passphrase") };
+    Instance::new_with_trust_pool(test_config(domain_dir), Some(test_pool(root)))
+}
+
+fn member_cert_for_request(root: &TrustDomainRoot, jr: &JoinRequest) -> MemberCert {
+    let device_pk = ed25519_dalek::VerifyingKey::from_bytes(&jr.applicant_pk.0).unwrap();
+    UnsignedMemberCert {
+        trust_domain_id: jr.trust_domain_id,
+        network_local_id: jr.network_local_id.clone(),
+        device_pk,
+        device_label: jr.device_label.clone(),
+        not_before: 1,
+        expires_at: 4_102_444_800,
+        capabilities: Capabilities {
+            can_relay_data: false,
+            can_relay_control: false,
+            can_proxy_subnet: Vec::new(),
+        },
+        network_state_version_ref: 1,
+        hostname: None,
+    }
+    .sign(root)
 }
 
 async fn submit(instance: &Instance, jr: &JoinRequest) {
@@ -206,6 +237,7 @@ async fn test_approve_join_request_via_rpc_signs_and_returns_cert() {
                 trust_domain_id: root.id().0.to_vec(),
                 network_local_id: NETWORK_LOCAL_ID.to_owned(),
                 applicant_pk: jr.applicant_pk.0.to_vec(),
+                member_cert_cbor: None,
             },
         )
         .await
@@ -246,6 +278,93 @@ async fn test_approve_join_request_via_rpc_signs_and_returns_cert() {
 }
 
 #[tokio::test]
+async fn test_approve_join_request_accepts_cli_signed_cert_without_daemon_root_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = TrustDomainRoot::generate();
+    write_root_files(dir.path(), &root);
+    let instance = root_metadata_only_instance(dir.path(), &root);
+    let jr = join_request(&root);
+    submit(&instance, &jr).await;
+
+    let supplied_cert = member_cert_for_request(&root, &jr);
+    let api = instance.get_api_rpc_service();
+    let response = api
+        .get_trust_join_manage_service()
+        .approve_join_request(
+            BaseController::default(),
+            ApproveJoinRequestRequest {
+                instance: None,
+                trust_domain_id: root.id().0.to_vec(),
+                network_local_id: NETWORK_LOCAL_ID.to_owned(),
+                applicant_pk: jr.applicant_pk.0.to_vec(),
+                member_cert_cbor: Some(to_canonical_cbor(&supplied_cert)),
+            },
+        )
+        .await
+        .unwrap();
+
+    let returned_cert: MemberCert = from_cbor(&response.member_cert_cbor).unwrap();
+    assert_eq!(returned_cert, supplied_cert);
+
+    let remaining = instance
+        .get_join_forward_service()
+        .unwrap()
+        .pending
+        .lock()
+        .unwrap()
+        .list();
+    assert!(remaining.is_empty(), "approve must dequeue the request");
+
+    let fetched = api
+        .get_trust_join_manage_service()
+        .fetch_pending_member_cert(
+            BaseController::default(),
+            FetchPendingMemberCertRequest {
+                instance: None,
+                trust_domain_id: root.id().0.to_vec(),
+                network_local_id: NETWORK_LOCAL_ID.to_owned(),
+                applicant_pk: jr.applicant_pk.0.to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(fetched.found);
+    let fetched_cert: MemberCert = from_cbor(&fetched.member_cert_cbor).unwrap();
+    assert_eq!(fetched_cert, supplied_cert);
+}
+
+#[tokio::test]
+async fn test_approve_join_request_without_daemon_root_key_rejects_daemon_signing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = TrustDomainRoot::generate();
+    write_root_files(dir.path(), &root);
+    let instance = root_metadata_only_instance(dir.path(), &root);
+    let jr = join_request(&root);
+    submit(&instance, &jr).await;
+
+    let api = instance.get_api_rpc_service();
+    let err = api
+        .get_trust_join_manage_service()
+        .approve_join_request(
+            BaseController::default(),
+            ApproveJoinRequestRequest {
+                instance: None,
+                trust_domain_id: root.id().0.to_vec(),
+                network_local_id: NETWORK_LOCAL_ID.to_owned(),
+                applicant_pk: jr.applicant_pk.0.to_vec(),
+                member_cert_cbor: None,
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string().contains("root signing key is not unlocked"),
+        "got unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
 async fn test_approve_join_request_unknown_applicant_returns_error() {
     let dir = tempfile::tempdir().unwrap();
     let root = TrustDomainRoot::generate();
@@ -262,6 +381,7 @@ async fn test_approve_join_request_unknown_applicant_returns_error() {
                 trust_domain_id: root.id().0.to_vec(),
                 network_local_id: NETWORK_LOCAL_ID.to_owned(),
                 applicant_pk: vec![0xAB; 32],
+                member_cert_cbor: None,
             },
         )
         .await

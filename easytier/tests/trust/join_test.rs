@@ -8,7 +8,9 @@ fn sample_sign_key(seed: u8) -> SignKey {
 fn sample_ids() -> (TrustDomainId, NetworkLocalId) {
     let sk = sample_sign_key(7);
     (
-        TrustDomainId::from_root_pubkey(&ed25519_dalek::VerifyingKey::from_bytes(&sk.verify_key().0).unwrap()),
+        TrustDomainId::from_root_pubkey(
+            &ed25519_dalek::VerifyingKey::from_bytes(&sk.verify_key().0).unwrap(),
+        ),
         NetworkLocalId::try_from_str("office-net").unwrap(),
     )
 }
@@ -46,7 +48,10 @@ fn test_join_request_tampered_field_rejected() {
     );
     request.device_label.push_str("-tampered");
 
-    assert_eq!(request.verify_self_signature(), Err(JoinVerifyError::BadSignature));
+    assert_eq!(
+        request.verify_self_signature(),
+        Err(JoinVerifyError::BadSignature)
+    );
 }
 
 #[test]
@@ -62,7 +67,10 @@ fn test_join_request_wrong_applicant_pk_rejected() {
     );
     request.applicant_pk = sample_sign_key(99).verify_key();
 
-    assert_eq!(request.verify_self_signature(), Err(JoinVerifyError::BadSignature));
+    assert_eq!(
+        request.verify_self_signature(),
+        Err(JoinVerifyError::BadSignature)
+    );
 }
 
 #[test]

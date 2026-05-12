@@ -39,8 +39,14 @@ expires_at = 1800000001
     let trust_domain = config.get_trust_domain().unwrap();
 
     assert_eq!(trust_domain.relay_serving.len(), 2);
-    assert_eq!(trust_domain.relay_serving[0].foreign_root_pk_hex, tdid_hex(1));
-    assert_eq!(trust_domain.relay_serving[1].foreign_root_pk_hex, tdid_hex(2));
+    assert_eq!(
+        trust_domain.relay_serving[0].foreign_root_pk_hex,
+        tdid_hex(1)
+    );
+    assert_eq!(
+        trust_domain.relay_serving[1].foreign_root_pk_hex,
+        tdid_hex(2)
+    );
 }
 
 #[test]
@@ -73,5 +79,10 @@ expires_at = 1800000000
 fn test_default_config_relay_grant_table_is_empty() {
     let config = TomlConfigLoader::new_from_str("").unwrap();
 
-    assert!(config.get_relay_grant_table().permits(&TrustDomainId([9; 32]), 1700000000).is_none());
+    assert!(
+        config
+            .get_relay_grant_table()
+            .permits(&TrustDomainId([9; 32]), 1700000000)
+            .is_none()
+    );
 }

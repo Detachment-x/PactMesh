@@ -1,11 +1,11 @@
 use easytier::proto::peer_rpc::{JoinRequestEnvelope, TrustDomainMetaEnvelope};
+use easytier::trust::trust_domain_meta::OutboundGrant;
 use easytier::trust::{
     ActiveRelay, JoinRequest, NetworkLocalId, RelayCapabilities, SignKey, SignedTrustDomainMeta,
     TrustDomainRoot, UnsignedTrustDomainMeta, WireError, join_request_from_envelope,
-    join_request_to_envelope, to_canonical_cbor,
-    trust_domain_meta_from_envelope, trust_domain_meta_to_envelope,
+    join_request_to_envelope, to_canonical_cbor, trust_domain_meta_from_envelope,
+    trust_domain_meta_to_envelope,
 };
-use easytier::trust::trust_domain_meta::OutboundGrant;
 
 fn vk_from(sk: &SignKey) -> ed25519_dalek::VerifyingKey {
     ed25519_dalek::VerifyingKey::from_bytes(&sk.verify_key().0).unwrap()
@@ -22,7 +22,10 @@ fn relay_caps() -> RelayCapabilities {
     }
 }
 
-fn meta_with_outbound_grants(root: &TrustDomainRoot, grants: Vec<OutboundGrant>) -> SignedTrustDomainMeta {
+fn meta_with_outbound_grants(
+    root: &TrustDomainRoot,
+    grants: Vec<OutboundGrant>,
+) -> SignedTrustDomainMeta {
     let relay_sk = SignKey::generate();
     UnsignedTrustDomainMeta {
         trust_domain_id: root.id(),

@@ -56,6 +56,7 @@ pub struct DisabledCert {
 impl DisabledCert {
     /// Disabled entries are inactive once `expected_until` < `now` (auto-recovery).
     pub fn is_active_at(&self, now: u64) -> bool {
-        self.expected_until.is_none_or(|expected_until| expected_until >= now)
+        self.expected_until
+            .is_none_or(|expected_until| expected_until >= now)
     }
 }

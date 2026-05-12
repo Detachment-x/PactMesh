@@ -60,7 +60,9 @@ PNW_DEVICE_PASSPHRASE='change-me-device-passphrase' \
   --hint 'Alice laptop'
 ```
 
-For an online approval flow, run the daemon/instance with trust services enabled and use the `--online` option on `trust accept-invite`. Without `--online`, the command prepares local device keys and a pending join request artifact that can be submitted later.
+For an online approval flow, run the daemon/instance with trust services enabled and use the `--online` option on `trust accept-invite`. `--online` derives a join-admission endpoint from the invite's `tcp://<reachable-node>:11010` seed as `tcp://<reachable-node>:11011`, so public firewalls must allow `11010/TCP` and `11011/TCP`; the management RPC port `15888` should remain bound to localhost and must not be exposed to new devices or the public Internet. The daemon uses the device key and member certificate for data-plane operation; keep the root passphrase out of the daemon environment, and let management CLI commands unlock `SK_root` only when signing approvals or config changes. Without `--online`, the command prepares local device keys and a pending join request artifact that can be submitted later.
+
+`easytier-core --daemon` means “run the network instance in daemon mode”; it does not fork itself into the background. For manual testing, run it under `nohup ... &`, `systemd`, `screen`, or `tmux`, and redirect logs explicitly.
 
 ## Build And Test
 

@@ -33,16 +33,20 @@ fn sample_policy(reverse_members: bool, reverse_tag_inserts: bool) -> AclPolicy 
         ("db", vec![fingerprint(2), fingerprint(1)]),
         ("ops", vec![fingerprint(5), fingerprint(4)]),
         ("qa", vec![fingerprint(8), fingerprint(7)]),
-        ("server", vec![fingerprint(3), fingerprint(2), fingerprint(1)]),
+        (
+            "server",
+            vec![fingerprint(3), fingerprint(2), fingerprint(1)],
+        ),
         ("vpn", vec![fingerprint(9), fingerprint(6)]),
     ];
 
     let mut tags = BTreeMap::new();
-    let iter: Box<dyn Iterator<Item = &(&'static str, Vec<DeviceFingerprint>)>> = if reverse_tag_inserts {
-        Box::new(member_sets.iter().rev())
-    } else {
-        Box::new(member_sets.iter())
-    };
+    let iter: Box<dyn Iterator<Item = &(&'static str, Vec<DeviceFingerprint>)>> =
+        if reverse_tag_inserts {
+            Box::new(member_sets.iter().rev())
+        } else {
+            Box::new(member_sets.iter())
+        };
     for (name, members) in iter {
         let mut members = members.clone();
         members.sort_unstable();
@@ -58,7 +62,11 @@ fn sample_policy(reverse_members: bool, reverse_tag_inserts: bool) -> AclPolicy 
             src: vec![Selector::Wildcard],
             dst: vec![Selector::Tag(tag("server"))],
             proto: Proto::Tcp,
-            ports: Some(vec![PortSpec::Single(22), PortSpec::Single(80), PortSpec::Single(443)]),
+            ports: Some(vec![
+                PortSpec::Single(22),
+                PortSpec::Single(80),
+                PortSpec::Single(443),
+            ]),
         },
         AclRule {
             action: Action::Accept,
@@ -156,8 +164,14 @@ fn test_tag_name_charset_strict() {
     let valid = TagName::try_from_str("Server.prod_01").unwrap();
     assert_eq!(valid.as_str(), "Server.prod_01");
     assert_eq!(TagName::try_from_str(""), Err(TagNameError::Length(0)));
-    assert_eq!(TagName::try_from_str("bad:name"), Err(TagNameError::Charset(b':')));
-    assert_eq!(TagName::try_from_str("中文"), Err(TagNameError::Charset(0xe4)));
+    assert_eq!(
+        TagName::try_from_str("bad:name"),
+        Err(TagNameError::Charset(b':'))
+    );
+    assert_eq!(
+        TagName::try_from_str("中文"),
+        Err(TagNameError::Charset(0xe4))
+    );
 
     let too_long = "a".repeat(33);
     assert_eq!(
@@ -178,7 +192,8 @@ fn test_acl_policy_round_trip_cbor() {
         rule.dst
             .iter()
             .any(|selector| matches!(selector, Selector::Hostname(_)))
-            || rule.src
+            || rule
+                .src
                 .iter()
                 .any(|selector| matches!(selector, Selector::Hostname(_)))
     }));

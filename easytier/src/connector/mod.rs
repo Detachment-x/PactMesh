@@ -118,8 +118,7 @@ pub async fn create_connector_by_url(
                     let nid = global_ctx.get_network_identity();
                     // FIXME(§10): trust-derived key path; zero-placeholder during transition
                     let wg_psk = String::new();
-                    let wg_config =
-                        WgConfig::new_from_network_identity(&nid.network_name, &wg_psk);
+                    let wg_config = WgConfig::new_from_network_identity(&nid.network_name, &wg_psk);
                     WgTunnelConnector::new(url, wg_config).boxed()
                 }
                 #[cfg(feature = "websocket")]

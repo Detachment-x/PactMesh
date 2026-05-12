@@ -142,7 +142,9 @@ impl TrustDomainRoot {
             .map_err(map_age_decrypt_error)?;
 
         let mut plaintext = Vec::new();
-        reader.read_to_end(&mut plaintext).map_err(|_| UnsealError::BadPassword)?;
+        reader
+            .read_to_end(&mut plaintext)
+            .map_err(|_| UnsealError::BadPassword)?;
 
         if plaintext.len() != ROOT_MAGIC.len() + 32 {
             return Err(UnsealError::BadPassword);

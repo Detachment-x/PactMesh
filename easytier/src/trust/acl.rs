@@ -39,7 +39,11 @@ impl<Ctx> Encode<Ctx> for AclPolicy {
         encoder: &mut Encoder<W>,
         ctx: &mut Ctx,
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
-        let field_count = if self.schema_version == ACL_SCHEMA_VERSION { 3 } else { 4 };
+        let field_count = if self.schema_version == ACL_SCHEMA_VERSION {
+            3
+        } else {
+            4
+        };
         encoder.map(field_count)?;
 
         encoder.u8(1)?;
@@ -95,7 +99,7 @@ impl<'b, Ctx> Decode<'b, Ctx> for AclPolicy {
                 key => {
                     return Err(minicbor::decode::Error::message(format!(
                         "unknown acl policy field {key}"
-                    )))
+                    )));
                 }
             }
         }
@@ -208,7 +212,7 @@ impl<'b, Ctx> Decode<'b, Ctx> for AclRule {
                 key => {
                     return Err(minicbor::decode::Error::message(format!(
                         "unknown acl rule field {key}"
-                    )))
+                    )));
                 }
             }
         }
@@ -527,7 +531,7 @@ impl<'b, Ctx> Decode<'b, Ctx> for Cidr {
             len => {
                 return Err(minicbor::decode::Error::message(format!(
                     "cidr address bytes must be 4 or 16 bytes, got {len}"
-                )))
+                )));
             }
         };
         let prefix_len = decoder.u8()?;
@@ -540,9 +544,9 @@ fn decode_array_len(
     name: &str,
     expected: u64,
 ) -> Result<(), minicbor::decode::Error> {
-    let len = decoder
-        .array()?
-        .ok_or_else(|| minicbor::decode::Error::message(format!("indefinite {name} not supported")))?;
+    let len = decoder.array()?.ok_or_else(|| {
+        minicbor::decode::Error::message(format!("indefinite {name} not supported"))
+    })?;
     if len != expected {
         return Err(minicbor::decode::Error::message(format!(
             "{name} must have {expected} items, got {len}"

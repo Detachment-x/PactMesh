@@ -14,7 +14,14 @@ fn trust_domains_dir(root: &Path) -> std::path::PathBuf {
     config_home(root).join("privateNetwork/trust-domains")
 }
 
-fn write_domain(root: &Path, id: &str, label: &str, created_at: &str, root_holder: bool, networks: &[&str]) {
+fn write_domain(
+    root: &Path,
+    id: &str,
+    label: &str,
+    created_at: &str,
+    root_holder: bool,
+    networks: &[&str],
+) {
     let domain_dir = trust_domains_dir(root).join(id);
     std::fs::create_dir_all(&domain_dir).unwrap();
     std::fs::write(
@@ -46,7 +53,11 @@ fn test_list_empty() {
     let dir = tempfile::tempdir().unwrap();
     let output = run_list(dir.path(), false);
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("(no trust domains)"));
 }
 
@@ -56,7 +67,11 @@ fn test_list_one_domain_table_format() {
     write_domain(dir.path(), "abcdef012345", "home", "123", true, &["lan"]);
 
     let output = run_list(dir.path(), false);
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("trust_domain_id\tlabel\tcreated_at\tnetwork_count\tis_root_holder"));
     assert!(stdout.contains("abcdef01\thome\t123\t1\ttrue"));
@@ -70,7 +85,11 @@ fn test_list_three_domains_with_networks() {
     write_domain(dir.path(), "bbbbbbbb0000", "beta", "2", false, &["n1"]);
 
     let output = run_list(dir.path(), false);
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("aaaaaaaa\talpha\t1\t0\ttrue"));
     assert!(stdout.contains("bbbbbbbb\tbeta\t2\t1\tfalse"));
@@ -80,10 +99,21 @@ fn test_list_three_domains_with_networks() {
 #[test]
 fn test_list_json_format() {
     let dir = tempfile::tempdir().unwrap();
-    write_domain(dir.path(), "abcdef012345", "json", "42", true, &["n1", "n2"]);
+    write_domain(
+        dir.path(),
+        "abcdef012345",
+        "json",
+        "42",
+        true,
+        &["n1", "n2"],
+    );
 
     let output = run_list(dir.path(), true);
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     let rows = value.as_array().unwrap();
     assert_eq!(rows.len(), 1);

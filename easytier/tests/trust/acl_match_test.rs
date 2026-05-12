@@ -43,7 +43,11 @@ fn packet(dst_port: u16, proto: u8) -> PacketTuple {
     }
 }
 
-fn ctx<'a>(peer_fp: &'a DeviceFingerprint, tags: &'a TagsMap, proxy_cidrs: &'a [(DeviceFingerprint, Cidr)]) -> PeerMatchContext<'a> {
+fn ctx<'a>(
+    peer_fp: &'a DeviceFingerprint,
+    tags: &'a TagsMap,
+    proxy_cidrs: &'a [(DeviceFingerprint, Cidr)],
+) -> PeerMatchContext<'a> {
     PeerMatchContext {
         peer_fp,
         tags,
@@ -183,7 +187,12 @@ fn test_decide_port_range_matches_dst_port() {
     };
 
     assert_eq!(
-        decide(&policy, &packet(88, 6), ctx(&src_fp, &tags, &proxy), ctx(&dst_fp, &tags, &proxy)),
+        decide(
+            &policy,
+            &packet(88, 6),
+            ctx(&src_fp, &tags, &proxy),
+            ctx(&dst_fp, &tags, &proxy)
+        ),
         Action::Accept
     );
 }
@@ -208,7 +217,12 @@ fn test_decide_proto_mismatch_falls_back_default() {
     };
 
     assert_eq!(
-        decide(&policy, &packet(53, 6), ctx(&src_fp, &tags, &proxy), ctx(&dst_fp, &tags, &proxy)),
+        decide(
+            &policy,
+            &packet(53, 6),
+            ctx(&src_fp, &tags, &proxy),
+            ctx(&dst_fp, &tags, &proxy)
+        ),
         Action::Drop
     );
 }
@@ -233,7 +247,12 @@ fn test_decide_default_drop_when_no_rule_matches() {
     };
 
     assert_eq!(
-        decide(&policy, &packet(22, 6), ctx(&src_fp, &tags, &proxy), ctx(&dst_fp, &tags, &proxy)),
+        decide(
+            &policy,
+            &packet(22, 6),
+            ctx(&src_fp, &tags, &proxy),
+            ctx(&dst_fp, &tags, &proxy)
+        ),
         Action::Drop
     );
 }
@@ -258,7 +277,12 @@ fn test_decide_default_accept_when_no_rule_matches() {
     };
 
     assert_eq!(
-        decide(&policy, &packet(22, 6), ctx(&src_fp, &tags, &proxy), ctx(&dst_fp, &tags, &proxy)),
+        decide(
+            &policy,
+            &packet(22, 6),
+            ctx(&src_fp, &tags, &proxy),
+            ctx(&dst_fp, &tags, &proxy)
+        ),
         Action::Accept
     );
 }
@@ -315,11 +339,21 @@ fn test_decide_first_match_order_sensitive() {
     };
 
     assert_eq!(
-        decide(&accept_then_drop, &packet, ctx(&src_fp, &tags, &proxy), ctx(&dst_fp, &tags, &proxy)),
+        decide(
+            &accept_then_drop,
+            &packet,
+            ctx(&src_fp, &tags, &proxy),
+            ctx(&dst_fp, &tags, &proxy)
+        ),
         Action::Accept
     );
     assert_eq!(
-        decide(&drop_then_accept, &packet, ctx(&src_fp, &tags, &proxy), ctx(&dst_fp, &tags, &proxy)),
+        decide(
+            &drop_then_accept,
+            &packet,
+            ctx(&src_fp, &tags, &proxy),
+            ctx(&dst_fp, &tags, &proxy)
+        ),
         Action::Drop
     );
 }

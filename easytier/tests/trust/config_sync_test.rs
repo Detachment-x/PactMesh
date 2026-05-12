@@ -1,24 +1,26 @@
 use std::{pin::Pin, sync::Arc, time::Duration};
 
-use ed25519_dalek::VerifyingKey;
 use easytier::{
     common::{PeerId, error::Error as CommonError, new_peer_id},
     peers::peer_rpc::{PeerRpcManager, PeerRpcManagerTransport},
     proto::{
         peer_rpc::{
             ConfigResourceSelector, ConfigSyncRpc, FetchConfigRequest, FetchConfigResponse,
-            NetworkStateKey, PendingCertKey, QueryConfigVersionRequest,
-            QueryConfigVersionResponse, ResourceVersion, config_resource_selector,
+            NetworkStateKey, PendingCertKey, QueryConfigVersionRequest, QueryConfigVersionResponse,
+            ResourceVersion, config_resource_selector,
         },
         rpc_types::{self, controller::BaseController},
     },
     trust::{
-        Capabilities, MemberCert, NetworkLocalId, NetworkStatePayload, SignedNetworkState,
-        SignedTrustDomainMeta, SignKey, TrustDomainPool, TrustDomainRoot, UnsignedMemberCert,
+        Capabilities, MemberCert, NetworkLocalId, NetworkStatePayload, SignKey, SignedNetworkState,
+        SignedTrustDomainMeta, TrustDomainPool, TrustDomainRoot, UnsignedMemberCert,
         UnsignedNetworkState, UnsignedTrustDomainMeta, from_cbor, to_canonical_cbor,
     },
-    tunnel::{Tunnel, ZCPacketSink, ZCPacketStream, packet_def::ZCPacket, ring::create_ring_tunnel_pair},
+    tunnel::{
+        Tunnel, ZCPacketSink, ZCPacketStream, packet_def::ZCPacket, ring::create_ring_tunnel_pair,
+    },
 };
+use ed25519_dalek::VerifyingKey;
 use futures::{SinkExt, StreamExt};
 use pnet::ipnetwork::IpNetwork as IpNet;
 use sha2::{Digest, Sha256};
@@ -50,7 +52,13 @@ impl PeerRpcManagerTransport for MockTransport {
     }
 
     async fn recv(&self) -> Result<ZCPacket, CommonError> {
-        self.stream.lock().await.next().await.unwrap().map_err(Into::into)
+        self.stream
+            .lock()
+            .await
+            .next()
+            .await
+            .unwrap()
+            .map_err(Into::into)
     }
 }
 
@@ -80,7 +88,11 @@ fn sample_member_cert(
     .sign(root)
 }
 
-fn sample_network_state(root: &TrustDomainRoot, cert: &MemberCert, version: u64) -> SignedNetworkState {
+fn sample_network_state(
+    root: &TrustDomainRoot,
+    cert: &MemberCert,
+    version: u64,
+) -> SignedNetworkState {
     UnsignedNetworkState {
         trust_domain_id: root.id(),
         network_local_id: cert.details.network_local_id.clone(),
@@ -124,10 +136,12 @@ fn build_pool(
 
 fn state_selector(root: &TrustDomainRoot) -> ConfigResourceSelector {
     ConfigResourceSelector {
-        selector: Some(config_resource_selector::Selector::NetworkState(NetworkStateKey {
-            trust_domain_id: root.id().0.to_vec(),
-            network_local_id: NETWORK_LOCAL_ID.to_owned(),
-        })),
+        selector: Some(config_resource_selector::Selector::NetworkState(
+            NetworkStateKey {
+                trust_domain_id: root.id().0.to_vec(),
+                network_local_id: NETWORK_LOCAL_ID.to_owned(),
+            },
+        )),
     }
 }
 
@@ -141,11 +155,13 @@ fn meta_selector(root: &TrustDomainRoot) -> ConfigResourceSelector {
 
 fn pending_selector(cert: &MemberCert) -> ConfigResourceSelector {
     ConfigResourceSelector {
-        selector: Some(config_resource_selector::Selector::PendingCertFor(PendingCertKey {
-            trust_domain_id: cert.details.trust_domain_id.0.to_vec(),
-            network_local_id: cert.details.network_local_id.as_str().to_owned(),
-            applicant_pk: cert.details.device_pk.to_bytes().to_vec(),
-        })),
+        selector: Some(config_resource_selector::Selector::PendingCertFor(
+            PendingCertKey {
+                trust_domain_id: cert.details.trust_domain_id.0.to_vec(),
+                network_local_id: cert.details.network_local_id.as_str().to_owned(),
+                applicant_pk: cert.details.device_pk.to_bytes().to_vec(),
+            },
+        )),
     }
 }
 
@@ -234,12 +250,16 @@ async fn test_fetch_network_state_caller_cert_revoked_rejected() {
     let sk_self = SignKey::generate();
     let cert = sample_member_cert(&root, &sk_self, "device-a", 42);
     let mut revoked_state = sample_network_state(&root, &cert, 42);
-    revoked_state.details.payload.revoked_certs.push(easytier::trust::RevokedCert {
-        cert_fingerprint: cert.fingerprint(),
-        revoked_at: CERT_NOT_BEFORE + 10,
-        reason_code: easytier::trust::RevocationReason::Removed,
-        reason_note: None,
-    });
+    revoked_state
+        .details
+        .payload
+        .revoked_certs
+        .push(easytier::trust::RevokedCert {
+            cert_fingerprint: cert.fingerprint(),
+            revoked_at: CERT_NOT_BEFORE + 10,
+            reason_code: easytier::trust::RevocationReason::Removed,
+            reason_note: None,
+        });
     let revoked_state = revoked_state.details.sign(&root);
     let pool = build_pool(&root, Some(revoked_state), None);
     let service = ConfigSyncService::new(pool, NETWORK_NAME.to_owned());
@@ -291,7 +311,11 @@ async fn test_fetch_pending_cert_no_caller_cert_required() {
     let cert = sample_member_cert(&root, &sk_self, "pending-device", 1);
     let pool = build_pool(&root, None, None);
     let service = ConfigSyncService::new(pool, NETWORK_NAME.to_owned());
-    service.pending_cert_cache().lock().unwrap().insert(cert.clone());
+    service
+        .pending_cert_cache()
+        .lock()
+        .unwrap()
+        .insert(cert.clone());
 
     let response = service
         .fetch_config(
@@ -322,10 +346,15 @@ async fn test_pull_loop_advances_local_version() {
     let (server_mgr, client_mgr, server_id, client_id) = rpc_mgr_pair();
     service.register(&server_mgr);
 
-    let client = ConfigSyncClient::new(client_mgr, client_id, client_pool.clone(), NETWORK_NAME.to_owned())
-        .with_known_peers(vec![server_id])
-        .with_caller_member_cert(&cert)
-        .with_tick_intervals(Duration::from_millis(20), Duration::from_secs(60));
+    let client = ConfigSyncClient::new(
+        client_mgr,
+        client_id,
+        client_pool.clone(),
+        NETWORK_NAME.to_owned(),
+    )
+    .with_known_peers(vec![server_id])
+    .with_caller_member_cert(&cert)
+    .with_tick_intervals(Duration::from_millis(20), Duration::from_secs(60));
 
     let handle = client.pull_loop();
     tokio::time::sleep(Duration::from_millis(120)).await;
@@ -464,9 +493,14 @@ async fn test_signature_invalid_payload_rejected_after_fetch() {
         NETWORK_NAME,
     );
 
-    let client = ConfigSyncClient::new(client_mgr, client_id, local_pool.clone(), NETWORK_NAME.to_owned())
-        .with_known_peers(vec![server_id])
-        .with_caller_member_cert(&cert);
+    let client = ConfigSyncClient::new(
+        client_mgr,
+        client_id,
+        local_pool.clone(),
+        NETWORK_NAME.to_owned(),
+    )
+    .with_known_peers(vec![server_id])
+    .with_caller_member_cert(&cert);
 
     client.sync_once(false).await.unwrap();
 

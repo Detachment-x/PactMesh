@@ -8,9 +8,8 @@ use crate::{
     peers::peer_rpc::PeerRpcManager,
     proto::{
         peer_rpc::{
-            ConfigResourceSelector, ConfigSyncRpc, ConfigSyncRpcClientFactory,
-            FetchConfigRequest, QueryConfigVersionRequest, ResourceVersion,
-            config_resource_selector,
+            ConfigResourceSelector, ConfigSyncRpc, ConfigSyncRpcClientFactory, FetchConfigRequest,
+            QueryConfigVersionRequest, ResourceVersion, config_resource_selector,
         },
         rpc_types::controller::BaseController,
     },
@@ -179,7 +178,12 @@ impl ConfigSyncClient {
                 let pool = self.trust_pool.read().await;
                 let local = pool.network_state(&trust_domain_id, &network_local_id);
                 Ok(should_fetch_by_version_and_digest(
-                    local.map(|state| (state.details.version, sha256_bytes(&to_canonical_cbor(state)))),
+                    local.map(|state| {
+                        (
+                            state.details.version,
+                            sha256_bytes(&to_canonical_cbor(state)),
+                        )
+                    }),
                     remote.version,
                     &remote.content_digest,
                     force_full_sync,
@@ -190,7 +194,8 @@ impl ConfigSyncClient {
                 let pool = self.trust_pool.read().await;
                 let local = pool.trust_domain_meta(&trust_domain_id);
                 Ok(should_fetch_by_version_and_digest(
-                    local.map(|meta| (meta.details.version, sha256_bytes(&to_canonical_cbor(meta)))),
+                    local
+                        .map(|meta| (meta.details.version, sha256_bytes(&to_canonical_cbor(meta)))),
                     remote.version,
                     &remote.content_digest,
                     force_full_sync,

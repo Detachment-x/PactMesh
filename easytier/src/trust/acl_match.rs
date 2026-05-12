@@ -45,9 +45,7 @@ pub fn selector_match(
         Selector::Device(expected) => expected == peer_fp,
         Selector::Subnet(cidr) => {
             cidr_contains(*cidr, peer_ip)
-                && proxy_cidrs
-                    .iter()
-                    .any(|(_, advertised)| advertised == cidr)
+                && proxy_cidrs.iter().any(|(_, advertised)| advertised == cidr)
         }
         // T-039 adds hostname-index resolution; before that, hostname selectors never match.
         Selector::Hostname(_) => false,
@@ -81,10 +79,11 @@ pub fn decide(
             )
         });
         let match_proto = proto_matches(rule.proto, packet.proto);
-        let match_port = rule
-            .ports
-            .as_ref()
-            .is_none_or(|ports| ports.iter().any(|port| port_matches(*port, packet.dst_port)));
+        let match_port = rule.ports.as_ref().is_none_or(|ports| {
+            ports
+                .iter()
+                .any(|port| port_matches(*port, packet.dst_port))
+        });
 
         if match_src && match_dst && match_proto && match_port {
             return rule.action;
@@ -111,6 +110,5 @@ fn port_matches(spec: PortSpec, dst_port: u16) -> bool {
 }
 
 fn cidr_contains(cidr: Cidr, ip: IpAddr) -> bool {
-    IpNet::new(cidr.addr, cidr.prefix_len)
-        .is_ok_and(|network| network.contains(ip))
+    IpNet::new(cidr.addr, cidr.prefix_len).is_ok_and(|network| network.contains(ip))
 }

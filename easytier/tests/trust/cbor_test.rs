@@ -1,7 +1,7 @@
 //! Tests for `trust::cbor` (T-010 canonical encode/decode, T-011 PEM armor).
 
-use easytier::trust::{from_cbor, to_canonical_cbor, unwrap_armored, wrap_armored};
 use easytier::trust::cbor::{ArmorError, CborError};
+use easytier::trust::{from_cbor, to_canonical_cbor, unwrap_armored, wrap_armored};
 use minicbor::{Decode, Encode, Encoder, encode::Write};
 
 #[derive(Debug, Encode, Decode, PartialEq, Eq)]
@@ -15,7 +15,11 @@ struct RoundTripFixture {
 struct NonCanonicalMapFixture;
 
 impl Encode<()> for NonCanonicalMapFixture {
-    fn encode<W: Write>(&self, encoder: &mut Encoder<W>, _ctx: &mut ()) -> Result<(), minicbor::encode::Error<W::Error>> {
+    fn encode<W: Write>(
+        &self,
+        encoder: &mut Encoder<W>,
+        _ctx: &mut (),
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
         encoder.map(3)?;
         encoder.str("b")?.u64(2)?;
         encoder.str("aa")?.u64(3)?;
@@ -42,7 +46,12 @@ fn test_canonical_round_trip() {
 fn test_canonical_map_key_order() {
     let encoded = to_canonical_cbor(&NonCanonicalMapFixture);
 
-    assert_eq!(encoded, vec![0xa3, 0x61, 0x61, 0x01, 0x61, 0x62, 0x02, 0x62, 0x61, 0x61, 0x03]);
+    assert_eq!(
+        encoded,
+        vec![
+            0xa3, 0x61, 0x61, 0x01, 0x61, 0x62, 0x02, 0x62, 0x61, 0x61, 0x03
+        ]
+    );
 }
 
 #[test]

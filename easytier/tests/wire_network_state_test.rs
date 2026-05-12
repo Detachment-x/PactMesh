@@ -99,7 +99,8 @@ fn full_payload() -> NetworkStatePayload {
 fn test_round_trip_with_full_payload() {
     let root = TrustDomainRoot::generate();
     let state = signed_state(&root, full_payload());
-    let decoded = signed_network_state_from_envelope(&signed_network_state_to_envelope(&state)).unwrap();
+    let decoded =
+        signed_network_state_from_envelope(&signed_network_state_to_envelope(&state)).unwrap();
 
     assert_eq!(decoded, state);
     decoded.verify(&root.public_key().into()).unwrap();
@@ -118,7 +119,8 @@ fn test_round_trip_with_empty_acl_default_action_accept() {
             routes: Vec::new(),
         },
     );
-    let decoded = signed_network_state_from_envelope(&signed_network_state_to_envelope(&state)).unwrap();
+    let decoded =
+        signed_network_state_from_envelope(&signed_network_state_to_envelope(&state)).unwrap();
     let acl: AclPolicy = from_cbor(&decoded.details.payload.acl).unwrap();
 
     assert_eq!(acl.default_action, Action::Accept);

@@ -67,7 +67,11 @@ fn write_domain_files(
     )
     .unwrap();
     std::fs::write(network_dir.join("member_cert.pem"), cert.to_pem()).unwrap();
-    std::fs::write(network_dir.join("sk_self.age"), seal_sign_key(sk_self, password)).unwrap();
+    std::fs::write(
+        network_dir.join("sk_self.age"),
+        seal_sign_key(sk_self, password),
+    )
+    .unwrap();
 }
 
 fn sample_context_parts() -> (TrustDomainRoot, String, MemberCert, SignKey) {
@@ -98,7 +102,12 @@ fn test_new_constructs() {
 #[test]
 fn test_fingerprint_delegates_to_member_cert() {
     let (root, network_local_id, cert, sk_self) = sample_context_parts();
-    let ctx = TrustDomainContext::new(root.id(), network_local_id.parse().unwrap(), cert.clone(), sk_self);
+    let ctx = TrustDomainContext::new(
+        root.id(),
+        network_local_id.parse().unwrap(),
+        cert.clone(),
+        sk_self,
+    );
 
     assert_eq!(ctx.fingerprint(), cert.fingerprint());
 }
@@ -107,9 +116,17 @@ fn test_fingerprint_delegates_to_member_cert() {
 fn test_load_from_dir_reads_pem_files() {
     let dir = tempfile::tempdir().unwrap();
     let (root, network_local_id, cert, sk_self) = sample_context_parts();
-    write_domain_files(dir.path(), &network_local_id, &root, &cert, &sk_self, "correct-pass");
+    write_domain_files(
+        dir.path(),
+        &network_local_id,
+        &root,
+        &cert,
+        &sk_self,
+        "correct-pass",
+    );
 
-    let ctx = TrustDomainContext::load_from_dir(dir.path(), &network_local_id, "correct-pass").unwrap();
+    let ctx =
+        TrustDomainContext::load_from_dir(dir.path(), &network_local_id, "correct-pass").unwrap();
 
     assert_eq!(ctx.trust_domain_id, root.id());
     assert_eq!(ctx.network_local_id.as_str(), network_local_id);
@@ -128,9 +145,14 @@ fn test_load_from_dir_missing_member_cert_fails() {
         wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes()),
     )
     .unwrap();
-    std::fs::write(network_dir.join("sk_self.age"), seal_sign_key(&sk_self, "correct-pass")).unwrap();
+    std::fs::write(
+        network_dir.join("sk_self.age"),
+        seal_sign_key(&sk_self, "correct-pass"),
+    )
+    .unwrap();
 
-    let err = TrustDomainContext::load_from_dir(dir.path(), &network_local_id, "correct-pass").unwrap_err();
+    let err = TrustDomainContext::load_from_dir(dir.path(), &network_local_id, "correct-pass")
+        .unwrap_err();
 
     assert!(matches!(err, LoadError::Io(_)));
 }
@@ -139,9 +161,17 @@ fn test_load_from_dir_missing_member_cert_fails() {
 fn test_load_from_dir_wrong_sk_self_password_fails() {
     let dir = tempfile::tempdir().unwrap();
     let (root, network_local_id, cert, sk_self) = sample_context_parts();
-    write_domain_files(dir.path(), &network_local_id, &root, &cert, &sk_self, "correct-pass");
+    write_domain_files(
+        dir.path(),
+        &network_local_id,
+        &root,
+        &cert,
+        &sk_self,
+        "correct-pass",
+    );
 
-    let err = TrustDomainContext::load_from_dir(dir.path(), &network_local_id, "wrong-pass").unwrap_err();
+    let err =
+        TrustDomainContext::load_from_dir(dir.path(), &network_local_id, "wrong-pass").unwrap_err();
 
     assert!(matches!(err, LoadError::SkSelfDecryptFailed));
 }

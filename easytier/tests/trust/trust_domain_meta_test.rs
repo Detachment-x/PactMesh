@@ -1,10 +1,10 @@
-use ed25519_dalek::SigningKey;
 use easytier::trust::trust_domain_meta::{
     ActiveRelay, OutboundGrant, RelayCapabilities, TrustDomainMetaVerifyError,
     UnsignedTrustDomainMeta,
 };
-use easytier::trust::{from_cbor, to_canonical_cbor};
 use easytier::trust::{TrustDomainId, TrustDomainRoot};
+use easytier::trust::{from_cbor, to_canonical_cbor};
+use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 
 fn sample_active_relay() -> ActiveRelay {
@@ -125,7 +125,8 @@ fn test_trust_domain_meta_round_trip() {
     let original = sample_unsigned_trust_domain_meta_for_root(&root).sign(&root);
 
     let encoded = to_canonical_cbor(&original);
-    let decoded: easytier::trust::trust_domain_meta::SignedTrustDomainMeta = from_cbor(&encoded).unwrap();
+    let decoded: easytier::trust::trust_domain_meta::SignedTrustDomainMeta =
+        from_cbor(&encoded).unwrap();
 
     assert_eq!(decoded, original);
     assert_eq!(to_canonical_cbor(&decoded), encoded);

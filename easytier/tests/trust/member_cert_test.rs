@@ -2,11 +2,16 @@
 
 use std::str::FromStr;
 
-use ed25519_dalek::SigningKey;
 use easytier::trust::cbor::ArmorError;
 use easytier::trust::hostname::{HostnameError, HostnameLabel, check_hostname_unique};
-use easytier::trust::member_cert::{Capabilities, MemberCert, ParseError, UnsignedMemberCert, VerifyError};
-use easytier::trust::{MemberCertFingerprint, TrustDomainId, TrustDomainRoot, from_cbor, to_canonical_cbor, wrap_armored};
+use easytier::trust::member_cert::{
+    Capabilities, MemberCert, ParseError, UnsignedMemberCert, VerifyError,
+};
+use easytier::trust::{
+    MemberCertFingerprint, TrustDomainId, TrustDomainRoot, from_cbor, to_canonical_cbor,
+    wrap_armored,
+};
+use ed25519_dalek::SigningKey;
 use pnet::ipnetwork::IpNetwork as IpNet;
 use rand::rngs::OsRng;
 
@@ -136,7 +141,10 @@ fn assert_verify_wrong_root_rejected() {
     let wrong_root = TrustDomainRoot::generate();
     let cert = sample_unsigned_member_cert_for_root(&root).sign(&root);
 
-    assert_eq!(cert.verify(&wrong_root.public_key()), Err(VerifyError::DomainMismatch));
+    assert_eq!(
+        cert.verify(&wrong_root.public_key()),
+        Err(VerifyError::DomainMismatch)
+    );
 }
 
 fn assert_verify_tampered_field_rejected() {
@@ -144,7 +152,10 @@ fn assert_verify_tampered_field_rejected() {
     let mut cert = sample_unsigned_member_cert_for_root(&root).sign(&root);
     cert.details.device_label.push_str("-tampered");
 
-    assert_eq!(cert.verify(&root.public_key()), Err(VerifyError::BadSignature));
+    assert_eq!(
+        cert.verify(&root.public_key()),
+        Err(VerifyError::BadSignature)
+    );
 }
 
 fn assert_verify_invalid_time_window_rejected() {
@@ -233,13 +244,19 @@ fn assert_cert_without_hostname_decodes_as_none() {
     let decoded: UnsignedMemberCert = from_cbor(&encoded).unwrap();
 
     assert_eq!(decoded.hostname, None);
-    assert_eq!(decoded.network_state_version_ref, cert.network_state_version_ref);
+    assert_eq!(
+        decoded.network_state_version_ref,
+        cert.network_state_version_ref
+    );
 }
 
 fn assert_check_hostname_unique_accepts_unused() {
     let new = HostnameLabel::try_from_str("laptop").unwrap();
     let existing = vec![
-        (sample_fingerprint(1), Some(HostnameLabel::try_from_str("server").unwrap())),
+        (
+            sample_fingerprint(1),
+            Some(HostnameLabel::try_from_str("server").unwrap()),
+        ),
         (sample_fingerprint(2), None),
     ];
 
@@ -249,7 +266,10 @@ fn assert_check_hostname_unique_accepts_unused() {
 fn assert_check_hostname_unique_rejects_taken() {
     let new = HostnameLabel::try_from_str("server").unwrap();
     let taken_by = sample_fingerprint(7);
-    let existing = vec![(taken_by, Some(HostnameLabel::try_from_str("server").unwrap()))];
+    let existing = vec![(
+        taken_by,
+        Some(HostnameLabel::try_from_str("server").unwrap()),
+    )];
 
     assert_eq!(
         check_hostname_unique(&new, &existing),

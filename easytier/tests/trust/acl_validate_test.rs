@@ -41,11 +41,19 @@ fn base_policy() -> AclPolicy {
 }
 
 fn member_index() -> Vec<DeviceFingerprint> {
-    vec![fingerprint(1), fingerprint(2), fingerprint(3), fingerprint(4)]
+    vec![
+        fingerprint(1),
+        fingerprint(2),
+        fingerprint(3),
+        fingerprint(4),
+    ]
 }
 
 fn proxy_cidrs() -> Vec<Cidr> {
-    vec![cidr_v4(0, 24), Cidr::new("2001:db8::1".parse().unwrap(), 64)]
+    vec![
+        cidr_v4(0, 24),
+        Cidr::new("2001:db8::1".parse().unwrap(), 64),
+    ]
 }
 
 #[test]
@@ -53,7 +61,9 @@ fn test_vr1_too_many_tags() {
     let mut policy = base_policy();
     policy.tags.clear();
     for i in 0..65 {
-        policy.tags.insert(tag(&format!("t{i}")), vec![fingerprint(1)]);
+        policy
+            .tags
+            .insert(tag(&format!("t{i}")), vec![fingerprint(1)]);
     }
 
     assert_eq!(
@@ -65,7 +75,10 @@ fn test_vr1_too_many_tags() {
 #[test]
 fn test_vr1_tag_limit_accept() {
     let policy = base_policy();
-    assert_eq!(validate_for_signing(&policy, &member_index(), &proxy_cidrs()), Ok(()));
+    assert_eq!(
+        validate_for_signing(&policy, &member_index(), &proxy_cidrs()),
+        Ok(())
+    );
 }
 
 #[test]
@@ -95,7 +108,10 @@ fn test_vr1_rule_limit_accept() {
 
 #[test]
 fn test_vr2_tag_name_strict_accept() {
-    assert_eq!(TagName::try_from_str("Server.prod_01"), Ok(tag("Server.prod_01")));
+    assert_eq!(
+        TagName::try_from_str("Server.prod_01"),
+        Ok(tag("Server.prod_01"))
+    );
 }
 
 #[test]
@@ -120,7 +136,10 @@ fn test_vr3_phantom_fingerprint() {
 #[test]
 fn test_vr3_known_fingerprint_accept() {
     let policy = base_policy();
-    assert_eq!(validate_for_signing(&policy, &member_index(), &proxy_cidrs()), Ok(()));
+    assert_eq!(
+        validate_for_signing(&policy, &member_index(), &proxy_cidrs()),
+        Ok(())
+    );
 }
 
 #[test]
@@ -137,7 +156,10 @@ fn test_vr4_empty_src_rejected() {
 #[test]
 fn test_vr4_non_empty_src_dst_accept() {
     let policy = base_policy();
-    assert_eq!(validate_for_signing(&policy, &member_index(), &proxy_cidrs()), Ok(()));
+    assert_eq!(
+        validate_for_signing(&policy, &member_index(), &proxy_cidrs()),
+        Ok(())
+    );
 }
 
 #[test]
@@ -154,7 +176,10 @@ fn test_vr5_undefined_tag() {
 #[test]
 fn test_vr5_defined_tag_accept() {
     let policy = base_policy();
-    assert_eq!(validate_for_signing(&policy, &member_index(), &proxy_cidrs()), Ok(()));
+    assert_eq!(
+        validate_for_signing(&policy, &member_index(), &proxy_cidrs()),
+        Ok(())
+    );
 }
 
 #[test]
@@ -171,7 +196,10 @@ fn test_vr6_ports_not_applicable() {
 #[test]
 fn test_vr6_tcp_ports_accept() {
     let policy = base_policy();
-    assert_eq!(validate_for_signing(&policy, &member_index(), &proxy_cidrs()), Ok(()));
+    assert_eq!(
+        validate_for_signing(&policy, &member_index(), &proxy_cidrs()),
+        Ok(())
+    );
 }
 
 #[test]
@@ -188,7 +216,10 @@ fn test_vr7_invalid_port_range() {
 #[test]
 fn test_vr7_valid_port_range_accept() {
     let policy = base_policy();
-    assert_eq!(validate_for_signing(&policy, &member_index(), &proxy_cidrs()), Ok(()));
+    assert_eq!(
+        validate_for_signing(&policy, &member_index(), &proxy_cidrs()),
+        Ok(())
+    );
 }
 
 #[test]
@@ -207,7 +238,10 @@ fn test_vr8_valid_prefix_len_accept() {
     let mut policy = base_policy();
     policy.rules[0].dst = vec![Selector::Subnet(cidr_v4(0, 24))];
 
-    assert_eq!(validate_for_signing(&policy, &member_index(), &proxy_cidrs()), Ok(()));
+    assert_eq!(
+        validate_for_signing(&policy, &member_index(), &proxy_cidrs()),
+        Ok(())
+    );
 }
 
 #[test]
@@ -226,7 +260,10 @@ fn test_vr9_subnet_present_accept() {
     let mut policy = base_policy();
     policy.rules[0].dst = vec![Selector::Subnet(cidr_v4(0, 24))];
 
-    assert_eq!(validate_for_signing(&policy, &member_index(), &proxy_cidrs()), Ok(()));
+    assert_eq!(
+        validate_for_signing(&policy, &member_index(), &proxy_cidrs()),
+        Ok(())
+    );
 }
 
 #[test]

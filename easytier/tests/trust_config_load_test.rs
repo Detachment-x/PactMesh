@@ -66,7 +66,11 @@ fn write_domain_files(
     )
     .unwrap();
     std::fs::write(network_dir.join("member_cert.pem"), cert.to_pem()).unwrap();
-    std::fs::write(network_dir.join("sk_self.age"), seal_sign_key(sk_self, password)).unwrap();
+    std::fs::write(
+        network_dir.join("sk_self.age"),
+        seal_sign_key(sk_self, password),
+    )
+    .unwrap();
 }
 
 fn sample_context_parts() -> (TrustDomainRoot, String, MemberCert, SignKey) {
@@ -94,7 +98,14 @@ fn network_only_toml() -> &'static str {
 async fn test_load_config_with_valid_trust_domain_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let (root, network_local_id, cert, sk_self) = sample_context_parts();
-    write_domain_files(dir.path(), &network_local_id, &root, &cert, &sk_self, "correct-pass");
+    write_domain_files(
+        dir.path(),
+        &network_local_id,
+        &root,
+        &cert,
+        &sk_self,
+        "correct-pass",
+    );
 
     let env_name = format!("PNW_SK_SELF_PASSWORD_{}", std::process::id());
     // SAFETY: tests run in-process here and use unique env var names scoped to this test.
@@ -131,7 +142,13 @@ async fn test_load_config_without_trust_domain_section_starts_with_none() {
         .await
         .unwrap();
 
-    assert!(instance.get_global_ctx().get_trust_context().await.is_none());
+    assert!(
+        instance
+            .get_global_ctx()
+            .get_trust_context()
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -145,7 +162,11 @@ async fn test_load_config_with_missing_member_cert_file_fails() {
         wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes()),
     )
     .unwrap();
-    std::fs::write(network_dir.join("sk_self.age"), seal_sign_key(&sk_self, "correct-pass")).unwrap();
+    std::fs::write(
+        network_dir.join("sk_self.age"),
+        seal_sign_key(&sk_self, "correct-pass"),
+    )
+    .unwrap();
 
     let env_name = format!("PNW_SK_SELF_PASSWORD_MISSING_{}", std::process::id());
     // SAFETY: tests run in-process here and use unique env var names scoped to this test.
@@ -163,7 +184,10 @@ async fn test_load_config_with_missing_member_cert_file_fails() {
         .await
         .unwrap_err();
     let err_str = format!("{err:#}");
-    assert!(err_str.contains("member_cert.pem"), "unexpected error: {err_str}");
+    assert!(
+        err_str.contains("member_cert.pem"),
+        "unexpected error: {err_str}"
+    );
 
     // SAFETY: removes the test-scoped env var created above.
     unsafe { std::env::remove_var(env_name) };
@@ -173,7 +197,14 @@ async fn test_load_config_with_missing_member_cert_file_fails() {
 async fn test_load_config_with_wrong_sk_self_password_fails() {
     let dir = tempfile::tempdir().unwrap();
     let (root, network_local_id, cert, sk_self) = sample_context_parts();
-    write_domain_files(dir.path(), &network_local_id, &root, &cert, &sk_self, "correct-pass");
+    write_domain_files(
+        dir.path(),
+        &network_local_id,
+        &root,
+        &cert,
+        &sk_self,
+        "correct-pass",
+    );
 
     let env_name = format!("PNW_SK_SELF_PASSWORD_WRONG_{}", std::process::id());
     // SAFETY: tests run in-process here and use unique env var names scoped to this test.

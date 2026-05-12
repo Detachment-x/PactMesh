@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, net::IpAddr, path::Path, process::Command, str::FromStr};
 
-use ed25519_dalek::SigningKey;
 use easytier::trust::{
     ACL_SCHEMA_VERSION, AclPolicy, Action, Capabilities, HostnameLabel, MemberCertIndexEntry,
     NetworkLocalId, NetworkStatePayload, RevocationReason, SignedNetworkState, TrustDomainRoot,
     UnsignedMemberCert, UnsignedNetworkState, to_canonical_cbor,
 };
+use ed25519_dalek::SigningKey;
 use pnet::ipnetwork::IpNetwork as IpNet;
 use rand::rngs::OsRng;
 
@@ -21,7 +21,11 @@ fn trust_domains_dir(root: &Path) -> std::path::PathBuf {
     config_home(root).join("privateNetwork/trust-domains")
 }
 
-fn build_state(root: &TrustDomainRoot, network_id: &str, certs: Vec<UnsignedMemberCert>) -> SignedNetworkState {
+fn build_state(
+    root: &TrustDomainRoot,
+    network_id: &str,
+    certs: Vec<UnsignedMemberCert>,
+) -> SignedNetworkState {
     let acl = AclPolicy {
         tags: BTreeMap::new(),
         rules: Vec::new(),
@@ -55,25 +59,55 @@ fn create_domain(root_dir: &Path, root: &TrustDomainRoot) -> String {
     let domain_id = root.id().to_string();
     let domain_dir = trust_domains_dir(root_dir).join(&domain_id);
     std::fs::create_dir_all(&domain_dir).unwrap();
-    root.save_to_file(&domain_dir.join("sk_root.age"), "long-enough-pass").unwrap();
-    std::fs::write(domain_dir.join("pk_root.pem"), easytier::trust::wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes())).unwrap();
-    std::fs::write(domain_dir.join("meta.toml"), "label = \"home\"\ncreated_at = \"1\"\ncurve = \"ed25519\"\n").unwrap();
+    root.save_to_file(&domain_dir.join("sk_root.age"), "long-enough-pass")
+        .unwrap();
+    std::fs::write(
+        domain_dir.join("pk_root.pem"),
+        easytier::trust::wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes()),
+    )
+    .unwrap();
+    std::fs::write(
+        domain_dir.join("meta.toml"),
+        "label = \"home\"\ncreated_at = \"1\"\ncurve = \"ed25519\"\n",
+    )
+    .unwrap();
     domain_id
 }
 
-fn write_network(root_dir: &Path, root: &TrustDomainRoot, network_id: &str, state: &SignedNetworkState, certs: &[UnsignedMemberCert]) {
+fn write_network(
+    root_dir: &Path,
+    root: &TrustDomainRoot,
+    network_id: &str,
+    state: &SignedNetworkState,
+    certs: &[UnsignedMemberCert],
+) {
     let domain_id = root.id().to_string();
-    let network_dir = trust_domains_dir(root_dir).join(&domain_id).join("networks").join(network_id);
+    let network_dir = trust_domains_dir(root_dir)
+        .join(&domain_id)
+        .join("networks")
+        .join(network_id);
     let cert_dir = network_dir.join("member_certs");
     std::fs::create_dir_all(&cert_dir).unwrap();
     std::fs::write(network_dir.join("network_state.cbor.pem"), state.to_pem()).unwrap();
     for cert in certs {
         let signed = cert.clone().sign(root);
-        std::fs::write(cert_dir.join(format!("{}.pem", signed.fingerprint())), signed.to_pem()).unwrap();
+        std::fs::write(
+            cert_dir.join(format!("{}.pem", signed.fingerprint())),
+            signed.to_pem(),
+        )
+        .unwrap();
     }
 }
 
-fn setup_network(root_dir: &Path) -> (String, String, TrustDomainRoot, easytier::trust::MemberCertFingerprint, easytier::trust::MemberCertFingerprint) {
+fn setup_network(
+    root_dir: &Path,
+) -> (
+    String,
+    String,
+    TrustDomainRoot,
+    easytier::trust::MemberCertFingerprint,
+    easytier::trust::MemberCertFingerprint,
+) {
     let root = TrustDomainRoot::generate();
     let domain_id = create_domain(root_dir, &root);
     let network_id = "office-net".to_owned();
@@ -148,14 +182,45 @@ fn test_set_hostname_basic_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, root, fp_a, _) = setup_network(dir.path());
 
-    let output = run_trust(dir.path(), &["set-hostname", &domain_id, &network_id, &fp_a.to_string(), "MACBOOK"]);
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    let output = run_trust(
+        dir.path(),
+        &[
+            "set-hostname",
+            &domain_id,
+            &network_id,
+            &fp_a.to_string(),
+            "MACBOOK",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let state = read_state(dir.path(), &domain_id, &network_id);
     assert_eq!(state.details.version, 2);
-    assert_eq!(state.details.payload.revoked_certs[0].reason_code, RevocationReason::Superseded);
-    let reissued = std::fs::read_dir(trust_domains_dir(dir.path()).join(&domain_id).join("networks").join(&network_id).join("member_certs")).unwrap().count();
+    assert_eq!(
+        state.details.payload.revoked_certs[0].reason_code,
+        RevocationReason::Superseded
+    );
+    let reissued = std::fs::read_dir(
+        trust_domains_dir(dir.path())
+            .join(&domain_id)
+            .join("networks")
+            .join(&network_id)
+            .join("member_certs"),
+    )
+    .unwrap()
+    .count();
     assert_eq!(reissued, 3);
-    assert!(state.details.payload.member_cert_index.iter().any(|entry| entry.fingerprint != fp_a));
+    assert!(
+        state
+            .details
+            .payload
+            .member_cert_index
+            .iter()
+            .any(|entry| entry.fingerprint != fp_a)
+    );
     let _ = root;
 }
 
@@ -164,7 +229,16 @@ fn test_set_hostname_already_taken_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, _root, fp_a, fp_b) = setup_network(dir.path());
 
-    let output = run_trust(dir.path(), &["set-hostname", &domain_id, &network_id, &fp_b.to_string(), "laptop"]);
+    let output = run_trust(
+        dir.path(),
+        &[
+            "set-hostname",
+            &domain_id,
+            &network_id,
+            &fp_b.to_string(),
+            "laptop",
+        ],
+    );
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("already taken"));
     let state = read_state(dir.path(), &domain_id, &network_id);
@@ -178,8 +252,21 @@ fn test_set_hostname_idempotent_same_name_same_fp() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, _root, fp_a, _) = setup_network(dir.path());
 
-    let output = run_trust(dir.path(), &["set-hostname", &domain_id, &network_id, &fp_a.to_string(), "laptop"]);
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    let output = run_trust(
+        dir.path(),
+        &[
+            "set-hostname",
+            &domain_id,
+            &network_id,
+            &fp_a.to_string(),
+            "laptop",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let state = read_state(dir.path(), &domain_id, &network_id);
     assert_eq!(state.details.version, 1);
 }
@@ -189,7 +276,16 @@ fn test_set_hostname_invalid_label_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, _root, fp_a, _) = setup_network(dir.path());
 
-    let output = run_trust(dir.path(), &["set-hostname", &domain_id, &network_id, &fp_a.to_string(), "BAD_NAME"]);
+    let output = run_trust(
+        dir.path(),
+        &[
+            "set-hostname",
+            &domain_id,
+            &network_id,
+            &fp_a.to_string(),
+            "BAD_NAME",
+        ],
+    );
     assert!(!output.status.success());
 }
 
@@ -198,21 +294,58 @@ fn test_unset_hostname_removes_assignment() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, _root, fp_a, _) = setup_network(dir.path());
 
-    let output = run_trust(dir.path(), &["unset-hostname", &domain_id, &network_id, &fp_a.to_string()]);
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    let output = run_trust(
+        dir.path(),
+        &["unset-hostname", &domain_id, &network_id, &fp_a.to_string()],
+    );
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let state = read_state(dir.path(), &domain_id, &network_id);
-    assert!(state.details.payload.member_cert_index.iter().any(|entry| entry.fingerprint != fp_a));
-    assert_eq!(state.details.payload.revoked_certs[0].reason_code, RevocationReason::Superseded);
+    assert!(
+        state
+            .details
+            .payload
+            .member_cert_index
+            .iter()
+            .any(|entry| entry.fingerprint != fp_a)
+    );
+    assert_eq!(
+        state.details.payload.revoked_certs[0].reason_code,
+        RevocationReason::Superseded
+    );
 }
 
 #[test]
 fn test_set_after_unset_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, _root, fp_a, fp_b) = setup_network(dir.path());
-    assert!(run_trust(dir.path(), &["unset-hostname", &domain_id, &network_id, &fp_a.to_string()]).status.success());
+    assert!(
+        run_trust(
+            dir.path(),
+            &["unset-hostname", &domain_id, &network_id, &fp_a.to_string()]
+        )
+        .status
+        .success()
+    );
 
-    let output = run_trust(dir.path(), &["set-hostname", &domain_id, &network_id, &fp_b.to_string(), "laptop"]);
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    let output = run_trust(
+        dir.path(),
+        &[
+            "set-hostname",
+            &domain_id,
+            &network_id,
+            &fp_b.to_string(),
+            "laptop",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -220,8 +353,31 @@ fn test_set_writes_revoked_old_cert() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, _root, fp_a, _) = setup_network(dir.path());
 
-    let output = run_trust(dir.path(), &["set-hostname", &domain_id, &network_id, &fp_a.to_string(), "macbook", "--note", "rename"]);
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    let output = run_trust(
+        dir.path(),
+        &[
+            "set-hostname",
+            &domain_id,
+            &network_id,
+            &fp_a.to_string(),
+            "macbook",
+            "--note",
+            "rename",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let state = read_state(dir.path(), &domain_id, &network_id);
-    assert!(state.details.payload.revoked_certs.iter().any(|revoked| revoked.cert_fingerprint == fp_a && revoked.reason_code == RevocationReason::Superseded));
+    assert!(
+        state
+            .details
+            .payload
+            .revoked_certs
+            .iter()
+            .any(|revoked| revoked.cert_fingerprint == fp_a
+                && revoked.reason_code == RevocationReason::Superseded)
+    );
 }

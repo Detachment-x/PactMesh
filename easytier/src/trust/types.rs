@@ -9,8 +9,14 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// 32-byte SHA-256 of the trust-domain root public key. Identifies a trust domain.
-#[derive(minicbor::Encode, minicbor::Decode, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TrustDomainId(#[n(0)] #[cbor(with = "minicbor::bytes")] pub [u8; 32]);
+#[derive(
+    minicbor::Encode, minicbor::Decode, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+pub struct TrustDomainId(
+    #[n(0)]
+    #[cbor(with = "minicbor::bytes")]
+    pub [u8; 32],
+);
 
 impl TrustDomainId {
     /// Build a `TrustDomainId` from an ed25519 root pubkey via SHA-256.
@@ -31,8 +37,14 @@ impl std::fmt::Display for TrustDomainId {
 }
 
 /// 32-byte SHA-256 fingerprint of a serialized `MemberCert`.
-#[derive(minicbor::Encode, minicbor::Decode, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct MemberCertFingerprint(#[n(0)] #[cbor(with = "minicbor::bytes")] pub [u8; 32]);
+#[derive(
+    minicbor::Encode, minicbor::Decode, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord,
+)]
+pub struct MemberCertFingerprint(
+    #[n(0)]
+    #[cbor(with = "minicbor::bytes")]
+    pub [u8; 32],
+);
 
 impl MemberCertFingerprint {
     /// Compute fingerprint from canonical-CBOR cert bytes.
@@ -53,7 +65,9 @@ impl std::fmt::Display for MemberCertFingerprint {
 }
 
 /// Trust-domain-local network name. LDH charset, 1..=63 bytes, no leading/trailing `-`.
-#[derive(minicbor::Encode, minicbor::Decode, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    minicbor::Encode, minicbor::Decode, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord,
+)]
 pub struct NetworkLocalId(#[n(0)] pub String);
 
 impl NetworkLocalId {

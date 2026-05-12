@@ -3,7 +3,7 @@ use easytier::proto::peer_rpc::{
 };
 use easytier::trust::{
     ActiveRelay, Capabilities, JoinRequest, MemberCert, NetworkLocalId, NetworkStatePayload,
-    RelayCapabilities, SignedNetworkState, SignedTrustDomainMeta, SignKey, TrustDomainRoot,
+    RelayCapabilities, SignKey, SignedNetworkState, SignedTrustDomainMeta, TrustDomainRoot,
     UnsignedMemberCert, UnsignedNetworkState, UnsignedTrustDomainMeta, from_cbor,
     to_canonical_cbor,
 };

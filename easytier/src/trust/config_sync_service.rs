@@ -16,7 +16,10 @@ use crate::{
             FetchConfigResponse, PendingCertKey, QueryConfigVersionRequest,
             QueryConfigVersionResponse, ResourceVersion, config_resource_selector,
         },
-        rpc_types::{self, controller::{BaseController, Controller}},
+        rpc_types::{
+            self,
+            controller::{BaseController, Controller},
+        },
     },
     trust::{
         MemberCert, NetworkLocalId, SignedNetworkState, SignedTrustDomainMeta, TrustDomainId,
@@ -106,10 +109,10 @@ impl ConfigSyncService {
     }
 
     pub fn register(&self, peer_rpc_mgr: &PeerRpcManager) {
-        peer_rpc_mgr.rpc_server().registry().register(
-            ConfigSyncRpcServer::new(self.clone()),
-            &self.network_name,
-        );
+        peer_rpc_mgr
+            .rpc_server()
+            .registry()
+            .register(ConfigSyncRpcServer::new(self.clone()), &self.network_name);
     }
 
     fn parse_trust_domain_id(bytes: &[u8]) -> rpc_types::error::Result<TrustDomainId> {
@@ -214,7 +217,11 @@ impl ConfigSyncService {
         Ok(())
     }
 
-    fn resource_version(selector: ConfigResourceSelector, version: u64, content_digest: Vec<u8>) -> ResourceVersion {
+    fn resource_version(
+        selector: ConfigResourceSelector,
+        version: u64,
+        content_digest: Vec<u8>,
+    ) -> ResourceVersion {
         ResourceVersion {
             selector: Some(selector),
             version,
@@ -222,7 +229,10 @@ impl ConfigSyncService {
         }
     }
 
-    async fn query_one(&self, selector: ConfigResourceSelector) -> rpc_types::error::Result<ResourceVersion> {
+    async fn query_one(
+        &self,
+        selector: ConfigResourceSelector,
+    ) -> rpc_types::error::Result<ResourceVersion> {
         match selector.selector.as_ref() {
             Some(config_resource_selector::Selector::NetworkState(key)) => {
                 let trust_domain_id = Self::parse_trust_domain_id(&key.trust_domain_id)?;
@@ -272,7 +282,12 @@ impl ConfigSyncService {
         let trust_domain_id = Self::parse_trust_domain_id(&key.trust_domain_id)?;
         let network_local_id = Self::parse_network_local_id(&key.network_local_id)?;
         let pool = self.trust_pool.read().await;
-        Self::verify_caller_member_cert(&pool, caller_member_cert_bytes, trust_domain_id, now_unix())?;
+        Self::verify_caller_member_cert(
+            &pool,
+            caller_member_cert_bytes,
+            trust_domain_id,
+            now_unix(),
+        )?;
         let state = pool
             .network_state(&trust_domain_id, &network_local_id)
             .ok_or_else(|| {
@@ -292,7 +307,12 @@ impl ConfigSyncService {
     ) -> rpc_types::error::Result<FetchConfigResponse> {
         let trust_domain_id = Self::parse_trust_domain_id(trust_domain_meta_id)?;
         let pool = self.trust_pool.read().await;
-        Self::verify_caller_member_cert(&pool, caller_member_cert_bytes, trust_domain_id, now_unix())?;
+        Self::verify_caller_member_cert(
+            &pool,
+            caller_member_cert_bytes,
+            trust_domain_id,
+            now_unix(),
+        )?;
         let meta = pool.trust_domain_meta(&trust_domain_id).ok_or_else(|| {
             rpc_types::error::Error::ExecutionError(anyhow!("trust_domain_meta not found"))
         })?;
@@ -303,7 +323,10 @@ impl ConfigSyncService {
         })
     }
 
-    fn fetch_pending_cert(&self, key: &PendingCertKey) -> rpc_types::error::Result<FetchConfigResponse> {
+    fn fetch_pending_cert(
+        &self,
+        key: &PendingCertKey,
+    ) -> rpc_types::error::Result<FetchConfigResponse> {
         let trust_domain_id = Self::parse_trust_domain_id(&key.trust_domain_id)?;
         let network_local_id = Self::parse_network_local_id(&key.network_local_id)?;
         let applicant_pk = Self::parse_applicant_pk(&key.applicant_pk)?;

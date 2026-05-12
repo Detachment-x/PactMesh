@@ -32,10 +32,51 @@ use std::{
 use strum::VariantArray;
 use tokio::io::AsyncReadExt;
 
-use crate::tunnel::IpScheme;
 use crate::trust::NetworkBootstrap;
+use crate::tunnel::IpScheme;
 
 const NETWORK_BOOTSTRAP_FILE_NAME: &str = "network_bootstrap.cbor.pem";
+
+fn default_trust_domains_dir() -> anyhow::Result<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(xdg).join("privateNetwork/trust-domains"));
+    }
+    let home = std::env::var("HOME").context("HOME is required to locate trust domains")?;
+    Ok(PathBuf::from(home).join(".config/privateNetwork/trust-domains"))
+}
+
+fn discover_trust_domain_dir(network_local_id: &str) -> anyhow::Result<PathBuf> {
+    let base = default_trust_domains_dir()?;
+    let mut matches = Vec::new();
+    let entries = std::fs::read_dir(&base)
+        .with_context(|| format!("failed to read trust domains directory {}", base.display()))?;
+
+    for entry in entries {
+        let path = entry?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let network_dir = path.join("networks").join(network_local_id);
+        if network_dir.join("member_cert.pem").is_file()
+            && network_dir.join("sk_self.age").is_file()
+            && network_dir.join("network_state.cbor.pem").is_file()
+        {
+            matches.push(path);
+        }
+    }
+
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => anyhow::bail!(
+            "no trust domain with runnable network_local_id '{network_local_id}' found under {}; run accept-invite/bootstrap-self first or pass --trust-domain-dir",
+            base.display()
+        ),
+        _ => anyhow::bail!(
+            "multiple trust domains contain runnable network_local_id '{network_local_id}' under {}; pass --trust-domain-dir explicitly",
+            base.display()
+        ),
+    }
+}
 
 fn load_local_network_bootstrap(
     domain_dir: &std::path::Path,
@@ -146,7 +187,10 @@ struct Cli {
     #[clap(long, help = t!("core_clap.check_config").to_string())]
     check_config: bool,
 
-    #[clap(long, help = t!("core_clap.daemon").to_string())]
+    #[clap(
+        long,
+        help = "run in daemon/instance mode; this does not fork into the background"
+    )]
     daemon: bool,
 
     #[clap(long, help = t!("core_clap.disable_env_parsing").to_string())]
@@ -165,21 +209,21 @@ struct NetworkOptions {
     #[arg(
         long,
         env = "ET_TRUST_DOMAIN_DIR",
-        help = "Trust domain directory path",
+        help = "Trust domain directory path"
     )]
     trust_domain_dir: Option<PathBuf>,
 
     #[arg(
         long,
         env = "ET_NETWORK_LOCAL_ID",
-        help = "Trust network local identifier",
+        help = "Trust network local identifier"
     )]
     network_local_id: Option<String>,
 
     #[arg(
         long,
         env = "ET_SK_SELF_PASSWORD_ENV",
-        help = "Environment variable name for sk_self password",
+        help = "Environment variable name for sk_self password"
     )]
     sk_self_password_env: Option<String>,
 
@@ -889,21 +933,30 @@ impl NetworkOptions {
             || self.sk_self_password_env.is_some()
         {
             let existing = cfg.get_trust_domain();
+            let network_local_id = self
+                .network_local_id
+                .clone()
+                .or_else(|| {
+                    existing
+                        .as_ref()
+                        .map(|config| config.network_local_id.clone())
+                })
+                .ok_or_else(|| anyhow::anyhow!("trust_domain.network_local_id is required"))?;
             let domain_dir = self
                 .trust_domain_dir
                 .clone()
                 .or_else(|| existing.as_ref().map(|config| config.domain_dir.clone()))
-                .ok_or_else(|| anyhow::anyhow!("trust_domain.domain_dir is required"))?;
-            let network_local_id = self
-                .network_local_id
-                .clone()
-                .or_else(|| existing.as_ref().map(|config| config.network_local_id.clone()))
-                .ok_or_else(|| anyhow::anyhow!("trust_domain.network_local_id is required"))?;
+                .map(Ok)
+                .unwrap_or_else(|| discover_trust_domain_dir(&network_local_id))?;
             let sk_self_password_env = self
                 .sk_self_password_env
                 .clone()
-                .or_else(|| existing.as_ref().map(|config| config.sk_self_password_env.clone()))
-                .ok_or_else(|| anyhow::anyhow!("trust_domain.sk_self_password_env is required"))?;
+                .or_else(|| {
+                    existing
+                        .as_ref()
+                        .map(|config| config.sk_self_password_env.clone())
+                })
+                .unwrap_or_else(|| "ET_SK_SELF_PASSWORD".to_owned());
 
             cfg.set_trust_domain(Some(TrustDomainConfig {
                 domain_dir,

@@ -117,6 +117,7 @@ message ApproveJoinRequestRequest {
   bytes trust_domain_id = 2;
   string network_local_id = 3;
   bytes applicant_pk = 4;
+  optional bytes member_cert_cbor = 5;
 }
 
 message ApproveJoinRequestResponse {

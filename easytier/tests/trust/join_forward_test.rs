@@ -1,20 +1,23 @@
-use std::{collections::HashMap, sync::{Arc, Mutex, Weak}};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, Weak},
+};
 
 use easytier::{
     common::{PeerId, error::Error as CommonError, new_peer_id},
     peers::peer_rpc::{PeerRpcManager, PeerRpcManagerTransport},
     proto::{
         peer_rpc::{
-            ConfigResourceSelector, ConfigSyncRpc, FetchConfigRequest,
-            ForwardJoinRequestRequest, JoinForwardRpc, PendingCertKey, config_resource_selector,
+            ConfigResourceSelector, ConfigSyncRpc, FetchConfigRequest, ForwardJoinRequestRequest,
+            JoinForwardRpc, PendingCertKey, config_resource_selector,
         },
         rpc_types::controller::BaseController,
     },
     trust::{
-        JoinRequest, MemberCert, NetworkLocalId, SignKey, TrustDomainPool,
-        TrustDomainRoot, config_sync_service::ConfigSyncService,
-        join_dedup::JoinDedup, join_forward_service::JoinForwardService,
-        pending_cert_queue::PendingCertQueue, from_cbor, to_canonical_cbor,
+        JoinRequest, MemberCert, NetworkLocalId, SignKey, TrustDomainPool, TrustDomainRoot,
+        config_sync_service::ConfigSyncService, from_cbor, join_dedup::JoinDedup,
+        join_forward_service::JoinForwardService, pending_cert_queue::PendingCertQueue,
+        to_canonical_cbor,
     },
     tunnel::packet_def::ZCPacket,
 };
@@ -64,7 +67,12 @@ impl PeerRpcManagerTransport for BusTransport {
     }
 
     async fn recv(&self) -> Result<ZCPacket, CommonError> {
-        self.rx.lock().await.recv().await.ok_or(CommonError::NotFound)
+        self.rx
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or(CommonError::NotFound)
     }
 }
 
@@ -90,15 +98,21 @@ fn build_pool(root: &TrustDomainRoot) -> Arc<RwLock<TrustDomainPool>> {
 
 fn pending_selector(jr: &JoinRequest) -> ConfigResourceSelector {
     ConfigResourceSelector {
-        selector: Some(config_resource_selector::Selector::PendingCertFor(PendingCertKey {
-            trust_domain_id: jr.trust_domain_id.0.to_vec(),
-            network_local_id: jr.network_local_id.as_str().to_owned(),
-            applicant_pk: jr.applicant_pk.0.to_vec(),
-        })),
+        selector: Some(config_resource_selector::Selector::PendingCertFor(
+            PendingCertKey {
+                trust_domain_id: jr.trust_domain_id.0.to_vec(),
+                network_local_id: jr.network_local_id.as_str().to_owned(),
+                applicant_pk: jr.applicant_pk.0.to_vec(),
+            },
+        )),
     }
 }
 
-fn request_for(jr: &JoinRequest, ttl: u32, seen_node_pks: Vec<Vec<u8>>) -> ForwardJoinRequestRequest {
+fn request_for(
+    jr: &JoinRequest,
+    ttl: u32,
+    seen_node_pks: Vec<Vec<u8>>,
+) -> ForwardJoinRequestRequest {
     ForwardJoinRequestRequest {
         inner_cbor: to_canonical_cbor(jr),
         ttl,
@@ -130,6 +144,7 @@ fn build_service(
         } else {
             Vec::new()
         },
+        am_root,
         Weak::new(),
         peer_rpc_mgr,
         my_peer_id,
@@ -217,7 +232,8 @@ async fn test_ttl_zero_stops_forwarding() {
     let target_mgr = make_rpc_mgr(&bus, target_peer_id);
     let (relay_service, _) = build_service(&root, relay_mgr, relay_peer_id, [0x44; 32], false);
     let relay_service = relay_service.with_known_peers(vec![target_peer_id]);
-    let (target_service, target_pending) = build_service(&root, target_mgr.clone(), target_peer_id, [0x55; 32], true);
+    let (target_service, target_pending) =
+        build_service(&root, target_mgr.clone(), target_peer_id, [0x55; 32], true);
     target_service.register(&target_mgr);
     let jr = sample_join_request(&root, 14);
 
@@ -259,7 +275,8 @@ async fn test_non_root_forwards_to_neighbors_excluding_source() {
 
     let (relay_service, _) = build_service(&root, relay_mgr, relay_peer_id, [0x77; 32], false);
     let relay_service = relay_service.with_known_peers(vec![target_peer_id]);
-    let (target_service, target_pending) = build_service(&root, target_mgr.clone(), target_peer_id, [0x88; 32], true);
+    let (target_service, target_pending) =
+        build_service(&root, target_mgr.clone(), target_peer_id, [0x88; 32], true);
     target_service.register(&target_mgr);
 
     let jr = sample_join_request(&root, 16);

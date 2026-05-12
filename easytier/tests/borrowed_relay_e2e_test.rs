@@ -11,15 +11,15 @@ use easytier::common::trust_context::TrustDomainContext;
 use easytier::instance::instance::Instance;
 use easytier::proto::common::SecureModeConfig;
 use easytier::trust::{
-    ActiveRelay, BorrowedRelayProof, Capabilities, MemberCert, NetworkBootstrap,
-    NetworkLocalId, NetworkStatePayload, RelayCapabilities, SignKey, SignedNetworkState,
-    SignedTrustDomainMeta, TrustDomainPool, TrustDomainRoot, UnsignedMemberCert,
-    UnsignedNetworkState, UnsignedTrustDomainMeta,
+    ActiveRelay, BorrowedRelayProof, Capabilities, MemberCert, NetworkBootstrap, NetworkLocalId,
+    NetworkStatePayload, RelayCapabilities, SignKey, SignedNetworkState, SignedTrustDomainMeta,
+    TrustDomainPool, TrustDomainRoot, UnsignedMemberCert, UnsignedNetworkState,
+    UnsignedTrustDomainMeta,
 };
 use easytier::tunnel::{
+    TunnelConnector,
     common::tests::wait_for_condition,
     ring::{RingTunnelConnector, create_ring_tunnel_pair},
-    TunnelConnector,
 };
 use rand::rngs::OsRng;
 use serial_test::serial;
@@ -140,7 +140,11 @@ fn make_trust_domain_meta(
     .sign(root)
 }
 
-fn make_network_bootstrap(root: &TrustDomainRoot, network_name: &str, relay_url: Url) -> NetworkBootstrap {
+fn make_network_bootstrap(
+    root: &TrustDomainRoot,
+    network_name: &str,
+    relay_url: Url,
+) -> NetworkBootstrap {
     NetworkBootstrap {
         trust_domain_id: root.id(),
         pk_root: root.public_key(),
@@ -209,7 +213,11 @@ fn relay_config(network_name: &str, foreign_root: &TrustDomainRoot) -> TomlConfi
     cfg
 }
 
-fn client_config(network_name: &str, dead_uri: Url, target_bootstrap_path: &Path) -> TomlConfigLoader {
+fn client_config(
+    network_name: &str,
+    dead_uri: Url,
+    target_bootstrap_path: &Path,
+) -> TomlConfigLoader {
     let cfg = base_config("client-x", network_name);
     cfg.set_peers(vec![PeerConfig {
         uri: dead_uri,
@@ -266,8 +274,16 @@ async fn connect_target_to_relay(target: &Instance, relay: &Instance) {
             let target_pm = target_pm.clone();
             let relay_pm = relay_pm.clone();
             async move {
-                !target_pm.get_peer_map().list_peers_with_conn().await.is_empty()
-                    && !relay_pm.get_peer_map().list_peers_with_conn().await.is_empty()
+                !target_pm
+                    .get_peer_map()
+                    .list_peers_with_conn()
+                    .await
+                    .is_empty()
+                    && !relay_pm
+                        .get_peer_map()
+                        .list_peers_with_conn()
+                        .await
+                        .is_empty()
             }
         },
         Duration::from_secs(5),
@@ -275,7 +291,11 @@ async fn connect_target_to_relay(target: &Instance, relay: &Instance) {
     .await;
 }
 
-async fn wait_for_borrowed_connection(client: &Instance, relay: &Instance, foreign_network_name: &str) {
+async fn wait_for_borrowed_connection(
+    client: &Instance,
+    relay: &Instance,
+    foreign_network_name: &str,
+) {
     let client_pm = client.get_peer_manager();
     let relay_pm = relay.get_peer_manager();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -286,7 +306,10 @@ async fn wait_for_borrowed_connection(client: &Instance, relay: &Instance, forei
             .get_peer_map()
             .list_peers_with_conn()
             .await;
-        let relay_foreigns = relay_pm.get_foreign_network_manager().list_foreign_networks().await;
+        let relay_foreigns = relay_pm
+            .get_foreign_network_manager()
+            .list_foreign_networks()
+            .await;
         let relay_has_entry = relay_foreigns
             .foreign_networks
             .get(foreign_network_name)
@@ -350,7 +373,11 @@ async fn test_borrowed_relay_fallback_connects_to_relay_seed() {
     let bootstrap_path = bootstrap_dir.path().join("target-b-bootstrap.pem");
     std::fs::write(&bootstrap_path, bootstrap.to_pem()).unwrap();
 
-    let client_cfg = client_config("net-a", "tcp://127.0.0.1:1".parse().unwrap(), &bootstrap_path);
+    let client_cfg = client_config(
+        "net-a",
+        "tcp://127.0.0.1:1".parse().unwrap(),
+        &bootstrap_path,
+    );
     let client_pool = client_pool(
         &root_a,
         state_a,
@@ -402,7 +429,11 @@ async fn test_borrowed_relay_without_relay_seed_does_not_connect() {
     let bootstrap_path = bootstrap_dir.path().join("target-b-bootstrap.pem");
     std::fs::write(&bootstrap_path, bootstrap.to_pem()).unwrap();
 
-    let client_cfg = client_config("net-a", "tcp://127.0.0.1:1".parse().unwrap(), &bootstrap_path);
+    let client_cfg = client_config(
+        "net-a",
+        "tcp://127.0.0.1:1".parse().unwrap(),
+        &bootstrap_path,
+    );
     let client_pool = client_pool(
         &root_a,
         state_a,
@@ -415,20 +446,24 @@ async fn test_borrowed_relay_without_relay_seed_does_not_connect() {
     client.run().await.unwrap();
 
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(client
-        .get_peer_manager()
-        .get_foreign_network_client()
-        .get_peer_map()
-        .list_peers_with_conn()
-        .await
-        .is_empty());
-    assert!(!relay
-        .get_peer_manager()
-        .get_foreign_network_manager()
-        .list_foreign_networks()
-        .await
-        .foreign_networks
-        .contains_key("net-a"));
+    assert!(
+        client
+            .get_peer_manager()
+            .get_foreign_network_client()
+            .get_peer_map()
+            .list_peers_with_conn()
+            .await
+            .is_empty()
+    );
+    assert!(
+        !relay
+            .get_peer_manager()
+            .get_foreign_network_manager()
+            .list_foreign_networks()
+            .await
+            .foreign_networks
+            .contains_key("net-a")
+    );
 
     clear_instances(&mut [client, relay, target]).await;
 }
@@ -473,20 +508,24 @@ async fn test_borrowed_relay_stale_proof_is_rejected() {
         .await;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(client
-        .get_peer_manager()
-        .get_foreign_network_client()
-        .get_peer_map()
-        .list_peers_with_conn()
-        .await
-        .is_empty());
-    assert!(!relay
-        .get_peer_manager()
-        .get_foreign_network_manager()
-        .list_foreign_networks()
-        .await
-        .foreign_networks
-        .contains_key("net-a"));
+    assert!(
+        client
+            .get_peer_manager()
+            .get_foreign_network_client()
+            .get_peer_map()
+            .list_peers_with_conn()
+            .await
+            .is_empty()
+    );
+    assert!(
+        !relay
+            .get_peer_manager()
+            .get_foreign_network_manager()
+            .list_foreign_networks()
+            .await
+            .foreign_networks
+            .contains_key("net-a")
+    );
 
     clear_instances(&mut [client, relay]).await;
 }

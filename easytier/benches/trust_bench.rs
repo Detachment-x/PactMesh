@@ -1,13 +1,13 @@
 use std::{net::IpAddr, str::FromStr};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use ed25519_dalek::SigningKey;
 use easytier::trust::{
     ACL_SCHEMA_VERSION, AclPolicy, AclRule, Action, Capabilities, Cidr, DeviceFingerprint,
     MemberCert, NetworkLocalId, NetworkStatePayload, PacketTuple, PeerMatchContext, PortSpec,
     Proto, RevocationReason, RevokedCert, Selector, TagName, TagsMap, TrustDomainPool,
     TrustDomainRoot, UnsignedMemberCert, UnsignedNetworkState, to_canonical_cbor,
 };
+use ed25519_dalek::SigningKey;
 use pnet::ipnetwork::IpNetwork as IpNet;
 use rand::rngs::OsRng;
 
@@ -90,7 +90,9 @@ fn bench_member_cert_verify_signature_only(c: &mut Criterion) {
 
 fn bench_trust_domain_pool_lookup(c: &mut Criterion) {
     let root = TrustDomainRoot::generate();
-    let certs = (0..1000).map(|idx| sample_cert(&root, idx)).collect::<Vec<_>>();
+    let certs = (0..1000)
+        .map(|idx| sample_cert(&root, idx))
+        .collect::<Vec<_>>();
     let pool = sample_pool(&root, &certs);
     let active = &certs[500];
     c.bench_function("bench_trust_domain_pool_lookup", |b| {
@@ -154,9 +156,11 @@ fn bench_cbor_encode_member_cert(c: &mut Criterion) {
     let root = TrustDomainRoot::generate();
     let cert = sample_cert(&root, 3);
     let mut group = c.benchmark_group("bench_cbor_encode_member_cert");
-    group.bench_with_input(BenchmarkId::from_parameter("member_cert"), &cert, |b, cert| {
-        b.iter(|| to_canonical_cbor(cert))
-    });
+    group.bench_with_input(
+        BenchmarkId::from_parameter("member_cert"),
+        &cert,
+        |b, cert| b.iter(|| to_canonical_cbor(cert)),
+    );
     group.finish();
 }
 

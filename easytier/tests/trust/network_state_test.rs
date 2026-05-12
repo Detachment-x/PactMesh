@@ -6,8 +6,7 @@ use easytier::trust::network_state::{
 };
 use easytier::trust::revocation::{DisabledCert, RevocationReason, RevokedCert};
 use easytier::trust::{
-    MemberCertFingerprint, NetworkLocalId, TrustDomainRoot, from_cbor,
-    to_canonical_cbor,
+    MemberCertFingerprint, NetworkLocalId, TrustDomainRoot, from_cbor, to_canonical_cbor,
 };
 
 fn fingerprint(byte: u8) -> MemberCertFingerprint {

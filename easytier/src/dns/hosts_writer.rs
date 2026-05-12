@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::trust::{DeviceFingerprint, NetworkLocalId, TrustDomainId};
 
 use super::{
-    hosts_block::{HostEntry, HostsBlock, RawSection, render_block, parse_existing},
+    hosts_block::{HostEntry, HostsBlock, RawSection, parse_existing, render_block},
     platform::{HostsBackend, SystemHostsBackend},
 };
 
@@ -72,7 +72,8 @@ impl HostsWriter {
     ) -> Result<RefreshReport, HostsError> {
         let existing = backend.read()?;
         let (sections, spans) = parse_existing(&existing);
-        let rendered = render_all_blocks(hostname_index_per_network, ipam_lookup, short_names_enabled);
+        let rendered =
+            render_all_blocks(hostname_index_per_network, ipam_lookup, short_names_enabled);
 
         let mut report = RefreshReport::default();
         for key in rendered.keys() {

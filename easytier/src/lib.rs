@@ -12,17 +12,17 @@ mod vpn_portal;
 
 pub mod common;
 pub mod connector;
-pub mod dns;
 pub mod core;
+pub mod dns;
 pub mod instance_manager;
 pub mod launcher;
 pub mod peers;
 pub mod proto;
 pub mod rpc_service;
 pub mod service_manager;
+pub mod trust;
 pub mod tunnel;
 pub mod utils;
-pub mod trust;
 
 #[cfg(test)]
 mod tests;

@@ -1,6 +1,9 @@
 use std::{path::Path, process::Command};
 
-use easytier::trust::{JoinRequest, NetworkBootstrap, NetworkLocalId, TrustDomainRoot, from_cbor, unwrap_armored, wrap_armored};
+use easytier::trust::{
+    JoinRequest, NetworkBootstrap, NetworkLocalId, TrustDomainRoot, from_cbor, unwrap_armored,
+    wrap_armored,
+};
 use url::Url;
 
 fn cli() -> Command {
@@ -55,11 +58,23 @@ fn test_accept_invite_url_succeeds_with_mock_root() {
 
     let output = run_accept(dir.path(), url.as_str(), "long-enough-pass");
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let domain_dir = trust_domains_dir(dir.path()).join(root.id().to_string());
     assert!(domain_dir.join("pk_root.pem").is_file());
-    assert!(devices_dir(dir.path()).join("default/sk_self.age").is_file());
-    assert!(devices_dir(dir.path()).join("default/pk_self.pem").is_file());
+    assert!(
+        devices_dir(dir.path())
+            .join("default/sk_self.age")
+            .is_file()
+    );
+    assert!(
+        devices_dir(dir.path())
+            .join("default/pk_self.pem")
+            .is_file()
+    );
     assert!(domain_dir.join("networks/office-net/sk_self.age").is_file());
     let join_path = domain_dir.join("networks/office-net/pending_join_request.cbor.pem");
     let armored = std::fs::read_to_string(join_path).unwrap();
@@ -79,7 +94,11 @@ fn test_accept_invite_unknown_pk_root_mismatch_rejected() {
     let other = TrustDomainRoot::generate();
     let domain_dir = trust_domains_dir(dir.path()).join(root.id().to_string());
     std::fs::create_dir_all(&domain_dir).unwrap();
-    std::fs::write(domain_dir.join("pk_root.pem"), wrap_armored("PNW-PK-ROOT", other.public_key().as_bytes())).unwrap();
+    std::fs::write(
+        domain_dir.join("pk_root.pem"),
+        wrap_armored("PNW-PK-ROOT", other.public_key().as_bytes()),
+    )
+    .unwrap();
     let url = bootstrap(&root).to_url().unwrap();
 
     let output = run_accept(dir.path(), url.as_str(), "long-enough-pass");
@@ -97,8 +116,17 @@ fn test_accept_invite_file_source_succeeds() {
 
     let output = run_accept(dir.path(), pem_path.to_str().unwrap(), "long-enough-pass");
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
-    assert!(trust_domains_dir(dir.path()).join(root.id().to_string()).join("networks/office-net/pending_join_request.cbor.pem").is_file());
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        trust_domains_dir(dir.path())
+            .join(root.id().to_string())
+            .join("networks/office-net/pending_join_request.cbor.pem")
+            .is_file()
+    );
 }
 
 #[test]
@@ -121,7 +149,11 @@ fn test_accept_invite_timeout_after_1h() {
 
     let output = run_accept(dir.path(), url.as_str(), "long-enough-pass");
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("T-134b"));
 }
 
@@ -131,10 +163,26 @@ fn test_accept_invite_reuses_global_device_identity_across_domains() {
     let root_a = TrustDomainRoot::generate();
     let root_b = TrustDomainRoot::generate();
 
-    let out_a = run_accept(dir.path(), bootstrap(&root_a).to_url().unwrap().as_str(), "long-enough-pass");
-    assert!(out_a.status.success(), "stderr={}", String::from_utf8_lossy(&out_a.stderr));
-    let out_b = run_accept(dir.path(), bootstrap(&root_b).to_url().unwrap().as_str(), "long-enough-pass");
-    assert!(out_b.status.success(), "stderr={}", String::from_utf8_lossy(&out_b.stderr));
+    let out_a = run_accept(
+        dir.path(),
+        bootstrap(&root_a).to_url().unwrap().as_str(),
+        "long-enough-pass",
+    );
+    assert!(
+        out_a.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out_a.stderr)
+    );
+    let out_b = run_accept(
+        dir.path(),
+        bootstrap(&root_b).to_url().unwrap().as_str(),
+        "long-enough-pass",
+    );
+    assert!(
+        out_b.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out_b.stderr)
+    );
 
     let read_jr = |root: &TrustDomainRoot| -> JoinRequest {
         let path = trust_domains_dir(dir.path())
@@ -149,8 +197,15 @@ fn test_accept_invite_reuses_global_device_identity_across_domains() {
 
     assert_eq!(jr_a.applicant_pk, jr_b.applicant_pk);
     assert_ne!(jr_a.trust_domain_id, jr_b.trust_domain_id);
-    assert!(devices_dir(dir.path()).join("default/sk_self.age").is_file());
-    assert_eq!(std::fs::read_dir(devices_dir(dir.path())).unwrap().count(), 1);
+    assert!(
+        devices_dir(dir.path())
+            .join("default/sk_self.age")
+            .is_file()
+    );
+    assert_eq!(
+        std::fs::read_dir(devices_dir(dir.path())).unwrap().count(),
+        1
+    );
     assert_eq!(
         std::fs::read_to_string(
             trust_domains_dir(dir.path())

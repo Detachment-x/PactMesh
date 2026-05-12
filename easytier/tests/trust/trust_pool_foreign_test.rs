@@ -8,13 +8,13 @@ use age::{Encryptor, scrypt};
 use easytier::common::config::TomlConfigLoader;
 use easytier::common::global_ctx::GlobalCtx;
 use easytier::launcher::inject_trust_pool_from_config;
+use easytier::trust::trust_domain_meta::OutboundGrant;
 use easytier::trust::{
     ActiveRelay, Capabilities, MemberCert, NetworkStatePayload, RelayCapabilities, SignKey,
     SignedNetworkState, SignedTrustDomainMeta, TrustDomainPool, TrustDomainRoot,
     UnsignedMemberCert, UnsignedNetworkState, UnsignedTrustDomainMeta, to_canonical_cbor,
     wrap_armored,
 };
-use easytier::trust::trust_domain_meta::OutboundGrant;
 use ed25519_dalek::VerifyingKey;
 use tokio::sync::RwLock;
 
@@ -119,7 +119,11 @@ fn write_domain_files(
     )
     .unwrap();
     std::fs::write(network_dir.join("member_cert.pem"), cert.to_pem()).unwrap();
-    std::fs::write(network_dir.join("sk_self.age"), seal_sign_key(sk_self, password)).unwrap();
+    std::fs::write(
+        network_dir.join("sk_self.age"),
+        seal_sign_key(sk_self, password),
+    )
+    .unwrap();
     std::fs::write(
         network_dir.join("network_state.cbor.pem"),
         sample_network_state(root, cert).to_pem(),
@@ -162,7 +166,11 @@ fn relay_serving_config_toml(
     )
 }
 
-fn no_relay_serving_config_toml(domain_dir: &Path, network_local_id: &str, password_env: &str) -> String {
+fn no_relay_serving_config_toml(
+    domain_dir: &Path,
+    network_local_id: &str,
+    password_env: &str,
+) -> String {
     format!(
         "[network_identity]\nnetwork_name = \"test-network\"\n\n[trust_domain]\ndomain_dir = \"{}\"\nnetwork_local_id = \"{}\"\nsk_self_password_env = \"{}\"\n",
         domain_dir.display(),
@@ -195,8 +203,22 @@ async fn test_foreign_root_injected_into_pool() {
     let foreign_dir = tempfile::tempdir().unwrap();
     let (local_root, network_local_id, local_cert, local_sk) = sample_context_parts();
     let (foreign_root, _, foreign_cert, foreign_sk) = sample_context_parts();
-    write_domain_files(local_dir.path(), &network_local_id, &local_root, &local_cert, &local_sk, PASSWORD);
-    write_domain_files(foreign_dir.path(), &network_local_id, &foreign_root, &foreign_cert, &foreign_sk, PASSWORD);
+    write_domain_files(
+        local_dir.path(),
+        &network_local_id,
+        &local_root,
+        &local_cert,
+        &local_sk,
+        PASSWORD,
+    );
+    write_domain_files(
+        foreign_dir.path(),
+        &network_local_id,
+        &foreign_root,
+        &foreign_cert,
+        &foreign_sk,
+        PASSWORD,
+    );
 
     let foreign_meta = sample_trust_domain_meta(&foreign_root);
     let foreign_meta_path = foreign_dir.path().join("trust_domain_meta.pem");
@@ -233,8 +255,22 @@ async fn test_foreign_trust_domain_meta_signature_verifies() {
     let foreign_dir = tempfile::tempdir().unwrap();
     let (local_root, network_local_id, local_cert, local_sk) = sample_context_parts();
     let (foreign_root, _, foreign_cert, foreign_sk) = sample_context_parts();
-    write_domain_files(local_dir.path(), &network_local_id, &local_root, &local_cert, &local_sk, PASSWORD);
-    write_domain_files(foreign_dir.path(), &network_local_id, &foreign_root, &foreign_cert, &foreign_sk, PASSWORD);
+    write_domain_files(
+        local_dir.path(),
+        &network_local_id,
+        &local_root,
+        &local_cert,
+        &local_sk,
+        PASSWORD,
+    );
+    write_domain_files(
+        foreign_dir.path(),
+        &network_local_id,
+        &foreign_root,
+        &foreign_cert,
+        &foreign_sk,
+        PASSWORD,
+    );
 
     let foreign_meta = sample_trust_domain_meta(&foreign_root);
     let foreign_meta_path = foreign_dir.path().join("trust_domain_meta.pem");
@@ -271,8 +307,22 @@ async fn test_cross_domain_verify_member_cert_uses_foreign_root() {
     let foreign_dir = tempfile::tempdir().unwrap();
     let (local_root, network_local_id, local_cert, local_sk) = sample_context_parts();
     let (foreign_root, _, foreign_cert, foreign_sk) = sample_context_parts();
-    write_domain_files(local_dir.path(), &network_local_id, &local_root, &local_cert, &local_sk, PASSWORD);
-    write_domain_files(foreign_dir.path(), &network_local_id, &foreign_root, &foreign_cert, &foreign_sk, PASSWORD);
+    write_domain_files(
+        local_dir.path(),
+        &network_local_id,
+        &local_root,
+        &local_cert,
+        &local_sk,
+        PASSWORD,
+    );
+    write_domain_files(
+        foreign_dir.path(),
+        &network_local_id,
+        &foreign_root,
+        &foreign_cert,
+        &foreign_sk,
+        PASSWORD,
+    );
 
     let foreign_meta = sample_trust_domain_meta(&foreign_root);
     let foreign_meta_path = foreign_dir.path().join("trust_domain_meta.pem");
@@ -310,7 +360,14 @@ async fn test_cross_domain_verify_member_cert_uses_foreign_root() {
 async fn test_config_without_relay_serving_loads_self_root_only() {
     let local_dir = tempfile::tempdir().unwrap();
     let (local_root, network_local_id, local_cert, local_sk) = sample_context_parts();
-    write_domain_files(local_dir.path(), &network_local_id, &local_root, &local_cert, &local_sk, PASSWORD);
+    write_domain_files(
+        local_dir.path(),
+        &network_local_id,
+        &local_root,
+        &local_cert,
+        &local_sk,
+        PASSWORD,
+    );
 
     let env_name = format!("PNW_TP_SELF_{}", std::process::id());
     unsafe { std::env::set_var(&env_name, PASSWORD) };

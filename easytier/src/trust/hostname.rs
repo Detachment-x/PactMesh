@@ -13,7 +13,19 @@ use thiserror::Error;
 use super::types::MemberCertFingerprint;
 
 /// Validated DNS-LDH label, lowercase-normalized, 1..=63 bytes.
-#[derive(serde::Serialize, serde::Deserialize, minicbor::Encode, minicbor::Decode, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    serde::Serialize,
+    serde::Deserialize,
+    minicbor::Encode,
+    minicbor::Decode,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+)]
 pub struct HostnameLabel(#[n(0)] pub String);
 
 impl HostnameLabel {

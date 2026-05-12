@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, net::IpAddr, path::Path, process::Command, str::FromStr};
 
-use ed25519_dalek::SigningKey;
 use easytier::trust::{
     ACL_SCHEMA_VERSION, AclPolicy, Action, Capabilities, HostnameLabel, MemberCertFingerprint,
     MemberCertIndexEntry, NetworkLocalId, NetworkStatePayload, RevocationReason, TrustDomainRoot,
     UnsignedMemberCert, UnsignedNetworkState, to_canonical_cbor,
 };
+use ed25519_dalek::SigningKey;
 use pnet::ipnetwork::IpNetwork as IpNet;
 use rand::rngs::OsRng;
 use serde_json::Value;
@@ -27,19 +27,36 @@ fn fingerprint(byte: u8) -> MemberCertFingerprint {
 }
 
 fn network_dir(root: &Path, domain_id: &str, network_id: &str) -> std::path::PathBuf {
-    trust_domains_dir(root).join(domain_id).join("networks").join(network_id)
+    trust_domains_dir(root)
+        .join(domain_id)
+        .join("networks")
+        .join(network_id)
 }
 
-fn write_domain_state(root_dir: &Path, entries: Vec<MemberCertIndexEntry>, revoked: Vec<MemberCertFingerprint>, disabled: Vec<MemberCertFingerprint>) -> (TrustDomainRoot, String, String) {
+fn write_domain_state(
+    root_dir: &Path,
+    entries: Vec<MemberCertIndexEntry>,
+    revoked: Vec<MemberCertFingerprint>,
+    disabled: Vec<MemberCertFingerprint>,
+) -> (TrustDomainRoot, String, String) {
     let root = TrustDomainRoot::generate();
     let domain_id = root.id().to_string();
     let network_id = "office-net".to_owned();
     let domain_dir = trust_domains_dir(root_dir).join(&domain_id);
     let network_dir = network_dir(root_dir, &domain_id, &network_id);
     std::fs::create_dir_all(&network_dir).unwrap();
-    root.save_to_file(&domain_dir.join("sk_root.age"), "long-enough-pass").unwrap();
-    std::fs::write(domain_dir.join("pk_root.pem"), easytier::trust::wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes())).unwrap();
-    std::fs::write(domain_dir.join("meta.toml"), "label = \"home\"\ncreated_at = \"1\"\ncurve = \"ed25519\"\n").unwrap();
+    root.save_to_file(&domain_dir.join("sk_root.age"), "long-enough-pass")
+        .unwrap();
+    std::fs::write(
+        domain_dir.join("pk_root.pem"),
+        easytier::trust::wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes()),
+    )
+    .unwrap();
+    std::fs::write(
+        domain_dir.join("meta.toml"),
+        "label = \"home\"\ncreated_at = \"1\"\ncurve = \"ed25519\"\n",
+    )
+    .unwrap();
 
     let acl = AclPolicy {
         tags: BTreeMap::new(),
@@ -89,7 +106,12 @@ fn index_entry(fp: MemberCertFingerprint, label: &str) -> MemberCertIndexEntry {
     }
 }
 
-fn run_list(root: &Path, domain_id: &str, network_id: &str, extra: &[&str]) -> std::process::Output {
+fn run_list(
+    root: &Path,
+    domain_id: &str,
+    network_id: &str,
+    extra: &[&str],
+) -> std::process::Output {
     let mut cmd = cli();
     cmd.env("XDG_CONFIG_HOME", config_home(root))
         .arg("trust")
@@ -105,11 +127,16 @@ fn run_list(root: &Path, domain_id: &str, network_id: &str, extra: &[&str]) -> s
 #[test]
 fn test_list_members_empty() {
     let dir = tempfile::tempdir().unwrap();
-    let (_root, domain_id, network_id) = write_domain_state(dir.path(), Vec::new(), Vec::new(), Vec::new());
+    let (_root, domain_id, network_id) =
+        write_domain_state(dir.path(), Vec::new(), Vec::new(), Vec::new());
 
     let output = run_list(dir.path(), &domain_id, &network_id, &[]);
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("(no members)"));
 }
 
@@ -119,20 +146,43 @@ fn test_list_members_mixed_statuses() {
     let active = fingerprint(1);
     let disabled = fingerprint(2);
     let revoked = fingerprint(3);
+    let expired = fingerprint(4);
     let (_root, domain_id, network_id) = write_domain_state(
         dir.path(),
-        vec![index_entry(active, "active"), index_entry(disabled, "disabled"), index_entry(revoked, "revoked")],
+        vec![
+            MemberCertIndexEntry {
+                expires_at: u64::MAX,
+                ..index_entry(active, "active")
+            },
+            MemberCertIndexEntry {
+                expires_at: u64::MAX,
+                ..index_entry(disabled, "disabled")
+            },
+            MemberCertIndexEntry {
+                expires_at: u64::MAX,
+                ..index_entry(revoked, "revoked")
+            },
+            index_entry(expired, "expired"),
+        ],
         vec![revoked],
         vec![disabled],
     );
 
     let output = run_list(dir.path(), &domain_id, &network_id, &["--include", "all"]);
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("active"));
     assert!(stdout.contains("disabled"));
     assert!(stdout.contains("revoked"));
+    assert!(stdout.contains("expired"));
+    assert!(stdout.contains("role"));
+    assert!(stdout.contains("network_local_id"));
+    assert!(stdout.contains("device_id"));
 }
 
 #[test]
@@ -144,9 +194,18 @@ fn test_list_members_capability_rendering() {
     let domain_dir = trust_domains_dir(dir.path()).join(&domain_id);
     let network_path = network_dir(dir.path(), &domain_id, &network_id);
     std::fs::create_dir_all(&network_path).unwrap();
-    root.save_to_file(&domain_dir.join("sk_root.age"), "long-enough-pass").unwrap();
-    std::fs::write(domain_dir.join("pk_root.pem"), easytier::trust::wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes())).unwrap();
-    std::fs::write(domain_dir.join("meta.toml"), "label = \"home\"\ncreated_at = \"1\"\ncurve = \"ed25519\"\n").unwrap();
+    root.save_to_file(&domain_dir.join("sk_root.age"), "long-enough-pass")
+        .unwrap();
+    std::fs::write(
+        domain_dir.join("pk_root.pem"),
+        easytier::trust::wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes()),
+    )
+    .unwrap();
+    std::fs::write(
+        domain_dir.join("meta.toml"),
+        "label = \"home\"\ncreated_at = \"1\"\ncurve = \"ed25519\"\n",
+    )
+    .unwrap();
     let sk = SigningKey::generate(&mut OsRng);
     let cert = UnsignedMemberCert {
         trust_domain_id: root.id(),
@@ -154,7 +213,7 @@ fn test_list_members_capability_rendering() {
         device_pk: sk.verifying_key(),
         device_label: "relay".to_owned(),
         not_before: 10,
-        expires_at: 100,
+        expires_at: u64::MAX,
         capabilities: Capabilities {
             can_relay_data: true,
             can_relay_control: true,
@@ -176,7 +235,10 @@ fn test_list_members_capability_rendering() {
         network_local_id: NetworkLocalId::try_from_str(&network_id).unwrap(),
         version: 1,
         payload: NetworkStatePayload {
-            member_cert_index: vec![index_entry(fp, "relay")],
+            member_cert_index: vec![MemberCertIndexEntry {
+                expires_at: u64::MAX,
+                ..index_entry(fp, "relay")
+            }],
             revoked_certs: Vec::new(),
             disabled_certs: Vec::new(),
             acl: to_canonical_cbor(&acl),
@@ -189,7 +251,11 @@ fn test_list_members_capability_rendering() {
 
     let output = run_list(dir.path(), &domain_id, &network_id, &[]);
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("relay-data"));
     assert!(stdout.contains("relay-control"));
@@ -204,16 +270,63 @@ fn test_list_members_status_filter() {
     let disabled = fingerprint(2);
     let (_root, domain_id, network_id) = write_domain_state(
         dir.path(),
-        vec![index_entry(active, "active"), index_entry(disabled, "disabled")],
+        vec![
+            index_entry(active, "active"),
+            index_entry(disabled, "disabled"),
+        ],
         Vec::new(),
         vec![disabled],
     );
 
-    let output = run_list(dir.path(), &domain_id, &network_id, &["--include", "disabled"]);
+    let output = run_list(
+        dir.path(),
+        &domain_id,
+        &network_id,
+        &["--include", "disabled"],
+    );
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("disabled"));
+    assert!(!stdout.contains("\tactive\t"));
+}
+
+#[test]
+fn test_list_members_expired_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let active = fingerprint(1);
+    let expired = fingerprint(2);
+    let (_root, domain_id, network_id) = write_domain_state(
+        dir.path(),
+        vec![
+            MemberCertIndexEntry {
+                expires_at: u64::MAX,
+                ..index_entry(active, "active")
+            },
+            index_entry(expired, "expired"),
+        ],
+        Vec::new(),
+        Vec::new(),
+    );
+
+    let output = run_list(
+        dir.path(),
+        &domain_id,
+        &network_id,
+        &["--include", "expired"],
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("expired"));
     assert!(!stdout.contains("\tactive\t"));
 }
 
@@ -223,17 +336,29 @@ fn test_list_members_json_format() {
     let active = fingerprint(1);
     let (_root, domain_id, network_id) = write_domain_state(
         dir.path(),
-        vec![index_entry(active, "active")],
+        vec![MemberCertIndexEntry {
+            expires_at: u64::MAX,
+            ..index_entry(active, "active")
+        }],
         Vec::new(),
         Vec::new(),
     );
 
     let output = run_list(dir.path(), &domain_id, &network_id, &["--json"]);
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     let rows = value.as_array().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["device_label"], "active");
     assert_eq!(rows[0]["status"], "active");
+    assert_eq!(rows[0]["device_id"], "unknown");
+    assert_eq!(rows[0]["role"], "member");
+    assert_eq!(rows[0]["network_local_id"], "office-net");
+    assert!(rows[0]["capabilities"].is_object());
+    assert_eq!(rows[0]["capabilities"]["relay_data"], false);
 }

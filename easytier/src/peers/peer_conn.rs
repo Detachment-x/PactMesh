@@ -29,14 +29,9 @@ use zerocopy::AsBytes;
 
 use snow::{HandshakeState, params::NoiseParams};
 
+use crate::trust::identity::{SignatureBytes, verify_signature};
 use crate::{
-    common::{
-        PeerId,
-        config::NetworkIdentity,
-        defer,
-        error::Error,
-        global_ctx::ArcGlobalCtx,
-    },
+    common::{PeerId, config::NetworkIdentity, defer, error::Error, global_ctx::ArcGlobalCtx},
     peers::peer_session::{PeerSessionStore, SessionKey, UpsertResponderSessionReturn},
     proto::{
         api::instance::{PeerConnInfo, PeerConnStats},
@@ -57,7 +52,6 @@ use crate::{
         stats::{Throughput, WindowLatency},
     },
 };
-use crate::trust::identity::{SignatureBytes, verify_signature};
 
 use super::{
     PacketRecvChan,
@@ -456,12 +450,14 @@ impl PeerConn {
     }
 
     fn decode_member_cert(bytes: &[u8]) -> Result<MemberCert, Error> {
-        from_cbor(bytes).map_err(|err| Error::WaitRespError(format!("invalid member cert cbor: {err}")))
+        from_cbor(bytes)
+            .map_err(|err| Error::WaitRespError(format!("invalid member cert cbor: {err}")))
     }
 
     fn decode_borrowed_relay_proof(bytes: &[u8]) -> Result<BorrowedRelayProof, Error> {
-        from_cbor(bytes)
-            .map_err(|err| Error::WaitRespError(format!("invalid borrowed relay proof cbor: {err}")))
+        from_cbor(bytes).map_err(|err| {
+            Error::WaitRespError(format!("invalid borrowed relay proof cbor: {err}"))
+        })
     }
 
     fn verify_handshake_signature(req: &HandshakeRequest, cert: &MemberCert) -> Result<(), Error> {
@@ -483,7 +479,10 @@ impl PeerConn {
         .map_err(|_| Error::WaitRespError("invalid applicant signature".to_owned()))
     }
 
-    async fn decode_and_verify_plain_handshake(&self, req: HandshakeRequest) -> Result<HandshakeRequest, Error> {
+    async fn decode_and_verify_plain_handshake(
+        &self,
+        req: HandshakeRequest,
+    ) -> Result<HandshakeRequest, Error> {
         let cert = Self::decode_member_cert(&req.member_cert_cbor)?;
         Self::verify_handshake_signature(&req, &cert)?;
 
@@ -669,7 +668,9 @@ impl PeerConn {
         }
 
         if rsp.applicant_signature.len() != 64 {
-            return Err(Error::WaitRespError("invalid applicant signature".to_owned()));
+            return Err(Error::WaitRespError(
+                "invalid applicant signature".to_owned(),
+            ));
         }
 
         if rsp.member_cert_cbor.is_empty() {
@@ -1744,8 +1745,20 @@ pub mod tests {
         let c_peer_id = new_peer_id();
         let s_peer_id = c_peer_id;
 
-        let mut c_peer = PeerConn::new(c_peer_id, get_mock_global_ctx(), Box::new(c), ps.clone(), None);
-        let mut s_peer = PeerConn::new(s_peer_id, get_mock_global_ctx(), Box::new(s), ps.clone(), None);
+        let mut c_peer = PeerConn::new(
+            c_peer_id,
+            get_mock_global_ctx(),
+            Box::new(c),
+            ps.clone(),
+            None,
+        );
+        let mut s_peer = PeerConn::new(
+            s_peer_id,
+            get_mock_global_ctx(),
+            Box::new(s),
+            ps.clone(),
+            None,
+        );
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -1969,11 +1982,9 @@ pub mod tests {
         c_ctx
             .config
             .set_network_identity(NetworkIdentity::new("user".to_string()));
-        s_ctx
-            .config
-            .set_network_identity(NetworkIdentity {
-                network_name: "shared".to_string(),
-            });
+        s_ctx.config.set_network_identity(NetworkIdentity {
+            network_name: "shared".to_string(),
+        });
         set_secure_mode_cfg(&s_ctx, true);
 
         let ps = Arc::new(PeerSessionStore::new());
@@ -2014,7 +2025,9 @@ pub mod tests {
         c_ctx
             .config
             .set_network_identity(NetworkIdentity::new("user".to_string()));
-        s_ctx.config.set_network_identity(NetworkIdentity::new("shared".to_string()));
+        s_ctx
+            .config
+            .set_network_identity(NetworkIdentity::new("shared".to_string()));
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
@@ -2150,11 +2163,9 @@ pub mod tests {
         c_ctx
             .config
             .set_network_identity(NetworkIdentity::new("net1".to_string()));
-        s_ctx
-            .config
-            .set_network_identity(NetworkIdentity {
-                network_name: "net2".to_string(),
-            });
+        s_ctx.config.set_network_identity(NetworkIdentity {
+            network_name: "net2".to_string(),
+        });
 
         let remote_url: url::Url = c.info().unwrap().remote_addr.unwrap().url.parse().unwrap();
 
@@ -2212,11 +2223,9 @@ pub mod tests {
         c_ctx
             .config
             .set_network_identity(NetworkIdentity::new("net1".to_string()));
-        s_ctx
-            .config
-            .set_network_identity(NetworkIdentity {
-                network_name: "net2".to_string(),
-            });
+        s_ctx.config.set_network_identity(NetworkIdentity {
+            network_name: "net2".to_string(),
+        });
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
@@ -2266,8 +2275,20 @@ pub mod tests {
         let s_peer_id = new_peer_id();
 
         let ps = Arc::new(PeerSessionStore::new());
-        let mut c_peer = PeerConn::new(c_peer_id, get_mock_global_ctx(), Box::new(c), ps.clone(), None);
-        let mut s_peer = PeerConn::new(s_peer_id, get_mock_global_ctx(), Box::new(s), ps.clone(), None);
+        let mut c_peer = PeerConn::new(
+            c_peer_id,
+            get_mock_global_ctx(),
+            Box::new(c),
+            ps.clone(),
+            None,
+        );
+        let mut s_peer = PeerConn::new(
+            s_peer_id,
+            get_mock_global_ctx(),
+            Box::new(s),
+            ps.clone(),
+            None,
+        );
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -2413,7 +2434,9 @@ pub mod tests {
 
         // Admin node (server) has network_secret
         let s_ctx = get_mock_global_ctx();
-        s_ctx.config.set_network_identity(NetworkIdentity::new("net1".to_string()));
+        s_ctx
+            .config
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
         set_secure_mode_cfg(&s_ctx, true);
 
         // Generate a credential on admin and get the private key for the client
@@ -2480,7 +2503,9 @@ pub mod tests {
 
         // Admin node (server) with no credentials generated
         let s_ctx = get_mock_global_ctx();
-        s_ctx.config.set_network_identity(NetworkIdentity::new("net1".to_string()));
+        s_ctx
+            .config
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
         set_secure_mode_cfg(&s_ctx, true);
 
         // Unknown credential node (client) with random key, not in admin's trusted list
@@ -2515,8 +2540,12 @@ pub mod tests {
         let c_ctx = get_mock_global_ctx();
         let s_ctx = get_mock_global_ctx();
 
-        c_ctx.config.set_network_identity(NetworkIdentity::new("net1".to_string()));
-        s_ctx.config.set_network_identity(NetworkIdentity::new("net1".to_string()));
+        c_ctx
+            .config
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
+        s_ctx
+            .config
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
@@ -2548,7 +2577,9 @@ pub mod tests {
     async fn peer_conn_revoked_credential_rejected() {
         // Admin generates credential, then revokes it
         let admin_ctx = get_mock_global_ctx();
-        admin_ctx.config.set_network_identity(NetworkIdentity::new("net1".to_string()));
+        admin_ctx
+            .config
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
         set_secure_mode_cfg(&admin_ctx, true);
 
         let (cred_id, cred_secret) = admin_ctx.get_credential_manager().generate_credential(

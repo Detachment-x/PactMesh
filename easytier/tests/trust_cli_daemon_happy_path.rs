@@ -166,6 +166,50 @@ fn spawn_core(
         .unwrap()
 }
 
+fn spawn_core_auto_trust_dir(
+    root: &Path,
+    instance_name: &str,
+    rpc_port: u16,
+    listener_port: Option<u16>,
+    peer_port: Option<u16>,
+) -> Child {
+    let mut cmd = core();
+    cmd.env("XDG_CONFIG_HOME", config_home(root))
+        .env("PNW_ROOT_PASSPHRASE", ROOT_PASSPHRASE)
+        .env("ET_SK_SELF_PASSWORD", DEVICE_PASSPHRASE)
+        .arg("--network-name")
+        .arg(NETWORK_LOCAL_ID)
+        .arg("--network-local-id")
+        .arg(NETWORK_LOCAL_ID)
+        .arg("--sk-self-password-env")
+        .arg("ET_SK_SELF_PASSWORD")
+        .arg("--rpc-portal")
+        .arg(rpc_port.to_string())
+        .arg("--no-tun")
+        .arg("true")
+        .arg("--disable-ipv6")
+        .arg("true")
+        .arg("--instance-name")
+        .arg(instance_name)
+        .arg("--console-log-level")
+        .arg("info")
+        .arg("--daemon");
+    if let Some(listener_port) = listener_port {
+        cmd.arg("--listeners")
+            .arg(format!("tcp://127.0.0.1:{listener_port}"));
+    } else {
+        cmd.arg("--no-listener");
+    }
+    if let Some(peer_port) = peer_port {
+        cmd.arg("--peers")
+            .arg(format!("tcp://127.0.0.1:{peer_port}"));
+    }
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
 fn list_pending(root: &Path, rpc_port: u16, trust_domain_id: &str) -> Vec<Value> {
     let output = cli()
         .env("XDG_CONFIG_HOME", config_home(root))
@@ -190,7 +234,8 @@ fn approve_first_pending(root: &Path, rpc_port: u16, trust_domain_id: &str) {
     while Instant::now() < deadline {
         let pending = list_pending(root, rpc_port, trust_domain_id);
         if let Some(first) = pending.first() {
-            let applicant_pk = first["applicant_pk"].as_str().unwrap();
+            let applicant_pk = first["device_id"].as_str().unwrap();
+            let applicant_pk = &applicant_pk[..16];
             let mut cmd = cli();
             cmd.env("XDG_CONFIG_HOME", config_home(root))
                 .env("PNW_ROOT_PASSPHRASE", ROOT_PASSPHRASE)
@@ -210,12 +255,13 @@ fn approve_first_pending(root: &Path, rpc_port: u16, trust_domain_id: &str) {
     panic!("pending join request did not appear");
 }
 
-fn accept_invite_online(root: &Path, rpc_port: u16, invite: &str) -> Child {
+fn accept_invite_online(root: &Path, invite: &str) -> Child {
+    let unused_rpc_port = free_port();
     let mut cmd = cli();
     cmd.env("XDG_CONFIG_HOME", config_home(root))
         .env("PNW_DEVICE_PASSPHRASE", DEVICE_PASSPHRASE)
         .arg("--rpc-portal")
-        .arg(format!("127.0.0.1:{rpc_port}"))
+        .arg(format!("127.0.0.1:{unused_rpc_port}"))
         .arg("trust")
         .arg("accept-invite")
         .arg(invite)
@@ -257,6 +303,15 @@ fn peer_list_contains_peer(root: &Path, rpc_port: u16) -> bool {
     })
 }
 
+#[test]
+fn test_core_daemon_help_says_no_background_fork() {
+    let output = core().arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--daemon"));
+    assert!(stdout.contains("does not fork into the background"));
+}
+
 struct ChildGuard(Child);
 
 impl Drop for ChildGuard {
@@ -289,9 +344,10 @@ fn test_cli_daemon_online_invite_establishes_peer() {
         None,
     ));
     wait_for_port(listener_port);
+    wait_for_port(listener_port + 1);
     wait_for_port(root_rpc_port);
 
-    let mut accept = accept_invite_online(&root_b, root_rpc_port, &invite);
+    let mut accept = accept_invite_online(&root_b, &invite);
     approve_first_pending(&root_a, root_rpc_port, &trust_domain_id);
     assert!(accept.wait().unwrap().success());
 
@@ -299,11 +355,14 @@ fn test_cli_daemon_online_invite_establishes_peer() {
     assert!(member_network_dir.join("member_cert.pem").is_file());
     assert!(member_network_dir.join("sk_self.age").is_file());
     assert!(member_network_dir.join("network_state.cbor.pem").is_file());
-    assert!(member_network_dir.join("network_bootstrap.cbor.pem").is_file());
+    assert!(
+        member_network_dir
+            .join("network_bootstrap.cbor.pem")
+            .is_file()
+    );
 
-    let _member = ChildGuard(spawn_core(
+    let _member = ChildGuard(spawn_core_auto_trust_dir(
         &root_b,
-        &trust_domain_id,
         "node-b",
         member_rpc_port,
         None,

@@ -3,8 +3,8 @@
 //! Applies VR1–VR11 from `acl-schema-draft.md` §4.
 
 use super::acl::{
-    ACL_SCHEMA_VERSION, AclPolicy, AclRule, Cidr, DeviceFingerprint, MAX_RULES, MAX_TAGS,
-    PortSpec, Proto, Selector,
+    ACL_SCHEMA_VERSION, AclPolicy, AclRule, Cidr, DeviceFingerprint, MAX_RULES, MAX_TAGS, PortSpec,
+    Proto, Selector,
 };
 use super::acl_error::AclError;
 
@@ -17,14 +17,19 @@ pub fn validate_for_signing(
     validate_common(policy)?;
 
     for (tag, members) in &policy.tags {
-        if members.iter().any(|member| !member_cert_index.contains(member)) {
+        if members
+            .iter()
+            .any(|member| !member_cert_index.contains(member))
+        {
             return Err(AclError::TagMemberNotFound(tag.as_str().to_owned()));
         }
     }
 
     for rule in &policy.rules {
         for selector in rule.src.iter().chain(&rule.dst) {
-            if let Selector::Subnet(cidr) = selector && !proxy_cidrs.contains(cidr) {
+            if let Selector::Subnet(cidr) = selector
+                && !proxy_cidrs.contains(cidr)
+            {
                 return Err(AclError::SubnetOrphan(cidr_string(*cidr)));
             }
         }
@@ -80,11 +85,15 @@ fn validate_rule(policy: &AclPolicy, rule: &AclRule, idx: usize) -> Result<(), A
     }
 
     if rule.ports.is_some() && !matches!(rule.proto, Proto::Tcp | Proto::Udp) {
-        return Err(AclError::PortsNotApplicable(proto_name(rule.proto).to_owned()));
+        return Err(AclError::PortsNotApplicable(
+            proto_name(rule.proto).to_owned(),
+        ));
     }
 
     for port in rule.ports.iter().flatten() {
-        if let PortSpec::Range(low, high) = port && low > high {
+        if let PortSpec::Range(low, high) = port
+            && low > high
+        {
             return Err(AclError::InvalidPortRange(*low, *high));
         }
     }

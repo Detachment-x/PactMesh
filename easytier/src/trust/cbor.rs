@@ -16,7 +16,6 @@ const ARMOR_BEGIN_PREFIX: &str = "-----BEGIN ";
 const ARMOR_END_PREFIX: &str = "-----END ";
 const ARMOR_SUFFIX: &str = "-----";
 
-
 #[derive(Debug, Clone, PartialEq)]
 enum CanonicalValue {
     Unsigned(u64),
@@ -49,7 +48,8 @@ pub fn from_cbor<'b, T: Decode<'b, ()>>(bytes: &'b [u8]) -> Result<T, CborError>
     if canonical_decoder.position() != bytes.len() {
         return Err(CborError::TrailingBytes);
     }
-    let canonical = encode_canonical_value(&parsed).map_err(|err| CborError::Encode(err.to_string()))?;
+    let canonical =
+        encode_canonical_value(&parsed).map_err(|err| CborError::Encode(err.to_string()))?;
     if canonical != bytes {
         return Err(CborError::NonCanonical);
     }
@@ -113,7 +113,8 @@ pub fn unwrap_armored(text: &str, expected_label: &str) -> Result<Vec<u8>, Armor
         return Err(ArmorError::Boundary);
     }
 
-    let found_label = parse_armor_label(lines[0], ARMOR_BEGIN_PREFIX).ok_or(ArmorError::Boundary)?;
+    let found_label =
+        parse_armor_label(lines[0], ARMOR_BEGIN_PREFIX).ok_or(ArmorError::Boundary)?;
     let footer_label = parse_armor_label(lines.last().expect("len checked"), ARMOR_END_PREFIX)
         .ok_or(ArmorError::Boundary)?;
     if found_label != footer_label {
@@ -146,7 +147,9 @@ pub enum ArmorError {
 fn parse_armor_label<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
     line.strip_prefix(prefix)?.strip_suffix(ARMOR_SUFFIX)
 }
-fn parse_canonical_value(decoder: &mut Decoder<'_>) -> Result<CanonicalValue, minicbor::decode::Error> {
+fn parse_canonical_value(
+    decoder: &mut Decoder<'_>,
+) -> Result<CanonicalValue, minicbor::decode::Error> {
     Ok(match decoder.datatype()? {
         Type::U8 | Type::U16 | Type::U32 | Type::U64 => CanonicalValue::Unsigned(decoder.u64()?),
         Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::Int => {
@@ -157,7 +160,7 @@ fn parse_canonical_value(decoder: &mut Decoder<'_>) -> Result<CanonicalValue, mi
         Type::BytesIndef | Type::StringIndef => {
             return Err(minicbor::decode::Error::message(
                 "indefinite bytes/text are not canonical",
-            ))
+            ));
         }
         Type::Array => {
             let len = decoder
@@ -182,7 +185,9 @@ fn parse_canonical_value(decoder: &mut Decoder<'_>) -> Result<CanonicalValue, mi
             CanonicalValue::Array(items)
         }
         Type::Map => {
-            let len = decoder.map()?.expect("definite map type must report a length");
+            let len = decoder
+                .map()?
+                .expect("definite map type must report a length");
             let mut entries = Vec::with_capacity(len as usize);
             for _ in 0..len {
                 let key = parse_canonical_value(decoder)?;
@@ -224,17 +229,19 @@ fn parse_canonical_value(decoder: &mut Decoder<'_>) -> Result<CanonicalValue, mi
         Type::F16 => {
             return Err(minicbor::decode::Error::message(
                 "f16 support unavailable in this build",
-            ))
+            ));
         }
         Type::Simple | Type::Break | Type::Unknown(_) => {
             return Err(minicbor::decode::Error::message(
                 "unsupported CBOR token for canonical helper",
-            ))
+            ));
         }
     })
 }
 
-fn encode_canonical_value(value: &CanonicalValue) -> Result<Vec<u8>, minicbor::encode::Error<std::convert::Infallible>> {
+fn encode_canonical_value(
+    value: &CanonicalValue,
+) -> Result<Vec<u8>, minicbor::encode::Error<std::convert::Infallible>> {
     let mut out = Vec::new();
     let mut encoder = Encoder::new(&mut out);
     encode_canonical_into(&mut encoder, value)?;

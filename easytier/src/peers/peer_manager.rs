@@ -588,7 +588,10 @@ impl PeerManager {
             tags: &policy.tags,
             proxy_cidrs,
         };
-        matches!(decide(policy, packet, src_ctx, dst_ctx), crate::trust::Action::Accept)
+        matches!(
+            decide(policy, packet, src_ctx, dst_ctx),
+            crate::trust::Action::Accept
+        )
     }
 
     pub(crate) async fn process_packet_with_trust_acl(
@@ -647,7 +650,9 @@ impl PeerManager {
         };
 
         let pool = trust_pool.read().await;
-        let Some(state) = pool.network_state(&trust_ctx.trust_domain_id, &trust_ctx.network_local_id) else {
+        let Some(state) =
+            pool.network_state(&trust_ctx.trust_domain_id, &trust_ctx.network_local_id)
+        else {
             return true;
         };
         if state.details.payload.acl.is_empty() {
@@ -858,16 +863,18 @@ impl PeerManager {
             .await
     }
 
-
     pub async fn try_direct_connect_with_borrowed_proof<C>(
         &self,
         mut connector: C,
         borrowed_proof: BorrowedRelayProof,
-    ) -> Result<(
-        PeerId,
-        PeerConnId,
-        Arc<crate::peers::peer_conn::PeerConnCloseNotify>,
-    ), Error>
+    ) -> Result<
+        (
+            PeerId,
+            PeerConnId,
+            Arc<crate::peers::peer_conn::PeerConnCloseNotify>,
+        ),
+        Error,
+    >
     where
         C: TunnelConnector + Debug,
     {
@@ -992,7 +999,8 @@ impl PeerManager {
             .peer_trust_domain_id()
             .is_some_and(|tdid| tdid == trust_ctx.trust_domain_id);
 
-        if !is_local_network && self.global_ctx.get_flags().private_mode && !foreign_network_allowed {
+        if !is_local_network && self.global_ctx.get_flags().private_mode && !foreign_network_allowed
+        {
             return Err(Error::SecretKeyError(
                 "private mode is turned on, foreign trust domain mismatch".to_string(),
             ));
@@ -2086,7 +2094,6 @@ impl PeerManager {
         self.peer_rpc_mgr.clone()
     }
 
-
     pub fn get_trust_pool(&self) -> Option<Arc<RwLock<TrustDomainPool>>> {
         self.trust_pool.clone()
     }
@@ -2430,8 +2437,9 @@ mod tests {
     #[test]
     fn trust_acl_decision_drops_matching_rule() {
         let policy = drop_client_to_server_ssh_policy();
-        let packet = PeerManager::trust_acl_packet_tuple(&tcp_packet([10, 0, 0, 1], [10, 0, 0, 2], 22))
-            .unwrap();
+        let packet =
+            PeerManager::trust_acl_packet_tuple(&tcp_packet([10, 0, 0, 1], [10, 0, 0, 2], 22))
+                .unwrap();
         let client = TrustAclPeerIdentity {
             fingerprint: fp(1),
             proxy_cidrs: Vec::new(),
@@ -2453,8 +2461,9 @@ mod tests {
     #[test]
     fn trust_acl_decision_allows_non_matching_port() {
         let policy = drop_client_to_server_ssh_policy();
-        let packet = PeerManager::trust_acl_packet_tuple(&tcp_packet([10, 0, 0, 1], [10, 0, 0, 2], 80))
-            .unwrap();
+        let packet =
+            PeerManager::trust_acl_packet_tuple(&tcp_packet([10, 0, 0, 1], [10, 0, 0, 2], 80))
+                .unwrap();
         let client = TrustAclPeerIdentity {
             fingerprint: fp(1),
             proxy_cidrs: Vec::new(),
@@ -3424,7 +3433,12 @@ mod tests {
                 data_compress_algo: CompressionAlgoPb::Zstd.into(),
                 ..Default::default()
             });
-            let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, mock_global_ctx, s, None));
+            let peer_mgr = Arc::new(PeerManager::new(
+                RouteAlgoType::Ospf,
+                mock_global_ctx,
+                s,
+                None,
+            ));
             peer_mgr.run().await.unwrap();
             peer_mgr
         };

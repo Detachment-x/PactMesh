@@ -6,6 +6,7 @@ use std::{
 };
 
 use base64::{Engine as _, prelude::BASE64_STANDARD};
+use cidr::Ipv4Cidr;
 use easytier::{
     common::{
         config::{ConfigLoader, NetworkIdentity, TomlConfigLoader},
@@ -17,14 +18,13 @@ use easytier::{
     trust::{
         ACL_SCHEMA_VERSION, AclPolicy, AclRule, Action, Capabilities, DeviceFingerprint,
         MemberCert, NetworkLocalId, NetworkStatePayload, PortSpec, Proto, Selector, SignKey,
-        SignedNetworkState, TrustDomainPool, TrustDomainRoot, UnsignedMemberCert,
-        UnsignedNetworkState, TagName,
+        SignedNetworkState, TagName, TrustDomainPool, TrustDomainRoot, UnsignedMemberCert,
+        UnsignedNetworkState,
     },
     tunnel::{
         common::tests::wait_for_condition, packet_def::ZCPacket, ring::create_ring_tunnel_pair,
     },
 };
-use cidr::Ipv4Cidr;
 use rand::rngs::OsRng;
 use serial_test::serial;
 use sha2::{Digest, Sha256};
@@ -72,7 +72,11 @@ fn make_member(root: &TrustDomainRoot, label: &str) -> MemberFixture {
     make_member_with_proxy(root, label, Vec::new())
 }
 
-fn make_member_with_proxy(root: &TrustDomainRoot, label: &str, proxy_cidrs: Vec<pnet::ipnetwork::IpNetwork>) -> MemberFixture {
+fn make_member_with_proxy(
+    root: &TrustDomainRoot,
+    label: &str,
+    proxy_cidrs: Vec<pnet::ipnetwork::IpNetwork>,
+) -> MemberFixture {
     let sk_self = SignKey::generate();
     let verify_key = ed25519_dalek::VerifyingKey::from_bytes(&sk_self.verify_key().0).unwrap();
     let now = now_unix();
@@ -169,8 +173,14 @@ async fn setup(
 ) -> (Instance, Instance, Arc<RwLock<TrustDomainPool>>) {
     let state = state(root, NETWORK_STATE_VERSION, acl);
     let shared_pool = pool(root, state);
-    let mut inst_a = Instance::new_with_trust_pool(base_config("client-a", "10.144.144.1"), Some(shared_pool.clone()));
-    let mut inst_c = Instance::new_with_trust_pool(base_config("server-c", "10.144.144.3"), Some(shared_pool.clone()));
+    let mut inst_a = Instance::new_with_trust_pool(
+        base_config("client-a", "10.144.144.1"),
+        Some(shared_pool.clone()),
+    );
+    let mut inst_c = Instance::new_with_trust_pool(
+        base_config("server-c", "10.144.144.3"),
+        Some(shared_pool.clone()),
+    );
     attach_trust_context(&inst_a, root, client).await;
     attach_trust_context(&inst_c, root, server).await;
     inst_a.run().await.unwrap();
@@ -194,17 +204,31 @@ async fn setup(
     (inst_a, inst_c, shared_pool)
 }
 
-fn policy(default_action: Action, rules: Vec<AclRule>, client: &MemberCert, server: &MemberCert) -> AclPolicy {
+fn policy(
+    default_action: Action,
+    rules: Vec<AclRule>,
+    client: &MemberCert,
+    server: &MemberCert,
+) -> AclPolicy {
     let mut tags = BTreeMap::new();
     tags.insert(tag("client"), vec![device_fp(client)]);
     tags.insert(tag("server"), vec![device_fp(server)]);
-    AclPolicy { tags, rules, default_action, schema_version: ACL_SCHEMA_VERSION }
+    AclPolicy {
+        tags,
+        rules,
+        default_action,
+        schema_version: ACL_SCHEMA_VERSION,
+    }
 }
 
 fn cidr_selector(text: &str) -> easytier::trust::Cidr {
     match text.parse::<pnet::ipnetwork::IpNetwork>().unwrap() {
-        pnet::ipnetwork::IpNetwork::V4(net) => easytier::trust::Cidr::new(IpAddr::V4(net.ip()), net.prefix()),
-        pnet::ipnetwork::IpNetwork::V6(net) => easytier::trust::Cidr::new(IpAddr::V6(net.ip()), net.prefix()),
+        pnet::ipnetwork::IpNetwork::V4(net) => {
+            easytier::trust::Cidr::new(IpAddr::V4(net.ip()), net.prefix())
+        }
+        pnet::ipnetwork::IpNetwork::V6(net) => {
+            easytier::trust::Cidr::new(IpAddr::V6(net.ip()), net.prefix())
+        }
     }
 }
 
@@ -249,7 +273,9 @@ fn icmp_packet() -> ZCPacket {
 }
 
 fn tx_bytes(inst: &Instance) -> u64 {
-    let labels = LabelSet::new().with_label_type(LabelType::NetworkName(inst.get_global_ctx().get_network_name()));
+    let labels = LabelSet::new().with_label_type(LabelType::NetworkName(
+        inst.get_global_ctx().get_network_name(),
+    ));
     inst.get_global_ctx()
         .stats_manager()
         .get_metric(MetricName::TrafficBytesTx, &labels)
@@ -392,7 +418,11 @@ async fn test_acl_default_drop_allows_after_whitelist_state_refresh() {
         &client.cert,
         &server.cert,
     );
-    shared_pool.write().await.apply_network_state(state(&root, NETWORK_STATE_VERSION + 1, whitelist)).unwrap();
+    shared_pool
+        .write()
+        .await
+        .apply_network_state(state(&root, NETWORK_STATE_VERSION + 1, whitelist))
+        .unwrap();
 
     assert_tx_increases(&inst_a, icmp_packet()).await;
 

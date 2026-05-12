@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use ed25519_dalek::VerifyingKey;
 use pnet::ipnetwork::IpNetwork as IpNet;
@@ -36,7 +40,10 @@ impl PendingCertQueue {
         }
     }
 
-    pub fn with_pending_cert_cache(mut self, pending_cert_cache: Arc<Mutex<PendingCertCache>>) -> Self {
+    pub fn with_pending_cert_cache(
+        mut self,
+        pending_cert_cache: Arc<Mutex<PendingCertCache>>,
+    ) -> Self {
         self.pending_cert_cache = Some(pending_cert_cache);
         self
     }
@@ -62,8 +69,23 @@ impl PendingCertQueue {
         }
     }
 
+    pub fn try_approve_with_cert(
+        &mut self,
+        applicant_pk: &[u8],
+        cert: MemberCert,
+    ) -> Option<MemberCert> {
+        let applicant_pk = to_applicant_key(applicant_pk);
+        self.entries.remove(&applicant_pk)?;
+        if let Some(cache) = self.pending_cert_cache.as_ref() {
+            cache.lock().unwrap().insert(cert.clone());
+        }
+        Some(cert)
+    }
+
     pub fn try_reject(&mut self, applicant_pk: &[u8]) -> bool {
-        self.entries.remove(&to_applicant_key(applicant_pk)).is_some()
+        self.entries
+            .remove(&to_applicant_key(applicant_pk))
+            .is_some()
     }
 
     pub fn approve(&mut self, applicant_pk: &[u8]) -> MemberCert {

@@ -36,7 +36,9 @@ impl RelayGrantTable {
     }
 
     pub fn empty() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Returns grant capabilities iff the trust domain is permitted and not expired.
@@ -113,9 +115,11 @@ impl BorrowedRelayResolver {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock after epoch")
             .as_secs();
-        let has_active_relay = meta.details.active_relays.iter().any(|relay| {
-            relay.capabilities.can_relay_data && relay.expires_at > now
-        });
+        let has_active_relay = meta
+            .details
+            .active_relays
+            .iter()
+            .any(|relay| relay.capabilities.can_relay_data && relay.expires_at > now);
         if !has_active_relay {
             return Vec::new();
         }

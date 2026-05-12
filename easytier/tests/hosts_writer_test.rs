@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, net::{IpAddr, Ipv4Addr}};
+use std::{
+    collections::BTreeMap,
+    net::{IpAddr, Ipv4Addr},
+};
 
 use easytier::{
     dns::{
@@ -33,7 +36,9 @@ fn entry(byte: u8, hostname: &str, network: &str) -> HostnameIndexEntry {
     }
 }
 
-fn indexes(items: Vec<(NetworkKey, Vec<HostnameIndexEntry>)>) -> BTreeMap<NetworkKey, Vec<HostnameIndexEntry>> {
+fn indexes(
+    items: Vec<(NetworkKey, Vec<HostnameIndexEntry>)>,
+) -> BTreeMap<NetworkKey, Vec<HostnameIndexEntry>> {
     items.into_iter().collect()
 }
 
@@ -49,7 +54,8 @@ fn ipam(fingerprint: &DeviceFingerprint) -> Option<IpAddr> {
 #[test]
 fn test_render_empty_pool_writes_no_blocks() {
     let backend = MockHostsBackend::new("127.0.0.1 localhost\n");
-    let report = HostsWriter::refresh_with_backend(&backend, &BTreeMap::new(), &ipam, true).unwrap();
+    let report =
+        HostsWriter::refresh_with_backend(&backend, &BTreeMap::new(), &ipam, true).unwrap();
 
     assert_eq!(backend.content(), "127.0.0.1 localhost\n");
     assert_eq!(report.added, 0);
@@ -58,7 +64,10 @@ fn test_render_empty_pool_writes_no_blocks() {
 #[test]
 fn test_render_one_network_with_two_hosts() {
     let backend = MockHostsBackend::new("");
-    let map = indexes(vec![(key(1, "home"), vec![entry(1, "alpha", "home"), entry(2, "beta", "home")])]);
+    let map = indexes(vec![(
+        key(1, "home"),
+        vec![entry(1, "alpha", "home"), entry(2, "beta", "home")],
+    )]);
 
     HostsWriter::refresh_with_backend(&backend, &map, &ipam, false).unwrap();
 
@@ -111,7 +120,10 @@ fn test_external_lines_preserved() {
 fn test_external_modification_inside_our_block_logged_and_overwritten() {
     let existing = format!(
         "# BEGIN privateNetwork {}:{}\n10.9.9.9 stale\n# END   privateNetwork {}:{}\n",
-        td(1), nlid("home"), td(1), nlid("home")
+        td(1),
+        nlid("home"),
+        td(1),
+        nlid("home")
     );
     let backend = MockHostsBackend::new(existing);
     let map = indexes(vec![(key(1, "home"), vec![entry(1, "alpha", "home")])]);
@@ -126,7 +138,10 @@ fn test_external_modification_inside_our_block_logged_and_overwritten() {
 #[test]
 fn test_revoked_cert_hostname_removed_on_refresh() {
     let backend = MockHostsBackend::new("");
-    let before = indexes(vec![(key(1, "home"), vec![entry(1, "alpha", "home"), entry(2, "beta", "home")])]);
+    let before = indexes(vec![(
+        key(1, "home"),
+        vec![entry(1, "alpha", "home"), entry(2, "beta", "home")],
+    )]);
     HostsWriter::refresh_with_backend(&backend, &before, &ipam, false).unwrap();
 
     let after = indexes(vec![(key(1, "home"), vec![entry(1, "alpha", "home")])]);
@@ -139,7 +154,10 @@ fn test_revoked_cert_hostname_removed_on_refresh() {
 #[test]
 fn test_unset_hostname_removes_entry_keeps_others() {
     let backend = MockHostsBackend::new("");
-    let before = indexes(vec![(key(1, "home"), vec![entry(1, "alpha", "home"), entry(2, "beta", "home")])]);
+    let before = indexes(vec![(
+        key(1, "home"),
+        vec![entry(1, "alpha", "home"), entry(2, "beta", "home")],
+    )]);
     HostsWriter::refresh_with_backend(&backend, &before, &ipam, true).unwrap();
 
     let after = indexes(vec![(key(1, "home"), vec![entry(2, "beta", "home")])]);
@@ -152,7 +170,10 @@ fn test_unset_hostname_removes_entry_keeps_others() {
 #[test]
 fn test_ipam_unknown_skips_entry() {
     let backend = MockHostsBackend::new("");
-    let map = indexes(vec![(key(1, "home"), vec![entry(9, "ghost", "home"), entry(1, "alpha", "home")])]);
+    let map = indexes(vec![(
+        key(1, "home"),
+        vec![entry(9, "ghost", "home"), entry(1, "alpha", "home")],
+    )]);
 
     HostsWriter::refresh_with_backend(&backend, &map, &ipam, true).unwrap();
 

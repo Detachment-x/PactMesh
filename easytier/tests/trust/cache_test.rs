@@ -1,9 +1,9 @@
 use std::str::FromStr;
 
-use ed25519_dalek::SigningKey;
 use easytier::trust::cache::CachedMemberCert;
 use easytier::trust::member_cert::{Capabilities, MemberCert, UnsignedMemberCert};
 use easytier::trust::{TrustDomainId, TrustDomainRoot};
+use ed25519_dalek::SigningKey;
 use pnet::ipnetwork::IpNetwork as IpNet;
 use rand::rngs::OsRng;
 
@@ -46,7 +46,12 @@ fn test_cached_member_cert_from_verified() {
     assert_eq!(cached.signer_id, signer_id);
     assert_eq!(
         cached.proxy_subnets_set,
-        cert.details.capabilities.can_proxy_subnet.iter().copied().collect()
+        cert.details
+            .capabilities
+            .can_proxy_subnet
+            .iter()
+            .copied()
+            .collect()
     );
 }
 

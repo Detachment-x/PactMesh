@@ -33,7 +33,8 @@ pub fn sample_root_and_context() -> (TrustDomainRoot, SignKey, MemberCert) {
 }
 
 pub fn sample_member_cert(root: &TrustDomainRoot, sk_self: &SignKey) -> MemberCert {
-    let device_pk = VerifyingKey::from_bytes(&sk_self.verify_key().0).expect("verify key bytes valid");
+    let device_pk =
+        VerifyingKey::from_bytes(&sk_self.verify_key().0).expect("verify key bytes valid");
     UnsignedMemberCert {
         trust_domain_id: root.id(),
         network_local_id: NetworkLocalId::try_from_str(NETWORK_LOCAL_ID).unwrap(),
@@ -52,14 +53,21 @@ pub fn sample_member_cert(root: &TrustDomainRoot, sk_self: &SignKey) -> MemberCe
     .sign(root)
 }
 
-pub fn trust_pool_with_cert(root: &TrustDomainRoot, cert: &MemberCert) -> Arc<RwLock<TrustDomainPool>> {
+pub fn trust_pool_with_cert(
+    root: &TrustDomainRoot,
+    cert: &MemberCert,
+) -> Arc<RwLock<TrustDomainPool>> {
     let mut pool = TrustDomainPool::new();
     pool.add_root(root.public_key().into());
-    pool.apply_network_state(sample_network_state(root, cert, None, None)).unwrap();
+    pool.apply_network_state(sample_network_state(root, cert, None, None))
+        .unwrap();
     Arc::new(RwLock::new(pool))
 }
 
-pub fn trust_pool_with_revoked_cert(root: &TrustDomainRoot, cert: &MemberCert) -> Arc<RwLock<TrustDomainPool>> {
+pub fn trust_pool_with_revoked_cert(
+    root: &TrustDomainRoot,
+    cert: &MemberCert,
+) -> Arc<RwLock<TrustDomainPool>> {
     let revoked = RevokedCert {
         cert_fingerprint: cert.fingerprint(),
         revoked_at: CERT_NOT_BEFORE + 10,
@@ -68,11 +76,15 @@ pub fn trust_pool_with_revoked_cert(root: &TrustDomainRoot, cert: &MemberCert) -
     };
     let mut pool = TrustDomainPool::new();
     pool.add_root(root.public_key().into());
-    pool.apply_network_state(sample_network_state(root, cert, Some(revoked), None)).unwrap();
+    pool.apply_network_state(sample_network_state(root, cert, Some(revoked), None))
+        .unwrap();
     Arc::new(RwLock::new(pool))
 }
 
-pub fn trust_pool_with_disabled_cert(root: &TrustDomainRoot, cert: &MemberCert) -> Arc<RwLock<TrustDomainPool>> {
+pub fn trust_pool_with_disabled_cert(
+    root: &TrustDomainRoot,
+    cert: &MemberCert,
+) -> Arc<RwLock<TrustDomainPool>> {
     let disabled = DisabledCert {
         cert_fingerprint: cert.fingerprint(),
         disabled_at: CERT_NOT_BEFORE + 10,
@@ -81,14 +93,19 @@ pub fn trust_pool_with_disabled_cert(root: &TrustDomainRoot, cert: &MemberCert) 
     };
     let mut pool = TrustDomainPool::new();
     pool.add_root(root.public_key().into());
-    pool.apply_network_state(sample_network_state(root, cert, None, Some(disabled))).unwrap();
+    pool.apply_network_state(sample_network_state(root, cert, None, Some(disabled)))
+        .unwrap();
     Arc::new(RwLock::new(pool))
 }
 
-pub fn trust_pool_with_expired_cert(root: &TrustDomainRoot, cert: &MemberCert) -> Arc<RwLock<TrustDomainPool>> {
+pub fn trust_pool_with_expired_cert(
+    root: &TrustDomainRoot,
+    cert: &MemberCert,
+) -> Arc<RwLock<TrustDomainPool>> {
     let mut pool = TrustDomainPool::new();
     pool.add_root(root.public_key().into());
-    pool.apply_network_state(sample_network_state(root, cert, None, None)).unwrap();
+    pool.apply_network_state(sample_network_state(root, cert, None, None))
+        .unwrap();
     Arc::new(RwLock::new(pool))
 }
 

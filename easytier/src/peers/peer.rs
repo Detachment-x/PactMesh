@@ -402,7 +402,7 @@ mod tests {
             .config
             .set_network_identity(NetworkIdentity {
                 network_name: "net2".to_string(),
-                            });
+            });
         set_secure_mode_cfg(&shared_client_ctx, true);
         set_secure_mode_cfg(&shared_server_ctx, true);
         let remote_url: url::Url = shared_client_tunnel

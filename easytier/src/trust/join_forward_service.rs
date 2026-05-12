@@ -1,4 +1,7 @@
-use std::{panic::{AssertUnwindSafe, catch_unwind}, sync::{Arc, Mutex, Weak}};
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{Arc, Mutex, Weak},
+};
 
 use tokio::sync::RwLock;
 
@@ -15,7 +18,10 @@ use crate::{
     trust::{JoinRequest, NetworkLocalId, TrustDomainId, from_cbor},
 };
 
-use super::{join_dedup::{DupError, JoinDedup}, pending_cert_queue::PendingCertQueue};
+use super::{
+    join_dedup::{DupError, JoinDedup},
+    pending_cert_queue::PendingCertQueue,
+};
 
 #[derive(Clone)]
 pub struct JoinForwardService {
@@ -23,6 +29,7 @@ pub struct JoinForwardService {
     pub pending: Arc<Mutex<PendingCertQueue>>,
     pub my_pk_fingerprint: [u8; 32],
     pub am_root_for: Vec<(TrustDomainId, NetworkLocalId)>,
+    pub can_sign_pending_certs: bool,
     pub peer_mgr: Weak<PeerManager>,
     pub peer_rpc_mgr: Arc<PeerRpcManager>,
     pub my_peer_id: PeerId,
@@ -37,6 +44,7 @@ impl JoinForwardService {
         pending: Arc<Mutex<PendingCertQueue>>,
         my_pk_fingerprint: [u8; 32],
         am_root_for: Vec<(TrustDomainId, NetworkLocalId)>,
+        can_sign_pending_certs: bool,
         peer_mgr: Weak<PeerManager>,
         peer_rpc_mgr: Arc<PeerRpcManager>,
         my_peer_id: PeerId,
@@ -47,6 +55,7 @@ impl JoinForwardService {
             pending,
             my_pk_fingerprint,
             am_root_for,
+            can_sign_pending_certs,
             peer_mgr,
             peer_rpc_mgr,
             my_peer_id,
@@ -61,16 +70,18 @@ impl JoinForwardService {
     }
 
     pub fn register(&self, peer_rpc_mgr: &PeerRpcManager) {
-        peer_rpc_mgr.rpc_server().registry().register(
-            JoinForwardRpcServer::new(self.clone()),
-            &self.network_name,
-        );
+        peer_rpc_mgr
+            .rpc_server()
+            .registry()
+            .register(JoinForwardRpcServer::new(self.clone()), &self.network_name);
     }
 
     fn is_root_for(&self, jr: &JoinRequest) -> bool {
-        self.am_root_for.iter().any(|(trust_domain_id, network_local_id)| {
-            trust_domain_id == &jr.trust_domain_id && network_local_id == &jr.network_local_id
-        })
+        self.am_root_for
+            .iter()
+            .any(|(trust_domain_id, network_local_id)| {
+                trust_domain_id == &jr.trust_domain_id && network_local_id == &jr.network_local_id
+            })
     }
 
     async fn neighbor_peer_ids(&self) -> Vec<PeerId> {

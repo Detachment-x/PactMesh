@@ -12,7 +12,12 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
-async fn setup_joined_three_node() -> (tempfile::TempDir, String, easytier::trust::MemberCert, easytier::trust::MemberCert) {
+async fn setup_joined_three_node() -> (
+    tempfile::TempDir,
+    String,
+    easytier::trust::MemberCert,
+    easytier::trust::MemberCert,
+) {
     let root_dir = tempfile::tempdir().unwrap();
     let node_a_dir = tempfile::tempdir().unwrap();
     let node_b_dir = tempfile::tempdir().unwrap();
@@ -24,7 +29,11 @@ async fn setup_joined_three_node() -> (tempfile::TempDir, String, easytier::trus
     let root = root_instance(root_dir.path(), &trust_domain_id);
     let cert_a = approve_join(&root, &join_a).await;
     let cert_b = approve_join(&root, &join_b).await;
-    rewrite_network_state_with_members(root_dir.path(), &trust_domain_id, &[cert_a.clone(), cert_b.clone()]);
+    rewrite_network_state_with_members(
+        root_dir.path(),
+        &trust_domain_id,
+        &[cert_a.clone(), cert_b.clone()],
+    );
     (root_dir, trust_domain_id, cert_a, cert_b)
 }
 
@@ -32,27 +41,52 @@ async fn setup_joined_three_node() -> (tempfile::TempDir, String, easytier::trus
 async fn test_revoke_e2e_rejects_revoked_member_cert() {
     let (root_dir, trust_domain_id, cert_a, cert_b) = setup_joined_three_node().await;
     let before = trust_pool(root_dir.path(), &trust_domain_id);
-    before.read().await.verify_member_cert(&cert_a, now_unix()).unwrap();
-    before.read().await.verify_member_cert(&cert_b, now_unix()).unwrap();
+    before
+        .read()
+        .await
+        .verify_member_cert(&cert_a, now_unix())
+        .unwrap();
+    before
+        .read()
+        .await
+        .verify_member_cert(&cert_b, now_unix())
+        .unwrap();
 
     revoke_member(root_dir.path(), &trust_domain_id, &cert_b);
 
     let after = trust_pool(root_dir.path(), &trust_domain_id);
-    after.read().await.verify_member_cert(&cert_a, now_unix()).unwrap();
-    let err = after.read().await.verify_member_cert(&cert_b, now_unix()).unwrap_err();
+    after
+        .read()
+        .await
+        .verify_member_cert(&cert_a, now_unix())
+        .unwrap();
+    let err = after
+        .read()
+        .await
+        .verify_member_cert(&cert_b, now_unix())
+        .unwrap_err();
     assert_eq!(err, TrustDomainPoolError::Revoked);
 }
 
 #[tokio::test]
 async fn test_revoke_e2e_network_state_version_advances() {
     let (root_dir, trust_domain_id, _cert_a, cert_b) = setup_joined_three_node().await;
-    let before = read_network_state(root_dir.path(), &trust_domain_id).details.version;
+    let before = read_network_state(root_dir.path(), &trust_domain_id)
+        .details
+        .version;
 
     revoke_member(root_dir.path(), &trust_domain_id, &cert_b);
 
     let after = read_network_state(root_dir.path(), &trust_domain_id);
     assert_eq!(after.details.version, before + 1);
-    assert!(after.details.payload.revoked_certs.iter().any(|revoked| revoked.cert_fingerprint == cert_b.fingerprint()));
+    assert!(
+        after
+            .details
+            .payload
+            .revoked_certs
+            .iter()
+            .any(|revoked| revoked.cert_fingerprint == cert_b.fingerprint())
+    );
 }
 
 #[tokio::test]
@@ -62,10 +96,18 @@ async fn test_revoke_e2e_old_pool_still_accepts_until_state_refresh() {
 
     revoke_member(root_dir.path(), &trust_domain_id, &cert_b);
 
-    old_pool.read().await.verify_member_cert(&cert_b, now_unix()).unwrap();
+    old_pool
+        .read()
+        .await
+        .verify_member_cert(&cert_b, now_unix())
+        .unwrap();
     let refreshed_pool = trust_pool(root_dir.path(), &trust_domain_id);
     assert_eq!(
-        refreshed_pool.read().await.verify_member_cert(&cert_b, now_unix()).unwrap_err(),
+        refreshed_pool
+            .read()
+            .await
+            .verify_member_cert(&cert_b, now_unix())
+            .unwrap_err(),
         TrustDomainPoolError::Revoked
     );
 }

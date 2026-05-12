@@ -2656,10 +2656,9 @@ impl PeerRouteServiceImpl {
 
         let (untrusted, global_trusted_keys) = self
             .synced_route_info
-            .verify_and_update_credential_trusts_with_active_peers(
-                None,
-                |peer_id| self.is_active_non_reusable_credential_peer(peer_id),
-            );
+            .verify_and_update_credential_trusts_with_active_peers(None, |peer_id| {
+                self.is_active_non_reusable_credential_peer(peer_id)
+            });
         self.global_ctx
             .update_trusted_keys(global_trusted_keys, &network_identity.network_name);
 
@@ -5290,9 +5289,9 @@ mod tests {
     async fn credential_verifier_trusts_admin_self_groups_from_multiple_admins() {
         let service_impl = PeerRouteServiceImpl::new(
             1,
-            get_mock_global_ctx_with_network(Some(
-                crate::common::config::NetworkIdentity::new("net1".to_string()),
-            )),
+            get_mock_global_ctx_with_network(Some(crate::common::config::NetworkIdentity::new(
+                "net1".to_string(),
+            ))),
         );
 
         let mut admin_a = RoutePeerInfo::new();
@@ -5333,9 +5332,9 @@ mod tests {
     async fn credential_verifier_still_checks_credential_self_declared_groups() {
         let service_impl = PeerRouteServiceImpl::new(
             1,
-            get_mock_global_ctx_with_network(Some(
-                crate::common::config::NetworkIdentity::new("net1".to_string()),
-            )),
+            get_mock_global_ctx_with_network(Some(crate::common::config::NetworkIdentity::new(
+                "net1".to_string(),
+            ))),
         );
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

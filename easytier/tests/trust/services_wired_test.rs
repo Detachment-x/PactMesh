@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use easytier::{
     common::config::{ConfigLoader, NetworkIdentity, TomlConfigLoader},
@@ -8,11 +8,13 @@ use easytier::{
         rpc_types::controller::BaseController,
     },
     trust::{
-        JoinRequest, NetworkLocalId, SignKey, TrustDomainPool, TrustDomainRoot,
-        to_canonical_cbor, wrap_armored,
+        JoinRequest, NetworkLocalId, SignKey, TrustDomainPool, TrustDomainRoot, to_canonical_cbor,
+        wrap_armored,
     },
 };
 use tokio::sync::RwLock;
+
+static ROOT_PASSPHRASE_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn test_config(network_name: &str) -> TomlConfigLoader {
     let cfg = TomlConfigLoader::default();
@@ -28,7 +30,11 @@ fn test_pool() -> Arc<RwLock<TrustDomainPool>> {
     Arc::new(RwLock::new(pool))
 }
 
-fn trust_config(network_name: &str, domain_dir: &std::path::Path, network_local_id: &str) -> TomlConfigLoader {
+fn trust_config(
+    network_name: &str,
+    domain_dir: &std::path::Path,
+    network_local_id: &str,
+) -> TomlConfigLoader {
     let cfg = test_config(network_name);
     cfg.set_trust_domain(Some(easytier::common::config::TrustDomainConfig {
         domain_dir: domain_dir.to_path_buf(),
@@ -41,7 +47,8 @@ fn trust_config(network_name: &str, domain_dir: &std::path::Path, network_local_
 
 fn write_root_files(domain_dir: &std::path::Path, root: &TrustDomainRoot, passphrase: &str) {
     std::fs::create_dir_all(domain_dir).unwrap();
-    root.save_to_file(&domain_dir.join("sk_root.age"), passphrase).unwrap();
+    root.save_to_file(&domain_dir.join("sk_root.age"), passphrase)
+        .unwrap();
     std::fs::write(
         domain_dir.join("pk_root.pem"),
         wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes()),
@@ -88,14 +95,18 @@ async fn test_join_forward_service_uses_real_root_when_available() {
     let network_local_id = "office-net";
     write_root_files(dir.path(), &root, "long-enough-pass");
 
-    // SAFETY: this test sets a process env var consumed synchronously by Instance::new.
-    unsafe { std::env::set_var("PNW_ROOT_PASSPHRASE", "long-enough-pass") };
-    let instance = Instance::new_with_trust_pool(
-        trust_config("svc-net", dir.path(), network_local_id),
-        Some(test_pool()),
-    );
-    // SAFETY: cleanup for the process env var set above.
-    unsafe { std::env::remove_var("PNW_ROOT_PASSPHRASE") };
+    let instance = {
+        let _guard = ROOT_PASSPHRASE_ENV_LOCK.lock().unwrap();
+        // SAFETY: this test sets a process env var consumed synchronously by Instance::new.
+        unsafe { std::env::set_var("PNW_ROOT_PASSPHRASE", "long-enough-pass") };
+        let instance = Instance::new_with_trust_pool(
+            trust_config("svc-net", dir.path(), network_local_id),
+            Some(test_pool()),
+        );
+        // SAFETY: cleanup for the process env var set above.
+        unsafe { std::env::remove_var("PNW_ROOT_PASSPHRASE") };
+        instance
+    };
 
     let service = instance.get_join_forward_service().unwrap();
     let jr = join_request(&root, network_local_id);
@@ -118,7 +129,7 @@ async fn test_join_forward_service_uses_real_root_when_available() {
 }
 
 #[tokio::test]
-async fn test_join_forward_service_without_sk_root_only_forwards() {
+async fn test_join_forward_service_without_sk_root_enqueues_but_cannot_sign() {
     let dir = tempfile::tempdir().unwrap();
     let root = TrustDomainRoot::generate();
     let network_local_id = "office-net";
@@ -129,10 +140,15 @@ async fn test_join_forward_service_without_sk_root_only_forwards() {
     )
     .unwrap();
 
-    let instance = Instance::new_with_trust_pool(
-        trust_config("svc-net", dir.path(), network_local_id),
-        Some(test_pool()),
-    );
+    let instance = {
+        let _guard = ROOT_PASSPHRASE_ENV_LOCK.lock().unwrap();
+        // SAFETY: this test verifies the pk_root-only path with no daemon-held root secret.
+        unsafe { std::env::remove_var("PNW_ROOT_PASSPHRASE") };
+        Instance::new_with_trust_pool(
+            trust_config("svc-net", dir.path(), network_local_id),
+            Some(test_pool()),
+        )
+    };
 
     let service = instance.get_join_forward_service().unwrap();
     let jr = join_request(&root, network_local_id);
@@ -148,5 +164,7 @@ async fn test_join_forward_service_without_sk_root_only_forwards() {
         .await
         .unwrap();
 
-    assert!(service.pending.lock().unwrap().list().is_empty());
+    let queued = service.pending.lock().unwrap().list();
+    assert_eq!(queued, vec![jr]);
+    assert!(!service.can_sign_pending_certs);
 }

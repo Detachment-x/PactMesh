@@ -10,9 +10,9 @@ use crate::{
             ConfigLoader, NetworkIdentity, PeerConfig, TomlConfigLoader, VpnPortalConfig,
             gen_default_flags,
         },
-        trust_context::TrustDomainContext,
         constants::EASYTIER_VERSION,
         global_ctx::{EventBusSubscriber, GlobalCtxEvent},
+        trust_context::TrustDomainContext,
     },
     instance::instance::Instance,
     proto::api::instance::list_peer_route_pair,
@@ -131,12 +131,11 @@ fn load_trust_domain_meta_from_pem(
         .map_err(|err| anyhow::anyhow!("failed to decode {}: {err}", path.display()))
 }
 
-
 fn load_network_bootstrap(
     path: &std::path::Path,
 ) -> Result<crate::trust::NetworkBootstrap, anyhow::Error> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     if let Ok(text) = std::str::from_utf8(&bytes)
         && let Ok(bootstrap) = crate::trust::NetworkBootstrap::from_pem(text)
     {
@@ -180,7 +179,9 @@ pub async fn inject_trust_pool_from_config(
         )
     })?;
 
-    global_ctx.set_trust_context(Arc::new(trust_ctx.clone())).await;
+    global_ctx
+        .set_trust_context(Arc::new(trust_ctx.clone()))
+        .await;
 
     let mut pool = crate::trust::TrustDomainPool::new();
     let self_root_pk = crate::common::trust_context::load_root_public_key(
@@ -197,15 +198,19 @@ pub async fn inject_trust_pool_from_config(
 
     for entry in trust_domain.relay_serving {
         let root_bytes = crate::common::config::parse_root_pk_hex(&entry.foreign_root_pk_hex)
-            .map_err(|err| anyhow::anyhow!(
-                "invalid trust_domain.relay_serving.foreign_root_pk_hex '{}': {err}",
-                entry.foreign_root_pk_hex
-            ))?;
-        let foreign_root_pk = ed25519_dalek::VerifyingKey::from_bytes(&root_bytes)
-            .map_err(|err| anyhow::anyhow!(
-                "invalid foreign root public key '{}': {err}",
-                entry.foreign_root_pk_hex
-            ))?;
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "invalid trust_domain.relay_serving.foreign_root_pk_hex '{}': {err}",
+                    entry.foreign_root_pk_hex
+                )
+            })?;
+        let foreign_root_pk =
+            ed25519_dalek::VerifyingKey::from_bytes(&root_bytes).map_err(|err| {
+                anyhow::anyhow!(
+                    "invalid foreign root public key '{}': {err}",
+                    entry.foreign_root_pk_hex
+                )
+            })?;
         pool.add_root(foreign_root_pk.into());
 
         if let Some(meta_path) = entry.foreign_trust_domain_meta_pem.as_ref() {
@@ -217,17 +222,21 @@ pub async fn inject_trust_pool_from_config(
         if let Some(state_path) = entry.foreign_network_state_pem.as_ref() {
             let state_pem = std::fs::read_to_string(state_path)
                 .with_context(|| format!("failed to read {}", state_path.display()))?;
-            let state = crate::trust::SignedNetworkState::from_pem(&state_pem)
-                .map_err(|err| anyhow::anyhow!("failed to decode {}: {err}", state_path.display()))?;
-            pool.apply_network_state(state)
-                .map_err(|err| anyhow::anyhow!("failed to apply {}: {err}", state_path.display()))?;
+            let state = crate::trust::SignedNetworkState::from_pem(&state_pem).map_err(|err| {
+                anyhow::anyhow!("failed to decode {}: {err}", state_path.display())
+            })?;
+            pool.apply_network_state(state).map_err(|err| {
+                anyhow::anyhow!("failed to apply {}: {err}", state_path.display())
+            })?;
         }
 
         if let Some(bootstrap_path) = entry.foreign_bootstrap_cbor.as_ref() {
             let bootstrap = load_network_bootstrap(bootstrap_path)?;
             let tdid = bootstrap.trust_domain_id;
             pool.apply_network_bootstrap(&tdid, bootstrap)
-                .map_err(|err| anyhow::anyhow!("failed to apply {}: {err}", bootstrap_path.display()))?;
+                .map_err(|err| {
+                    anyhow::anyhow!("failed to apply {}: {err}", bootstrap_path.display())
+                })?;
         }
     }
 

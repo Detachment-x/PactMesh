@@ -5,7 +5,10 @@ use easytier::trust::pool::{PoolApplyError, TrustDomainPool};
 use easytier::trust::trust_domain_meta::UnsignedTrustDomainMeta;
 use easytier::trust::{NetworkLocalId, TrustDomainRoot};
 
-fn sample_unsigned_network_state_for_root(root: &TrustDomainRoot, version: u64) -> UnsignedNetworkState {
+fn sample_unsigned_network_state_for_root(
+    root: &TrustDomainRoot,
+    version: u64,
+) -> UnsignedNetworkState {
     UnsignedNetworkState {
         trust_domain_id: root.id(),
         network_local_id: NetworkLocalId::try_from_str("office-net").unwrap(),
@@ -20,7 +23,10 @@ fn sample_unsigned_network_state_for_root(root: &TrustDomainRoot, version: u64) 
     }
 }
 
-fn sample_unsigned_trust_domain_meta_for_root(root: &TrustDomainRoot, version: u64) -> UnsignedTrustDomainMeta {
+fn sample_unsigned_trust_domain_meta_for_root(
+    root: &TrustDomainRoot,
+    version: u64,
+) -> UnsignedTrustDomainMeta {
     UnsignedTrustDomainMeta {
         trust_domain_id: root.id(),
         version,
@@ -93,10 +99,10 @@ fn test_apply_wrong_signer_rejected() {
 #[test]
 fn test_verify_full_chain_happy() {
     use easytier::trust::member_cert::{Capabilities, UnsignedMemberCert};
-    use pnet::ipnetwork::IpNetwork as IpNet;
-    use std::str::FromStr;
     use ed25519_dalek::SigningKey;
+    use pnet::ipnetwork::IpNetwork as IpNet;
     use rand::rngs::OsRng;
+    use std::str::FromStr;
 
     let root = TrustDomainRoot::generate();
     let mut pool = TrustDomainPool::new();
@@ -134,10 +140,10 @@ fn test_verify_revoked_rejected() {
     use easytier::trust::member_cert::{Capabilities, UnsignedMemberCert};
     use easytier::trust::pool::PoolVerifyError;
     use easytier::trust::revocation::{RevocationReason, RevokedCert};
-    use pnet::ipnetwork::IpNetwork as IpNet;
-    use std::str::FromStr;
     use ed25519_dalek::SigningKey;
+    use pnet::ipnetwork::IpNetwork as IpNet;
     use rand::rngs::OsRng;
+    use std::str::FromStr;
 
     let root = TrustDomainRoot::generate();
     let mut pool = TrustDomainPool::new();
@@ -175,13 +181,13 @@ fn test_verify_revoked_rejected() {
 
 #[test]
 fn test_verify_disabled_temporarily() {
+    use easytier::trust::DisabledCert;
     use easytier::trust::member_cert::{Capabilities, UnsignedMemberCert};
     use easytier::trust::pool::PoolVerifyError;
-    use easytier::trust::DisabledCert;
-    use pnet::ipnetwork::IpNetwork as IpNet;
-    use std::str::FromStr;
     use ed25519_dalek::SigningKey;
+    use pnet::ipnetwork::IpNetwork as IpNet;
     use rand::rngs::OsRng;
+    use std::str::FromStr;
 
     let root = TrustDomainRoot::generate();
     let mut pool = TrustDomainPool::new();
@@ -219,12 +225,12 @@ fn test_verify_disabled_temporarily() {
 
 #[test]
 fn test_verify_disabled_recovered_after_expected() {
-    use easytier::trust::member_cert::{Capabilities, UnsignedMemberCert};
     use easytier::trust::DisabledCert;
-    use pnet::ipnetwork::IpNetwork as IpNet;
-    use std::str::FromStr;
+    use easytier::trust::member_cert::{Capabilities, UnsignedMemberCert};
     use ed25519_dalek::SigningKey;
+    use pnet::ipnetwork::IpNetwork as IpNet;
     use rand::rngs::OsRng;
+    use std::str::FromStr;
 
     let root = TrustDomainRoot::generate();
     let mut pool = TrustDomainPool::new();
@@ -288,10 +294,10 @@ fn test_multi_domain_isolated() {
 
 fn sample_member_cert_for_root(root: &TrustDomainRoot) -> easytier::trust::member_cert::MemberCert {
     use easytier::trust::member_cert::{Capabilities, UnsignedMemberCert};
-    use pnet::ipnetwork::IpNetwork as IpNet;
-    use std::str::FromStr;
     use ed25519_dalek::SigningKey;
+    use pnet::ipnetwork::IpNetwork as IpNet;
     use rand::rngs::OsRng;
+    use std::str::FromStr;
 
     UnsignedMemberCert {
         trust_domain_id: root.id(),

@@ -13,12 +13,13 @@
 
 pub mod acl;
 pub mod acl_error;
-pub mod acl_validate;
 pub mod acl_match;
+pub mod acl_validate;
 pub mod cache;
 pub mod cbor;
 pub mod config_sync_client;
 pub mod config_sync_service;
+pub mod device_view;
 pub mod hostname;
 pub mod identity;
 pub mod join;
@@ -35,24 +36,28 @@ pub mod trust_domain_meta;
 pub mod types;
 pub mod wire;
 
+pub use acl::{
+    ACL_SCHEMA_VERSION, AclPolicy, AclRule, Action, Cidr, DeviceFingerprint, MAX_RULES,
+    MAX_SELECTORS_PER_RULE, MAX_TAG_MEMBERS, MAX_TAG_NAME_LEN, MAX_TAGS, PortSpec, Proto, Selector,
+    TagName, TagNameError,
+};
 pub use acl_error::AclError;
 pub use acl_match::{PacketTuple, PeerMatchContext, TagsMap, decide, selector_match};
 pub use acl_validate::{validate_for_receiving, validate_for_signing};
-pub use acl::{
-    ACL_SCHEMA_VERSION, MAX_RULES, MAX_SELECTORS_PER_RULE, MAX_TAG_MEMBERS,
-    MAX_TAG_NAME_LEN, MAX_TAGS, AclPolicy, AclRule, Action, Cidr, DeviceFingerprint, PortSpec,
-    Proto, Selector, TagName, TagNameError,
-};
 pub use cache::CachedMemberCert;
 pub use cbor::{from_cbor, to_canonical_cbor, unwrap_armored, wrap_armored};
+pub use device_view::{
+    DeviceCapabilityView, DeviceRole, DeviceStatus, DeviceView, encode_device_id,
+    role_for_member, status_for_member, view_for_member,
+};
 pub use hostname::{HostnameError, HostnameLabel};
 pub use identity::{SignKey, TrustDomainRoot, VerifyKey};
 pub use join::JoinRequest;
 pub use member_cert::{Capabilities, MemberCert, UnsignedMemberCert};
+pub use network_bootstrap::NetworkBootstrap;
 pub use network_state::{
     MemberCertIndexEntry, NetworkStatePayload, SignedNetworkState, UnsignedNetworkState,
 };
-pub use network_bootstrap::NetworkBootstrap;
 pub use pool::TrustDomainPool;
 pub use relay_borrow::{
     BorrowedRelayProof, BorrowedRelayResolver, RelayCandidate, RelayGrantEntry, RelayGrantTable,
@@ -66,7 +71,6 @@ pub use types::{
 };
 pub use wire::{
     WireError, join_request_from_envelope, join_request_to_envelope, member_cert_from_envelope,
-    member_cert_to_envelope, signed_network_state_from_envelope,
-    signed_network_state_to_envelope, trust_domain_meta_from_envelope,
-    trust_domain_meta_to_envelope,
+    member_cert_to_envelope, signed_network_state_from_envelope, signed_network_state_to_envelope,
+    trust_domain_meta_from_envelope, trust_domain_meta_to_envelope,
 };

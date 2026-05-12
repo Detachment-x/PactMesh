@@ -1,5 +1,7 @@
 use easytier::trust::network_bootstrap::{BootstrapError, NetworkBootstrap, bootstrap_to_qr_svg};
-use easytier::trust::{NetworkLocalId, TrustDomainId, TrustDomainRoot, from_cbor, to_canonical_cbor};
+use easytier::trust::{
+    NetworkLocalId, TrustDomainId, TrustDomainRoot, from_cbor, to_canonical_cbor,
+};
 use url::Url;
 
 fn sample_bootstrap() -> NetworkBootstrap {
@@ -114,5 +116,8 @@ fn test_import_mismatched_existing_pk_root_rejected() {
     other.trust_domain_id = other_root.id();
 
     let err = other.import_into_domain_dir(dir.path()).unwrap_err();
-    assert!(matches!(err, BootstrapError::PkRootAlreadyExistsAndMismatches));
+    assert!(matches!(
+        err,
+        BootstrapError::PkRootAlreadyExistsAndMismatches
+    ));
 }

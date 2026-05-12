@@ -12,9 +12,9 @@ use ed25519_dalek::VerifyingKey;
 use thiserror::Error;
 
 use super::cache::CachedMemberCert;
-use super::network_bootstrap::NetworkBootstrap;
 use super::identity::VerifyKey;
 use super::member_cert::{MemberCert, VerifyError as MemberCertVerifyError};
+use super::network_bootstrap::NetworkBootstrap;
 use super::network_state::SignedNetworkState;
 use super::trust_domain_meta::SignedTrustDomainMeta;
 use super::types::{NetworkLocalId, TrustDomainId};
@@ -57,10 +57,7 @@ impl TrustDomainPool {
     }
 
     /// Apply a `SignedNetworkState`: verify, monotonicity-check, swap in.
-    pub fn apply_network_state(
-        &mut self,
-        state: SignedNetworkState,
-    ) -> Result<(), PoolApplyError> {
+    pub fn apply_network_state(&mut self, state: SignedNetworkState) -> Result<(), PoolApplyError> {
         let entry = self
             .domains
             .get_mut(&state.details.trust_domain_id)
@@ -108,7 +105,6 @@ impl TrustDomainPool {
         Ok(())
     }
 
-
     /// Cache one network bootstrap for a trust domain.
     pub fn apply_network_bootstrap(
         &mut self,
@@ -122,7 +118,10 @@ impl TrustDomainPool {
             .verify_self_consistency()
             .map_err(|_| PoolApplyError::BadSignature)?;
 
-        let entry = self.domains.get_mut(td).ok_or(PoolApplyError::UnknownDomain)?;
+        let entry = self
+            .domains
+            .get_mut(td)
+            .ok_or(PoolApplyError::UnknownDomain)?;
         entry.network_bootstrap = Some(bootstrap);
         Ok(())
     }
@@ -141,13 +140,12 @@ impl TrustDomainPool {
             .expect("stored public key must be valid");
         Self::verify_cert_against_root_pk(cert, &root_pk, now)?;
 
-        let state = entry
-            .networks
-            .get(&cert.details.network_local_id)
-            .ok_or(PoolVerifyError::NoNetworkState {
+        let state = entry.networks.get(&cert.details.network_local_id).ok_or(
+            PoolVerifyError::NoNetworkState {
                 td: cert.details.trust_domain_id,
                 nlid: cert.details.network_local_id.clone(),
-            })?;
+            },
+        )?;
 
         if cert.details.network_state_version_ref > state.details.version {
             return Err(PoolVerifyError::FutureVersionRef {

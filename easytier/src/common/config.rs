@@ -5,10 +5,10 @@ use std::{
 };
 
 use anyhow::Context;
-use ed25519_dalek::VerifyingKey;
 use base64::{Engine as _, prelude::BASE64_STANDARD};
 use clap::ValueEnum;
 use clap::builder::PossibleValue;
+use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, VariantArray};
 use tokio::io::AsyncReadExt as _;
@@ -246,7 +246,6 @@ pub struct NetworkIdentity {
     pub network_name: String,
 }
 
-
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigSource {
@@ -324,7 +323,6 @@ impl NetworkIdentity {
         Self { network_name }
     }
 }
-
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct PeerConfig {
@@ -1467,8 +1465,7 @@ network_secret = "${DISABLED_TEST_VAR}"
         // 验证环境变量未被替换（保持原样）
         let network_identity = config.get_network_identity();
         assert_eq!(
-            network_identity.network_name,
-            "${DISABLED_TEST_VAR}",
+            network_identity.network_name, "${DISABLED_TEST_VAR}",
             "Env var should not be expanded when parsing is disabled"
         );
 
@@ -1632,10 +1629,7 @@ network_secret = "${UNDEFINED_SECRET:-default-secret}"
             .unwrap();
 
         // 验证使用了默认值
-        assert_eq!(
-            config.get_network_identity().network_name,
-            "default-secret"
-        );
+        assert_eq!(config.get_network_identity().network_name, "default-secret");
         assert_eq!(
             config.get_listener_uris()[0].to_string(),
             "tcp://0.0.0.0:11010"

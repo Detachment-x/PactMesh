@@ -1,8 +1,8 @@
 #[cfg(feature = "tun")]
 use std::any::Any;
 use std::collections::HashSet;
-use std::path::Path;
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 #[cfg(feature = "tun")]
@@ -13,8 +13,8 @@ use cidr::{IpCidr, Ipv4Inet};
 
 use futures::FutureExt;
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, Notify};
 use tokio::sync::RwLock;
+use tokio::sync::{Mutex, Notify};
 #[cfg(feature = "tun")]
 use tokio::{sync::oneshot, task::JoinSet};
 #[cfg(feature = "magic-dns")]
@@ -26,14 +26,6 @@ use crate::common::acl_processor::AclRuleBuilder;
 use crate::common::config::ConfigLoader;
 use crate::common::error::Error;
 use crate::common::global_ctx::{ArcGlobalCtx, GlobalCtx, GlobalCtxEvent};
-use crate::trust::{
-    NetworkLocalId, TrustDomainId, TrustDomainRoot, TrustDomainPool,
-    config_sync_service::ConfigSyncService,
-    join_dedup::JoinDedup,
-    join_forward_service::JoinForwardService,
-    pending_cert_queue::PendingCertQueue,
-    to_canonical_cbor,
-};
 use crate::connector::direct::DirectConnectorManager;
 use crate::connector::manual::{ConnectorManagerRpcService, ManualConnectorManager};
 use crate::connector::tcp_hole_punch::TcpHolePunchConnector;
@@ -57,7 +49,7 @@ use crate::proto::api::config::{
     GetConfigResponse, ListPendingJoinRequestsRequest, ListPendingJoinRequestsResponse,
     PatchConfigRequest, PatchConfigResponse, PendingJoinRequestSummary, PortForwardPatch,
     RejectJoinRequestRequest, RejectJoinRequestResponse, SubmitJoinRequestRequest,
-    SubmitJoinRequestResponse, TrustJoinManageRpc,
+    SubmitJoinRequestResponse, TrustJoinManageRpc, TrustJoinManageRpcServer,
 };
 use crate::proto::api::instance::{
     GetPrometheusStatsRequest, GetPrometheusStatsResponse, GetStatsRequest, GetStatsResponse,
@@ -69,13 +61,20 @@ use crate::proto::api::instance::{
 use crate::proto::api::manage::NetworkConfig;
 use crate::proto::common::{PortForwardConfigPb, TunnelInfo};
 use crate::proto::peer_rpc::{
-    config_resource_selector, ConfigResourceSelector, ConfigSyncRpc, ForwardJoinRequestRequest,
-    JoinForwardRpc, PendingCertKey,
+    ConfigResourceSelector, ConfigSyncRpc, ForwardJoinRequestRequest, JoinForwardRpc,
+    PendingCertKey, config_resource_selector,
 };
-use crate::proto::rpc_impl::standalone::RpcServerHook;
+use crate::proto::rpc_impl::standalone::{RpcServerHook, StandAloneServer};
 use crate::proto::rpc_types;
 use crate::proto::rpc_types::controller::BaseController;
 use crate::rpc_service::InstanceRpcService;
+use crate::trust::{
+    MemberCert, NetworkLocalId, TrustDomainId, TrustDomainPool, TrustDomainRoot,
+    config_sync_service::ConfigSyncService, join_dedup::JoinDedup,
+    join_forward_service::JoinForwardService, pending_cert_queue::PendingCertQueue,
+    from_cbor, to_canonical_cbor,
+};
+use crate::tunnel::tcp::TcpTunnelListener;
 use crate::utils::weak_upgrade;
 use crate::vpn_portal::{self, VpnPortal};
 
@@ -570,6 +569,7 @@ pub struct Instance {
 
     config_sync_service: Option<Arc<ConfigSyncService>>,
     join_forward_service: Option<Arc<JoinForwardService>>,
+    join_admission_servers: Vec<StandAloneServer<TcpTunnelListener>>,
 
     vpn_portal: Arc<Mutex<Box<dyn VpnPortal>>>,
 
@@ -667,6 +667,7 @@ impl Instance {
 
             config_sync_service,
             join_forward_service,
+            join_admission_servers: Vec::new(),
 
             vpn_portal: Arc::new(Mutex::new(Box::new(vpn_portal_inst))),
 
@@ -682,25 +683,27 @@ impl Instance {
     fn wire_trust_services(
         global_ctx: &ArcGlobalCtx,
         peer_manager: &Arc<PeerManager>,
-    ) -> (Option<Arc<ConfigSyncService>>, Option<Arc<JoinForwardService>>) {
+    ) -> (
+        Option<Arc<ConfigSyncService>>,
+        Option<Arc<JoinForwardService>>,
+    ) {
         let Some(trust_pool) = peer_manager.get_trust_pool() else {
             return (None, None);
         };
 
         let network_name = global_ctx.get_network_name();
         let peer_rpc_mgr = peer_manager.get_peer_rpc_mgr();
-        let config_sync = Arc::new(ConfigSyncService::new(
-            trust_pool,
-            network_name.clone(),
-        ));
+        let config_sync = Arc::new(ConfigSyncService::new(trust_pool, network_name.clone()));
         config_sync.register(&peer_rpc_mgr);
 
-        let (pending, am_root_for) = Self::build_pending_queue(global_ctx, &config_sync);
+        let (pending, am_root_for, can_sign_pending_certs) =
+            Self::build_pending_queue(global_ctx, &config_sync);
         let join_forward = Arc::new(JoinForwardService::new(
             Arc::new(std::sync::Mutex::new(JoinDedup::new())),
             Arc::new(std::sync::Mutex::new(pending)),
             Self::join_forward_node_fingerprint(global_ctx),
             am_root_for,
+            can_sign_pending_certs,
             Arc::downgrade(peer_manager),
             peer_rpc_mgr.clone(),
             peer_manager.my_peer_id(),
@@ -711,16 +714,209 @@ impl Instance {
         (Some(config_sync), Some(join_forward))
     }
 
+    fn derive_join_admission_url(listener: &url::Url) -> Option<url::Url> {
+        if listener.scheme() != "tcp" {
+            return None;
+        }
+        let port = listener.port()?;
+        let admission_port = port.checked_add(1)?;
+        let mut admission = listener.clone();
+        admission.set_port(Some(admission_port)).ok()?;
+        Some(admission)
+    }
+
+    fn get_join_admission_service(
+        &self,
+    ) -> impl TrustJoinManageRpc<Controller = BaseController> + Clone + use<> {
+        #[derive(Clone)]
+        struct JoinAdmissionService {
+            join_forward_service: Option<Arc<JoinForwardService>>,
+            config_sync_service: Option<Arc<ConfigSyncService>>,
+        }
+
+        #[async_trait::async_trait]
+        impl TrustJoinManageRpc for JoinAdmissionService {
+            type Controller = BaseController;
+
+            async fn submit_join_request(
+                &self,
+                ctrl: Self::Controller,
+                request: SubmitJoinRequestRequest,
+            ) -> crate::proto::rpc_types::error::Result<SubmitJoinRequestResponse> {
+                let service = self.join_forward_service.as_ref().ok_or_else(|| {
+                    rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                        "join-forward service is not available"
+                    ))
+                })?;
+                let ttl = if request.ttl == 0 { 6 } else { request.ttl };
+                let response = service
+                    .forward_join_request(
+                        ctrl,
+                        ForwardJoinRequestRequest {
+                            inner_cbor: request.join_request_cbor,
+                            ttl,
+                            seen_node_pks: Vec::new(),
+                        },
+                    )
+                    .await?;
+                Ok(SubmitJoinRequestResponse {
+                    hop_count: response.hop_count,
+                })
+            }
+
+            async fn fetch_pending_member_cert(
+                &self,
+                ctrl: Self::Controller,
+                request: FetchPendingMemberCertRequest,
+            ) -> crate::proto::rpc_types::error::Result<FetchPendingMemberCertResponse>
+            {
+                let service = self.config_sync_service.as_ref().ok_or_else(|| {
+                    rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                        "config-sync service is not available"
+                    ))
+                })?;
+                let (td_id, network_local_id) = parse_trust_target_for_join_admission(
+                    &request.trust_domain_id,
+                    &request.network_local_id,
+                )?;
+                let selector = ConfigResourceSelector {
+                    selector: Some(config_resource_selector::Selector::PendingCertFor(
+                        PendingCertKey {
+                            trust_domain_id: request.trust_domain_id,
+                            network_local_id: request.network_local_id,
+                            applicant_pk: request.applicant_pk,
+                        },
+                    )),
+                };
+
+                match service
+                    .fetch_config(
+                        ctrl,
+                        crate::proto::peer_rpc::FetchConfigRequest {
+                            selector: Some(selector),
+                            caller_member_cert_bytes: Vec::new(),
+                        },
+                    )
+                    .await
+                {
+                    Ok(response) => {
+                        let network_state_cbor = service
+                            .trust_pool
+                            .read()
+                            .await
+                            .network_state(&td_id, &network_local_id)
+                            .map(to_canonical_cbor)
+                            .unwrap_or_default();
+                        Ok(FetchPendingMemberCertResponse {
+                            found: true,
+                            member_cert_cbor: response.payload_cbor,
+                            network_state_cbor,
+                        })
+                    }
+                    Err(rpc_types::error::Error::ExecutionError(err))
+                        if err.to_string().contains("pending cert not found") =>
+                    {
+                        Ok(FetchPendingMemberCertResponse {
+                            found: false,
+                            member_cert_cbor: Vec::new(),
+                            network_state_cbor: Vec::new(),
+                        })
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+
+            async fn approve_join_request(
+                &self,
+                _ctrl: Self::Controller,
+                _request: ApproveJoinRequestRequest,
+            ) -> crate::proto::rpc_types::error::Result<ApproveJoinRequestResponse> {
+                Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                    "join admission endpoint does not allow approvals"
+                )))
+            }
+
+            async fn reject_join_request(
+                &self,
+                _ctrl: Self::Controller,
+                _request: RejectJoinRequestRequest,
+            ) -> crate::proto::rpc_types::error::Result<RejectJoinRequestResponse> {
+                Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                    "join admission endpoint does not allow rejections"
+                )))
+            }
+
+            async fn list_pending_join_requests(
+                &self,
+                _ctrl: Self::Controller,
+                _request: ListPendingJoinRequestsRequest,
+            ) -> crate::proto::rpc_types::error::Result<ListPendingJoinRequestsResponse>
+            {
+                Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                    "join admission endpoint does not allow pending-list access"
+                )))
+            }
+        }
+
+        fn parse_trust_target_for_join_admission(
+            td_bytes: &[u8],
+            nlid: &str,
+        ) -> crate::proto::rpc_types::error::Result<(TrustDomainId, NetworkLocalId)> {
+            let arr: [u8; 32] = td_bytes.try_into().map_err(|_| {
+                rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                    "trust_domain_id must be 32 bytes"
+                ))
+            })?;
+            let network_local_id = NetworkLocalId::try_from_str(nlid).map_err(|err| {
+                rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                    "invalid network_local_id: {err}"
+                ))
+            })?;
+            Ok((TrustDomainId(arr), network_local_id))
+        }
+
+        JoinAdmissionService {
+            join_forward_service: self.join_forward_service.clone(),
+            config_sync_service: self.config_sync_service.clone(),
+        }
+    }
+
+    async fn run_join_admission_servers(&mut self) -> Result<(), Error> {
+        if self.join_forward_service.is_none() || self.config_sync_service.is_none() {
+            return Ok(());
+        }
+
+        for listener in self.global_ctx.config.get_listener_uris() {
+            let Some(admission_url) = Self::derive_join_admission_url(&listener) else {
+                continue;
+            };
+            let mut server = StandAloneServer::new(TcpTunnelListener::new(admission_url.clone()));
+            server.registry().register(
+                TrustJoinManageRpcServer::new(self.get_join_admission_service()),
+                "",
+            );
+            server.serve().await.map_err(|err| {
+                anyhow::anyhow!(
+                    "failed to start join admission RPC endpoint {admission_url}: {err}"
+                )
+            })?;
+            tracing::info!(%admission_url, "join admission RPC endpoint started");
+            self.join_admission_servers.push(server);
+        }
+
+        Ok(())
+    }
 
     fn build_pending_queue(
         global_ctx: &ArcGlobalCtx,
         config_sync: &ConfigSyncService,
-    ) -> (PendingCertQueue, Vec<(TrustDomainId, NetworkLocalId)>) {
+    ) -> (PendingCertQueue, Vec<(TrustDomainId, NetworkLocalId)>, bool) {
         let Some(trust_domain) = global_ctx.config.get_trust_domain() else {
             return (
                 PendingCertQueue::new(TrustDomainRoot::generate())
                     .with_pending_cert_cache(config_sync.pending_cert_cache()),
                 Vec::new(),
+                false,
             );
         };
 
@@ -736,6 +932,7 @@ impl Instance {
                     PendingCertQueue::new(TrustDomainRoot::generate())
                         .with_pending_cert_cache(config_sync.pending_cert_cache()),
                     Vec::new(),
+                    false,
                 );
             }
         };
@@ -745,25 +942,79 @@ impl Instance {
                 let trust_domain_id = root.id();
                 let pending = PendingCertQueue::new(root)
                     .with_pending_cert_cache(config_sync.pending_cert_cache());
-                (pending, vec![(trust_domain_id, network_local_id)])
+                (pending, vec![(trust_domain_id, network_local_id)], true)
             }
-            Ok(None) => (
-                PendingCertQueue::new(TrustDomainRoot::generate())
-                    .with_pending_cert_cache(config_sync.pending_cert_cache()),
-                Vec::new(),
-            ),
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "join-forward root approval disabled: failed to unlock sk_root.age"
-                );
-                (
+            Ok(None) => match Self::load_trust_domain_id_for_join_forward(&trust_domain.domain_dir) {
+                Ok(Some(trust_domain_id)) => (
+                    PendingCertQueue::new(TrustDomainRoot::generate())
+                        .with_pending_cert_cache(config_sync.pending_cert_cache()),
+                    vec![(trust_domain_id, network_local_id)],
+                    false,
+                ),
+                Ok(None) => (
                     PendingCertQueue::new(TrustDomainRoot::generate())
                         .with_pending_cert_cache(config_sync.pending_cert_cache()),
                     Vec::new(),
-                )
+                    false,
+                ),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "join-forward root approval disabled: failed to load pk_root.pem"
+                    );
+                    (
+                        PendingCertQueue::new(TrustDomainRoot::generate())
+                            .with_pending_cert_cache(config_sync.pending_cert_cache()),
+                        Vec::new(),
+                        false,
+                    )
+                }
+            },
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "join-forward daemon signing disabled: failed to unlock sk_root.age"
+                );
+                match Self::load_trust_domain_id_for_join_forward(&trust_domain.domain_dir) {
+                    Ok(Some(trust_domain_id)) => (
+                        PendingCertQueue::new(TrustDomainRoot::generate())
+                            .with_pending_cert_cache(config_sync.pending_cert_cache()),
+                        vec![(trust_domain_id, network_local_id)],
+                        false,
+                    ),
+                    Ok(None) => (
+                        PendingCertQueue::new(TrustDomainRoot::generate())
+                            .with_pending_cert_cache(config_sync.pending_cert_cache()),
+                        Vec::new(),
+                        false,
+                    ),
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "join-forward root approval disabled: failed to load pk_root.pem"
+                        );
+                        (
+                            PendingCertQueue::new(TrustDomainRoot::generate())
+                                .with_pending_cert_cache(config_sync.pending_cert_cache()),
+                            Vec::new(),
+                            false,
+                        )
+                    }
+                }
             }
         }
+    }
+
+    fn load_trust_domain_id_for_join_forward(
+        domain_dir: &Path,
+    ) -> anyhow::Result<Option<TrustDomainId>> {
+        let pk_root_path = domain_dir.join("pk_root.pem");
+        if !pk_root_path.is_file() {
+            return Ok(None);
+        }
+        let pk_root = crate::common::trust_context::load_root_public_key(&pk_root_path)
+            .map_err(|err| anyhow::anyhow!("failed to load {}: {err}", pk_root_path.display()))?;
+        Ok(Some(TrustDomainId::from_root_pubkey(&pk_root)))
     }
 
     fn load_root_for_join_forward(domain_dir: &Path) -> anyhow::Result<Option<TrustDomainRoot>> {
@@ -785,8 +1036,9 @@ impl Instance {
 
         let root = TrustDomainRoot::load_from_file(&sk_root_path, &password)
             .map_err(|err| anyhow::anyhow!("failed to unlock {}: {err}", sk_root_path.display()))?;
-        let pk_root = crate::common::trust_context::load_root_public_key(&domain_dir.join("pk_root.pem"))
-            .map_err(|err| anyhow::anyhow!("failed to load pk_root.pem: {err}"))?;
+        let pk_root =
+            crate::common::trust_context::load_root_public_key(&domain_dir.join("pk_root.pem"))
+                .map_err(|err| anyhow::anyhow!("failed to load pk_root.pem: {err}"))?;
         if root.public_key().as_bytes() != pk_root.as_bytes() {
             anyhow::bail!("sk_root.age does not match pk_root.pem");
         }
@@ -1093,6 +1345,7 @@ impl Instance {
             .prepare_listeners()
             .await?;
         self.listener_manager.lock().await.run().await?;
+        self.run_join_admission_servers().await?;
         self.peer_manager.run().await?;
 
         #[cfg(feature = "tun")]
@@ -1483,16 +1736,15 @@ impl Instance {
                 &self,
                 ctrl: Self::Controller,
                 request: FetchPendingMemberCertRequest,
-            ) -> crate::proto::rpc_types::error::Result<FetchPendingMemberCertResponse> {
+            ) -> crate::proto::rpc_types::error::Result<FetchPendingMemberCertResponse>
+            {
                 let service = self.config_sync_service.as_ref().ok_or_else(|| {
                     rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
                         "config-sync service is not available"
                     ))
                 })?;
-                let (td_id, network_local_id) = parse_trust_target(
-                    &request.trust_domain_id,
-                    &request.network_local_id,
-                )?;
+                let (td_id, network_local_id) =
+                    parse_trust_target(&request.trust_domain_id, &request.network_local_id)?;
                 let selector = ConfigResourceSelector {
                     selector: Some(config_resource_selector::Selector::PendingCertFor(
                         PendingCertKey {
@@ -1552,9 +1804,11 @@ impl Instance {
                 })?;
                 let (td_id, network_local_id) =
                     parse_trust_target(&request.trust_domain_id, &request.network_local_id)?;
-                if !service.am_root_for.iter().any(|(td, nlid)| {
-                    td == &td_id && nlid == &network_local_id
-                }) {
+                if !service
+                    .am_root_for
+                    .iter()
+                    .any(|(td, nlid)| td == &td_id && nlid == &network_local_id)
+                {
                     return Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
                         "this instance is not the trust-domain root for the given (trust_domain_id, network_local_id)"
                     )));
@@ -1576,11 +1830,44 @@ impl Instance {
                             "pending request belongs to a different (trust_domain_id, network_local_id)"
                         )));
                     }
-                    pending.try_approve(&applicant_pk).ok_or_else(|| {
-                        rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
-                            "pending request disappeared between lookup and approve"
-                        ))
-                    })?
+                    if let Some(cert_cbor) = request.member_cert_cbor.as_ref() {
+                        let cert: MemberCert = from_cbor(cert_cbor).map_err(|err| {
+                            rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                                "invalid member_cert_cbor: {err}"
+                            ))
+                        })?;
+                        if cert.details.trust_domain_id != td_id
+                            || cert.details.network_local_id != network_local_id
+                            || cert.details.device_pk.as_bytes() != &applicant_pk
+                            || cert.details.device_label != jr.device_label
+                        {
+                            return Err(rpc_types::error::Error::ExecutionError(
+                                anyhow::anyhow!(
+                                    "member_cert_cbor does not match pending join request"
+                                ),
+                            ));
+                        }
+                        pending
+                            .try_approve_with_cert(&applicant_pk, cert)
+                            .ok_or_else(|| {
+                                rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                                    "pending request disappeared between lookup and approve"
+                                ))
+                            })?
+                    } else {
+                        if !service.can_sign_pending_certs {
+                            return Err(rpc_types::error::Error::ExecutionError(
+                                anyhow::anyhow!(
+                                    "root signing key is not unlocked; approve with member_cert_cbor"
+                                ),
+                            ));
+                        }
+                        pending.try_approve(&applicant_pk).ok_or_else(|| {
+                            rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                                "pending request disappeared between lookup and approve"
+                            ))
+                        })?
+                    }
                 };
                 Ok(ApproveJoinRequestResponse {
                     member_cert_cbor: to_canonical_cbor(&cert),
@@ -1599,9 +1886,11 @@ impl Instance {
                 })?;
                 let (td_id, network_local_id) =
                     parse_trust_target(&request.trust_domain_id, &request.network_local_id)?;
-                if !service.am_root_for.iter().any(|(td, nlid)| {
-                    td == &td_id && nlid == &network_local_id
-                }) {
+                if !service
+                    .am_root_for
+                    .iter()
+                    .any(|(td, nlid)| td == &td_id && nlid == &network_local_id)
+                {
                     return Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
                         "this instance is not the trust-domain root for the given (trust_domain_id, network_local_id)"
                     )));
@@ -1630,7 +1919,8 @@ impl Instance {
                 &self,
                 _ctrl: Self::Controller,
                 request: ListPendingJoinRequestsRequest,
-            ) -> crate::proto::rpc_types::error::Result<ListPendingJoinRequestsResponse> {
+            ) -> crate::proto::rpc_types::error::Result<ListPendingJoinRequestsResponse>
+            {
                 let service = self.join_forward_service.as_ref().ok_or_else(|| {
                     rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
                         "join-forward service is not available"
@@ -1644,11 +1934,13 @@ impl Instance {
                 let nlid_filter = if request.network_local_id.is_empty() {
                     None
                 } else {
-                    Some(NetworkLocalId::try_from_str(&request.network_local_id).map_err(|err| {
-                        rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
-                            "invalid network_local_id: {err}"
-                        ))
-                    })?)
+                    Some(
+                        NetworkLocalId::try_from_str(&request.network_local_id).map_err(|err| {
+                            rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                                "invalid network_local_id: {err}"
+                            ))
+                        })?,
+                    )
                 };
                 let queued = service.pending.lock().unwrap().list();
                 let requests = queued
@@ -1684,9 +1976,7 @@ impl Instance {
             Ok(TrustDomainId(arr))
         }
 
-        fn parse_applicant_pk(
-            bytes: &[u8],
-        ) -> crate::proto::rpc_types::error::Result<[u8; 32]> {
+        fn parse_applicant_pk(bytes: &[u8]) -> crate::proto::rpc_types::error::Result<[u8; 32]> {
             bytes.try_into().map_err(|_| {
                 rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
                     "applicant_pk must be 32 bytes"

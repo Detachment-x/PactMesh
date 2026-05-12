@@ -192,7 +192,8 @@ pub struct GlobalCtx {
     pub config: Box<dyn ConfigLoader>,
     pub net_ns: NetNS,
     pub network: NetworkIdentity,
-    pub trust_context: tokio::sync::RwLock<Option<Arc<crate::common::trust_context::TrustDomainContext>>>,
+    pub trust_context:
+        tokio::sync::RwLock<Option<Arc<crate::common::trust_context::TrustDomainContext>>>,
 
     event_bus: EventBus,
 

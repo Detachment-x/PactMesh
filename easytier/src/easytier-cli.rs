@@ -1,8 +1,8 @@
 use std::{
-    io::{Read as _, Write as _},
     collections::{BTreeMap, HashMap},
     ffi::OsString,
     future::Future,
+    io::{Read as _, Write as _},
     net::{IpAddr, SocketAddr},
     path::PathBuf,
     pin::Pin,
@@ -17,10 +17,9 @@ use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
 use cidr::Ipv4Inet;
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, builder::BoolishValueParser};
-use ed25519_dalek::VerifyingKey;
 use easytier::ShellType;
+use ed25519_dalek::VerifyingKey;
 use humansize::format_size;
-use pnet::ipnetwork::IpNetwork as IpNet;
 use rust_i18n::t;
 use service_manager::*;
 use tabled::settings::{Disable, Modify, Style, Width, location::ByColumnName, object::Columns};
@@ -35,13 +34,6 @@ use easytier::{
     common::{
         constants::EASYTIER_VERSION,
         stun::{StunInfoCollector, StunInfoCollectorTrait},
-    },
-    trust::{
-        ACL_SCHEMA_VERSION, AclPolicy, Action, HostnameLabel, JoinRequest, MemberCertIndexEntry,
-        NetworkLocalId, NetworkStatePayload, SignKey, SignedNetworkState, TrustDomainRoot, UnsignedNetworkState,
-        from_cbor, hostname::check_hostname_unique,
-        network_bootstrap::{NetworkBootstrap, bootstrap_to_qr_svg},
-        revocation::RevocationReason, to_canonical_cbor, wrap_armored,
     },
     peers,
     proto::{
@@ -86,6 +78,15 @@ use easytier::{
         common::{NatType, PortForwardConfigPb, SocketType},
         rpc_impl::standalone::StandAloneClient,
         rpc_types::controller::BaseController,
+    },
+    trust::{
+        ACL_SCHEMA_VERSION, AclPolicy, Action, HostnameLabel, JoinRequest, MemberCertIndexEntry,
+        NetworkLocalId, NetworkStatePayload, SignKey, SignedNetworkState, TrustDomainRoot,
+        UnsignedNetworkState, from_cbor,
+        hostname::check_hostname_unique,
+        network_bootstrap::{NetworkBootstrap, bootstrap_to_qr_svg},
+        revocation::RevocationReason,
+        to_canonical_cbor, wrap_armored,
     },
     tunnel::{TunnelScheme, tcp::TcpTunnelConnector},
     utils::{PeerRoutePair, string::cost_to_str},
@@ -469,7 +470,11 @@ enum TrustSubCommand {
         trust_domain_id: String,
         #[arg(help = "network-local id")]
         network_local_id: String,
-        #[arg(long, default_value = "accept", help = "default ACL action: accept or drop")]
+        #[arg(
+            long,
+            default_value = "accept",
+            help = "default ACL action: accept or drop"
+        )]
         default_action: String,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
@@ -511,11 +516,22 @@ enum TrustSubCommand {
         hint: String,
         #[arg(long, help = "file containing the device key passphrase")]
         passphrase_file: Option<PathBuf>,
-        #[arg(long, help = "submit to the running daemon and poll for the approved member cert")]
+        #[arg(
+            long,
+            help = "submit to the running daemon and poll for the approved member cert"
+        )]
         online: bool,
-        #[arg(long, default_value_t = 3600, help = "online approval timeout in seconds")]
+        #[arg(
+            long,
+            default_value_t = 3600,
+            help = "online approval timeout in seconds"
+        )]
         wait_secs: u64,
-        #[arg(long, default_value_t = 30, help = "online approval poll interval in seconds")]
+        #[arg(
+            long,
+            default_value_t = 30,
+            help = "online approval poll interval in seconds"
+        )]
         poll_secs: u64,
     },
     Revoke {
@@ -525,7 +541,12 @@ enum TrustSubCommand {
         network_local_id: String,
         #[arg(help = "member-cert fingerprint", allow_hyphen_values = true)]
         fingerprint: String,
-        #[arg(long, value_enum, default_value = "unspecified", help = "revocation reason")]
+        #[arg(
+            long,
+            value_enum,
+            default_value = "unspecified",
+            help = "revocation reason"
+        )]
         reason: RevokeReasonArg,
         #[arg(long, help = "revocation note")]
         note: Option<String>,
@@ -565,8 +586,23 @@ enum TrustSubCommand {
         trust_domain_id: String,
         #[arg(help = "network-local id")]
         network_local_id: String,
-        #[arg(long, value_enum, default_value = "active", help = "member status filter")]
+        #[arg(
+            long,
+            value_enum,
+            default_value = "active",
+            help = "member status filter"
+        )]
         include: MemberIncludeArg,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+    },
+    ShowDevice {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(help = "device id or unique prefix", allow_hyphen_values = true)]
+        device_id: String,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
     },
@@ -600,7 +636,8 @@ enum TrustSubCommand {
         #[arg(help = "network-local id")]
         network_local_id: String,
         #[arg(
-            help = "applicant pubkey (base64 URL-safe, no padding) from 'trust list-pending'",
+            value_name = "DEVICE_ID",
+            help = "pending device id or unique prefix from 'trust list-pending'",
             allow_hyphen_values = true
         )]
         applicant_pk: String,
@@ -615,7 +652,8 @@ enum TrustSubCommand {
         #[arg(help = "network-local id")]
         network_local_id: String,
         #[arg(
-            help = "applicant pubkey (base64 URL-safe, no padding) from 'trust list-pending'",
+            value_name = "DEVICE_ID",
+            help = "pending device id or unique prefix from 'trust list-pending'",
             allow_hyphen_values = true
         )]
         applicant_pk: String,
@@ -651,6 +689,7 @@ enum MemberIncludeArg {
     Active,
     Disabled,
     Revoked,
+    Expired,
     All,
 }
 
@@ -2648,7 +2687,9 @@ fn handle_trust_invite(
     }
 }
 
-fn parse_member_cert_fingerprint(value: &str) -> Result<easytier::trust::MemberCertFingerprint, Error> {
+fn parse_member_cert_fingerprint(
+    value: &str,
+) -> Result<easytier::trust::MemberCertFingerprint, Error> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(value)
         .or_else(|_| base64::engine::general_purpose::STANDARD.decode(value))
@@ -2700,7 +2741,12 @@ fn handle_trust_revoke(
 
     let passphrase = read_root_passphrase(passphrase_file.as_ref())?;
     let root = TrustDomainRoot::load_from_file(&domain_dir.join("sk_root.age"), &passphrase)
-        .with_context(|| format!("failed to unlock {}", domain_dir.join("sk_root.age").display()))?;
+        .with_context(|| {
+            format!(
+                "failed to unlock {}",
+                domain_dir.join("sk_root.age").display()
+            )
+        })?;
     if root.id().to_string() != trust_domain_id {
         anyhow::bail!("trust_domain_id does not match sk_root.age");
     }
@@ -2708,18 +2754,24 @@ fn handle_trust_revoke(
     let mut next_state = original_state.details.clone();
     let next_version = next_state.version.saturating_add(1);
     next_state.version = next_version;
-    next_state.payload.revoked_certs.push(easytier::trust::RevokedCert {
-        cert_fingerprint: fingerprint,
-        revoked_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .context("system clock before unix epoch")?
-            .as_secs(),
-        reason_code: revoke_reason_value(reason),
-        reason_note: note,
-    });
+    next_state
+        .payload
+        .revoked_certs
+        .push(easytier::trust::RevokedCert {
+            cert_fingerprint: fingerprint,
+            revoked_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .context("system clock before unix epoch")?
+                .as_secs(),
+            reason_code: revoke_reason_value(reason),
+            reason_note: note,
+        });
     let next_state = next_state.sign(&root);
 
-    let backup_path = network_dir.join(format!("network_state.v{}.cbor.pem", original_state.details.version));
+    let backup_path = network_dir.join(format!(
+        "network_state.v{}.cbor.pem",
+        original_state.details.version
+    ));
     std::fs::write(&backup_path, original_pem)
         .with_context(|| format!("failed to write {}", backup_path.display()))?;
     std::fs::write(&state_path, next_state.to_pem())
@@ -2727,50 +2779,21 @@ fn handle_trust_revoke(
 
     println!(
         "revoked {}: version {} -> {}",
-        fingerprint,
-        original_state.details.version,
-        next_version
+        fingerprint, original_state.details.version, next_version
     );
     Ok(())
 }
 
-#[derive(Debug, serde::Serialize)]
-struct MemberListRow {
-    fingerprint: String,
-    device_label: String,
-    issued_at: u64,
-    expires_at: u64,
-    status: String,
-    capabilities: String,
-    hostname: String,
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
 }
 
-fn render_member_capabilities(cert: Option<&easytier::trust::MemberCert>) -> String {
-    let Some(cert) = cert else {
-        return String::new();
-    };
-    let caps = &cert.details.capabilities;
-    let mut parts = Vec::new();
-    if caps.can_relay_data {
-        parts.push("relay-data".to_owned());
-    }
-    if caps.can_relay_control {
-        parts.push("relay-control".to_owned());
-    }
-    if !caps.can_proxy_subnet.is_empty() {
-        parts.push(format!(
-            "proxy-subnet:{}",
-            caps.can_proxy_subnet
-                .iter()
-                .map(IpNet::to_string)
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
-    }
-    parts.join(",")
-}
-
-fn read_member_cert_cache(network_dir: &std::path::Path) -> BTreeMap<easytier::trust::MemberCertFingerprint, easytier::trust::MemberCert> {
+fn read_member_cert_cache(
+    network_dir: &std::path::Path,
+) -> BTreeMap<easytier::trust::MemberCertFingerprint, easytier::trust::MemberCert> {
     let mut certs = BTreeMap::new();
     let Ok(entries) = std::fs::read_dir(network_dir) else {
         return certs;
@@ -2820,6 +2843,7 @@ fn include_member_status(include: &MemberIncludeArg, status: &str) -> bool {
         MemberIncludeArg::Active => status == "active",
         MemberIncludeArg::Disabled => status == "disabled",
         MemberIncludeArg::Revoked => status == "revoked",
+        MemberIncludeArg::Expired => status == "expired",
         MemberIncludeArg::All => true,
     }
 }
@@ -2830,28 +2854,13 @@ fn handle_trust_list_members(
     include: MemberIncludeArg,
     json: bool,
 ) -> Result<(), Error> {
-    let (network_dir, _pem, state) = load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
-    let certs = read_member_cert_cache(&network_dir);
-    let mut rows = Vec::new();
-    for entry in &state.details.payload.member_cert_index {
-        let status = member_status(&entry.fingerprint, &state);
-        if !include_member_status(&include, status) {
-            continue;
-        }
-        let cert = certs.get(&entry.fingerprint);
-        rows.push(MemberListRow {
-            fingerprint: entry.fingerprint.to_string(),
-            device_label: entry.device_label.clone(),
-            issued_at: entry.issued_at,
-            expires_at: entry.expires_at,
-            status: status.to_owned(),
-            capabilities: render_member_capabilities(cert),
-            hostname: cert
-                .and_then(|cert| cert.details.hostname.as_ref())
-                .map(|hostname| hostname.as_str().to_owned())
-                .unwrap_or_default(),
-        });
-    }
+    let (network_dir, _pem, state) =
+        load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
+    let rows = collect_member_list_rows(&network_dir, &state, &network_local_id);
+    let rows = rows
+        .into_iter()
+        .filter(|row| include_member_status(&include, row.status.as_str()))
+        .collect::<Vec<_>>();
 
     if json {
         println!("{}", serde_json::to_string(&rows)?);
@@ -2861,18 +2870,108 @@ fn handle_trust_list_members(
         println!("(no members)");
         return Ok(());
     }
-    println!("fingerprint\tdevice_label\tissued_at\texpires_at\tstatus\tcapabilities\thostname");
+    println!("device_id\tfingerprint\tdevice_label\trole\tnetwork_local_id\tissued_at\texpires_at\tstatus\tcapabilities\thostname");
     for row in rows {
         let prefix = row.fingerprint.chars().take(8).collect::<String>();
+        let device_id = if row.device_id == "unknown" {
+            row.device_id.clone()
+        } else {
+            row.device_id.chars().take(12).collect::<String>()
+        };
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            prefix, row.device_label, row.issued_at, row.expires_at, row.status, row.capabilities, row.hostname
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            device_id,
+            prefix,
+            row.device_label,
+            row.role.as_str(),
+            row.network_local_id,
+            row.issued_at,
+            row.expires_at,
+            row.status.as_str(),
+            row.capabilities.render_compact(),
+            row.hostname
         );
     }
     Ok(())
 }
 
-fn read_member_cert_bodies(network_dir: &std::path::Path) -> BTreeMap<easytier::trust::MemberCertFingerprint, easytier::trust::MemberCert> {
+fn collect_member_list_rows(
+    network_dir: &std::path::Path,
+    state: &easytier::trust::SignedNetworkState,
+    network_local_id: &str,
+) -> Vec<easytier::trust::DeviceView> {
+    let certs = read_member_cert_bodies(network_dir);
+    let now = now_unix_secs();
+    let local_device_id = std::fs::read_to_string(network_dir.join("device_id"))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let has_root_key = network_dir
+        .parent()
+        .map(|domain_dir| domain_dir.join("sk_root.age").is_file())
+        .unwrap_or(false);
+    let mut rows = Vec::new();
+    for entry in &state.details.payload.member_cert_index {
+        let cert = certs.get(&entry.fingerprint);
+        rows.push(easytier::trust::view_for_member(
+            entry,
+            cert,
+            state,
+            network_local_id,
+            local_device_id.as_deref(),
+            has_root_key,
+            now,
+        ));
+    }
+    rows
+}
+
+fn handle_trust_show_device(
+    trust_domain_id: String,
+    network_local_id: String,
+    device_id: String,
+    json: bool,
+) -> Result<(), Error> {
+    let (network_dir, _pem, state) =
+        load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
+    let rows = collect_member_list_rows(&network_dir, &state, &network_local_id);
+    let matches = rows
+        .into_iter()
+        .filter(|row| row.device_id != "unknown" && row.device_id.starts_with(&device_id))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => anyhow::bail!("device_id not found: {}", device_id),
+        [row] => {
+            if json {
+                println!("{}", serde_json::to_string(row)?);
+            } else {
+                println!("device_id: {}", row.device_id);
+                println!("fingerprint: {}", row.fingerprint);
+                println!("device_label: {}", row.device_label);
+                println!("role: {}", row.role.as_str());
+                println!("network_local_id: {}", row.network_local_id);
+                println!("issued_at: {}", row.issued_at);
+                println!("expires_at: {}", row.expires_at);
+                println!("status: {}", row.status.as_str());
+                println!("capabilities: {}", row.capabilities.render_compact());
+                println!("hostname: {}", row.hostname);
+            }
+            Ok(())
+        }
+        _ => {
+            let candidates = matches
+                .iter()
+                .map(|row| row.device_id.chars().take(12).collect::<String>())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!("device_id prefix is ambiguous: {} (candidates: {})", device_id, candidates)
+        }
+    }
+}
+
+fn read_member_cert_bodies(
+    network_dir: &std::path::Path,
+) -> BTreeMap<easytier::trust::MemberCertFingerprint, easytier::trust::MemberCert> {
     let mut certs = read_member_cert_cache(network_dir);
     let cert_dir = network_dir.join("member_certs");
     let Ok(entries) = std::fs::read_dir(cert_dir) else {
@@ -2897,7 +2996,10 @@ fn live_hostname_entries(
     state: &easytier::trust::SignedNetworkState,
     certs: &BTreeMap<easytier::trust::MemberCertFingerprint, easytier::trust::MemberCert>,
     target: easytier::trust::MemberCertFingerprint,
-) -> Vec<(easytier::trust::MemberCertFingerprint, Option<HostnameLabel>)> {
+) -> Vec<(
+    easytier::trust::MemberCertFingerprint,
+    Option<HostnameLabel>,
+)> {
     state
         .details
         .payload
@@ -2922,12 +3024,16 @@ fn replace_member_index_entry(
         .payload
         .member_cert_index
         .retain(|entry| entry.fingerprint != old_fp);
-    state.details.payload.member_cert_index.push(MemberCertIndexEntry {
-        fingerprint: cert.fingerprint(),
-        device_label: cert.details.device_label.clone(),
-        issued_at: cert.details.not_before,
-        expires_at: cert.details.expires_at,
-    });
+    state
+        .details
+        .payload
+        .member_cert_index
+        .push(MemberCertIndexEntry {
+            fingerprint: cert.fingerprint(),
+            device_label: cert.details.device_label.clone(),
+            issued_at: cert.details.not_before,
+            expires_at: cert.details.expires_at,
+        });
 }
 
 fn handle_trust_hostname_update(
@@ -2938,7 +3044,8 @@ fn handle_trust_hostname_update(
     note: Option<String>,
     passphrase_file: Option<PathBuf>,
 ) -> Result<(), Error> {
-    let (network_dir, original_pem, mut state) = load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
+    let (network_dir, original_pem, mut state) =
+        load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
     let old_fp = parse_member_cert_fingerprint(&fingerprint)?;
     if !state
         .details
@@ -2962,7 +3069,10 @@ fn handle_trust_hostname_update(
         .map(|hostname| HostnameLabel::try_from_str(&hostname))
         .transpose()?;
     if old_cert.details.hostname == new_hostname {
-        println!("hostname unchanged for {}", old_fp.to_string().chars().take(8).collect::<String>());
+        println!(
+            "hostname unchanged for {}",
+            old_fp.to_string().chars().take(8).collect::<String>()
+        );
         return Ok(());
     }
     if let Some(hostname) = new_hostname.as_ref() {
@@ -2974,22 +3084,29 @@ fn handle_trust_hostname_update(
     new_details.hostname = new_hostname.clone();
     new_details.network_state_version_ref = state.details.version.saturating_add(1);
     let new_cert = new_details.sign(&root);
-    state.details.payload.revoked_certs.push(easytier::trust::RevokedCert {
-        cert_fingerprint: old_fp,
-        revoked_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .context("system clock before unix epoch")?
-            .as_secs(),
-        reason_code: RevocationReason::Superseded,
-        reason_note: note,
-    });
+    state
+        .details
+        .payload
+        .revoked_certs
+        .push(easytier::trust::RevokedCert {
+            cert_fingerprint: old_fp,
+            revoked_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .context("system clock before unix epoch")?
+                .as_secs(),
+            reason_code: RevocationReason::Superseded,
+            reason_note: note,
+        });
     replace_member_index_entry(&mut state, old_fp, &new_cert);
 
     let cert_dir = network_dir.join("member_certs");
     std::fs::create_dir_all(&cert_dir)
         .with_context(|| format!("failed to create {}", cert_dir.display()))?;
-    std::fs::write(cert_dir.join(format!("{}.pem", new_cert.fingerprint())), new_cert.to_pem())
-        .context("failed to write reissued member cert")?;
+    std::fs::write(
+        cert_dir.join(format!("{}.pem", new_cert.fingerprint())),
+        new_cert.to_pem(),
+    )
+    .context("failed to write reissued member cert")?;
 
     let old_version = state.details.version;
     let new_version = write_signed_network_state(&network_dir, &state, original_pem, &root)?;
@@ -3017,7 +3134,8 @@ fn parse_disable_until(value: Option<String>) -> Result<Option<u64>, Error> {
             let timestamp = chrono::DateTime::parse_from_rfc3339(&value)
                 .with_context(|| format!("invalid --until '{value}', expected RFC3339"))?
                 .timestamp();
-            u64::try_from(timestamp).map_err(|_| anyhow::anyhow!("--until must be after unix epoch"))
+            u64::try_from(timestamp)
+                .map_err(|_| anyhow::anyhow!("--until must be after unix epoch"))
         })
         .transpose()
 }
@@ -3032,11 +3150,22 @@ fn write_signed_network_state(
     let next_version = next_state.version.saturating_add(1);
     next_state.version = next_version;
     let next_state = next_state.sign(root);
-    let backup_path = network_dir.join(format!("network_state.v{}.cbor.pem", original_state.details.version));
+    let backup_path = network_dir.join(format!(
+        "network_state.v{}.cbor.pem",
+        original_state.details.version
+    ));
     std::fs::write(&backup_path, original_pem)
         .with_context(|| format!("failed to write {}", backup_path.display()))?;
-    std::fs::write(network_dir.join("network_state.cbor.pem"), next_state.to_pem())
-        .with_context(|| format!("failed to write {}", network_dir.join("network_state.cbor.pem").display()))?;
+    std::fs::write(
+        network_dir.join("network_state.cbor.pem"),
+        next_state.to_pem(),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            network_dir.join("network_state.cbor.pem").display()
+        )
+    })?;
     Ok(next_version)
 }
 
@@ -3057,11 +3186,19 @@ fn load_network_state_for_edit(
     Ok((network_dir, original_pem, original_state))
 }
 
-fn unlock_domain_root(trust_domain_id: &str, passphrase_file: Option<PathBuf>) -> Result<TrustDomainRoot, Error> {
+fn unlock_domain_root(
+    trust_domain_id: &str,
+    passphrase_file: Option<PathBuf>,
+) -> Result<TrustDomainRoot, Error> {
     let domain_dir = default_trust_domains_dir()?.join(trust_domain_id);
     let passphrase = read_root_passphrase(passphrase_file.as_ref())?;
     let root = TrustDomainRoot::load_from_file(&domain_dir.join("sk_root.age"), &passphrase)
-        .with_context(|| format!("failed to unlock {}", domain_dir.join("sk_root.age").display()))?;
+        .with_context(|| {
+            format!(
+                "failed to unlock {}",
+                domain_dir.join("sk_root.age").display()
+            )
+        })?;
     if root.id().to_string() != trust_domain_id {
         anyhow::bail!("trust_domain_id does not match sk_root.age");
     }
@@ -3109,14 +3246,19 @@ fn handle_trust_disable(
         .payload
         .disabled_certs
         .retain(|disabled| disabled.cert_fingerprint != fingerprint);
-    original_state.details.payload.disabled_certs.push(easytier::trust::DisabledCert {
-        cert_fingerprint: fingerprint,
-        disabled_at,
-        expected_until: parse_disable_until(until)?,
-        reason_note: note,
-    });
+    original_state
+        .details
+        .payload
+        .disabled_certs
+        .push(easytier::trust::DisabledCert {
+            cert_fingerprint: fingerprint,
+            disabled_at,
+            expected_until: parse_disable_until(until)?,
+            reason_note: note,
+        });
     let old_version = original_state.details.version;
-    let new_version = write_signed_network_state(&network_dir, &original_state, original_pem, &root)?;
+    let new_version =
+        write_signed_network_state(&network_dir, &original_state, original_pem, &root)?;
 
     if json {
         println!(
@@ -3129,7 +3271,10 @@ fn handle_trust_disable(
             })
         );
     } else {
-        println!("disabled {}: version {} -> {}", fingerprint, old_version, new_version);
+        println!(
+            "disabled {}: version {} -> {}",
+            fingerprint, old_version, new_version
+        );
     }
     Ok(())
 }
@@ -3165,7 +3310,8 @@ fn handle_trust_enable(
 
     let root = unlock_domain_root(&trust_domain_id, passphrase_file)?;
     let old_version = original_state.details.version;
-    let new_version = write_signed_network_state(&network_dir, &original_state, original_pem, &root)?;
+    let new_version =
+        write_signed_network_state(&network_dir, &original_state, original_pem, &root)?;
 
     if json {
         println!(
@@ -3178,11 +3324,13 @@ fn handle_trust_enable(
             })
         );
     } else {
-        println!("enabled {}: version {} -> {}", fingerprint, old_version, new_version);
+        println!(
+            "enabled {}: version {} -> {}",
+            fingerprint, old_version, new_version
+        );
     }
     Ok(())
 }
-
 
 struct AcceptInviteOptions {
     source: String,
@@ -3210,10 +3358,12 @@ fn read_device_passphrase(passphrase_file: Option<&PathBuf>) -> Result<String, E
 }
 
 fn seal_device_sign_key(sk_self: &SignKey, password: &str) -> Result<Vec<u8>, Error> {
-    let mut recipient = age::scrypt::Recipient::new(age::secrecy::SecretString::from(password.to_owned()));
+    let mut recipient =
+        age::scrypt::Recipient::new(age::secrecy::SecretString::from(password.to_owned()));
     recipient.set_work_factor(2);
-    let encryptor = age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
-        .context("failed to create device-key encryptor")?;
+    let encryptor =
+        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+            .context("failed to create device-key encryptor")?;
     let mut encrypted = Vec::new();
     let mut writer = encryptor.wrap_output(&mut encrypted)?;
     writer.write_all(&sk_self.to_bytes())?;
@@ -3222,10 +3372,11 @@ fn seal_device_sign_key(sk_self: &SignKey, password: &str) -> Result<Vec<u8>, Er
 }
 
 fn load_device_sign_key(path: &std::path::Path, password: &str) -> Result<SignKey, Error> {
-    let blob = std::fs::read(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    let decryptor = age::Decryptor::new(&blob[..]).context("failed to parse device key age file")?;
-    let identity = age::scrypt::Identity::new(age::secrecy::SecretString::from(password.to_owned()));
+    let blob = std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let decryptor =
+        age::Decryptor::new(&blob[..]).context("failed to parse device key age file")?;
+    let identity =
+        age::scrypt::Identity::new(age::secrecy::SecretString::from(password.to_owned()));
     let mut reader = decryptor
         .decrypt(std::iter::once(&identity as &dyn age::Identity))
         .context("failed to decrypt device key")?;
@@ -3246,7 +3397,9 @@ fn default_private_network_dir() -> Result<PathBuf, Error> {
     Ok(PathBuf::from(home).join(".config/privateNetwork"))
 }
 
-fn load_or_create_global_device_identity(password: &str) -> Result<(SignKey, String, PathBuf), Error> {
+fn load_or_create_global_device_identity(
+    password: &str,
+) -> Result<(SignKey, String, PathBuf), Error> {
     let device_dir = default_private_network_dir()?.join("devices/default");
     let sk_path = device_dir.join("sk_self.age");
     if sk_path.exists() {
@@ -3277,11 +3430,19 @@ fn load_or_create_global_device_identity(password: &str) -> Result<(SignKey, Str
         device_dir.join("pk_self.pem"),
         wrap_armored("PNW-PK-SELF", &device_pk.0),
     )
-    .with_context(|| format!("failed to write {}", device_dir.join("pk_self.pem").display()))?;
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            device_dir.join("pk_self.pem").display()
+        )
+    })?;
     Ok((sk_self, device_id, device_dir))
 }
 
-fn ensure_bootstrap_root(domain_dir: &std::path::Path, bootstrap: &NetworkBootstrap) -> Result<(), Error> {
+fn ensure_bootstrap_root(
+    domain_dir: &std::path::Path,
+    bootstrap: &NetworkBootstrap,
+) -> Result<(), Error> {
     std::fs::create_dir_all(domain_dir)
         .with_context(|| format!("failed to create {}", domain_dir.display()))?;
     let pk_root_path = domain_dir.join("pk_root.pem");
@@ -3320,25 +3481,46 @@ async fn handle_trust_accept_invite(
     let passphrase = read_device_passphrase(options.passphrase_file.as_ref())?;
     let (sk_self, device_id, device_dir) = load_or_create_global_device_identity(&passphrase)?;
 
-    let network_dir = domain_dir.join("networks").join(bootstrap.network_local_id.to_string());
+    let network_dir = domain_dir
+        .join("networks")
+        .join(bootstrap.network_local_id.to_string());
     std::fs::create_dir_all(&network_dir)
         .with_context(|| format!("failed to create {}", network_dir.display()))?;
-    std::fs::write(network_dir.join("device_id"), format!("{}\n", device_id))
-        .with_context(|| format!("failed to write {}", network_dir.join("device_id").display()))?;
-    std::fs::copy(device_dir.join("sk_self.age"), network_dir.join("sk_self.age"))
-        .with_context(|| format!("failed to write {}", network_dir.join("sk_self.age").display()))?;
-    std::fs::write(network_dir.join("network_bootstrap.cbor.pem"), bootstrap.to_pem())
-        .with_context(|| {
+    std::fs::write(network_dir.join("device_id"), format!("{}\n", device_id)).with_context(
+        || {
             format!(
                 "failed to write {}",
-                network_dir.join("network_bootstrap.cbor.pem").display()
+                network_dir.join("device_id").display()
             )
-        })?;
+        },
+    )?;
+    std::fs::copy(
+        device_dir.join("sk_self.age"),
+        network_dir.join("sk_self.age"),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            network_dir.join("sk_self.age").display()
+        )
+    })?;
+    std::fs::write(
+        network_dir.join("network_bootstrap.cbor.pem"),
+        bootstrap.to_pem(),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            network_dir.join("network_bootstrap.cbor.pem").display()
+        )
+    })?;
     let jr = JoinRequest::new_signed(
         bootstrap.trust_domain_id,
         bootstrap.network_local_id.clone(),
         &sk_self,
-        options.device_label.unwrap_or_else(|| gethostname::gethostname().to_string_lossy().to_string()),
+        options
+            .device_label
+            .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().to_string()),
         options.hint,
     );
     let join_path = network_dir.join("pending_join_request.cbor.pem");
@@ -3351,6 +3533,7 @@ async fn handle_trust_accept_invite(
     if options.online {
         submit_join_request_online(
             handler,
+            &bootstrap,
             &network_dir,
             &jr,
             options.wait_secs,
@@ -3367,8 +3550,47 @@ async fn handle_trust_accept_invite(
     Ok(())
 }
 
+fn derive_join_admission_url(seed: &Url) -> Option<Url> {
+    if seed.scheme() != "tcp" {
+        return None;
+    }
+    let port = seed.port()?;
+    let admission_port = port.checked_add(1)?;
+    let mut admission = seed.clone();
+    admission.set_port(Some(admission_port)).ok()?;
+    Some(admission)
+}
+
+async fn connect_join_admission_client(
+    bootstrap: &NetworkBootstrap,
+) -> Result<StandAloneClient<TcpTunnelConnector>, Error> {
+    let mut last_error = None;
+    for seed in &bootstrap.bootstrap_seeds {
+        let Some(admission_url) = derive_join_admission_url(seed) else {
+            continue;
+        };
+        let connector = TcpTunnelConnector::new(admission_url.clone());
+        let mut client = StandAloneClient::new(connector);
+        match client
+            .scoped_client::<TrustJoinManageRpcClientFactory<BaseController>>(String::new())
+            .await
+        {
+            Ok(_) => return Ok(client),
+            Err(err) => {
+                last_error = Some(format!("{admission_url}: {err}"));
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "failed to connect to join admission endpoint from invite bootstrap seeds{}",
+        last_error.map(|err| format!(": {err}")).unwrap_or_default()
+    )
+}
+
 async fn submit_join_request_online(
-    handler: &CommandHandler<'_>,
+    _handler: &CommandHandler<'_>,
+    bootstrap: &NetworkBootstrap,
     network_dir: &std::path::Path,
     jr: &JoinRequest,
     wait_secs: u64,
@@ -3378,13 +3600,15 @@ async fn submit_join_request_online(
         anyhow::bail!("--poll-secs must be greater than 0");
     }
 
-    let client = handler.get_trust_join_manage_client().await?;
-    println!("Connecting to daemon...");
-    client
+    let mut admission_rpc = connect_join_admission_client(bootstrap).await?;
+    println!("Connecting to join admission endpoint...");
+    admission_rpc
+        .scoped_client::<TrustJoinManageRpcClientFactory<BaseController>>(String::new())
+        .await?
         .submit_join_request(
             BaseController::default(),
             SubmitJoinRequestRequest {
-                instance: Some(handler.instance_selector.clone()),
+                instance: None,
                 join_request_cbor: to_canonical_cbor(jr),
                 ttl: 6,
             },
@@ -3395,11 +3619,13 @@ async fn submit_join_request_online(
     println!("Waiting for approval...");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
     loop {
-        let response = client
+        let response = admission_rpc
+            .scoped_client::<TrustJoinManageRpcClientFactory<BaseController>>(String::new())
+            .await?
             .fetch_pending_member_cert(
                 BaseController::default(),
                 FetchPendingMemberCertRequest {
-                    instance: Some(handler.instance_selector.clone()),
+                    instance: None,
                     trust_domain_id: jr.trust_domain_id.0.to_vec(),
                     network_local_id: jr.network_local_id.as_str().to_owned(),
                     applicant_pk: jr.applicant_pk.0.to_vec(),
@@ -3449,6 +3675,119 @@ fn parse_url_safe_b64_32(value: &str, kind: &str) -> Result<[u8; 32], Error> {
         .map_err(|_| anyhow::anyhow!("{kind} must decode to exactly 32 bytes"))
 }
 
+fn encode_device_id(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+async fn resolve_pending_applicant_pk(
+    handler: &CommandHandler<'_>,
+    trust_domain_id: &str,
+    network_local_id: &str,
+    applicant_selector: &str,
+) -> Result<[u8; 32], Error> {
+    if let Ok(bytes) = parse_url_safe_b64_32(applicant_selector, "applicant_pk") {
+        return Ok(bytes);
+    }
+
+    let td_id_bytes = parse_url_safe_b64_32(trust_domain_id, "trust_domain_id")?;
+    let client = handler.get_trust_join_manage_client().await?;
+    let response = client
+        .list_pending_join_requests(
+            BaseController::default(),
+            ListPendingJoinRequestsRequest {
+                instance: Some(handler.instance_selector.clone()),
+                trust_domain_id: td_id_bytes.to_vec(),
+                network_local_id: network_local_id.to_owned(),
+            },
+        )
+        .await
+        .context("daemon refused to list pending join requests")?;
+
+    let matches = response
+        .requests
+        .iter()
+        .filter_map(|request| {
+            let device_id = encode_device_id(&request.applicant_pk);
+            if device_id.starts_with(applicant_selector) {
+                Some((device_id, request.applicant_pk.clone()))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    match matches.len() {
+        1 => matches[0]
+            .1
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("pending applicant_pk must be 32 bytes")),
+        0 => anyhow::bail!(
+            "no pending device id starts with '{applicant_selector}'; run trust list-pending first"
+        ),
+        _ => {
+            let ids = matches
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "device id prefix '{applicant_selector}' is ambiguous; matching pending ids: {ids}"
+            );
+        }
+    }
+}
+
+async fn resolve_pending_join_summary(
+    handler: &CommandHandler<'_>,
+    trust_domain_id: &str,
+    network_local_id: &str,
+    applicant_selector: &str,
+) -> Result<easytier::proto::api::config::PendingJoinRequestSummary, Error> {
+    let td_id_bytes = parse_url_safe_b64_32(trust_domain_id, "trust_domain_id")?;
+    let client = handler.get_trust_join_manage_client().await?;
+    let response = client
+        .list_pending_join_requests(
+            BaseController::default(),
+            ListPendingJoinRequestsRequest {
+                instance: Some(handler.instance_selector.clone()),
+                trust_domain_id: td_id_bytes.to_vec(),
+                network_local_id: network_local_id.to_owned(),
+            },
+        )
+        .await
+        .context("daemon refused to list pending join requests")?;
+
+    let matches = response
+        .requests
+        .into_iter()
+        .filter(|request| {
+            let device_id = encode_device_id(&request.applicant_pk);
+            device_id.starts_with(applicant_selector)
+                || parse_url_safe_b64_32(applicant_selector, "applicant_pk")
+                    .map(|bytes| request.applicant_pk.as_slice() == bytes)
+                    .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().expect("one match")),
+        0 => anyhow::bail!(
+            "no pending device id starts with '{applicant_selector}'; run trust list-pending first"
+        ),
+        _ => {
+            let ids = matches
+                .iter()
+                .map(|request| encode_device_id(&request.applicant_pk))
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "device id prefix '{applicant_selector}' is ambiguous; matching pending ids: {ids}"
+            );
+        }
+    }
+}
+
 async fn handle_trust_approve(
     handler: &CommandHandler<'_>,
     trust_domain_id: String,
@@ -3458,7 +3797,40 @@ async fn handle_trust_approve(
     passphrase_file: Option<PathBuf>,
 ) -> Result<(), Error> {
     let td_id_bytes = parse_url_safe_b64_32(&trust_domain_id, "trust_domain_id")?;
-    let applicant_pk_bytes = parse_url_safe_b64_32(&applicant_pk_str, "applicant_pk")?;
+    let pending = resolve_pending_join_summary(
+        handler,
+        &trust_domain_id,
+        &network_local_id,
+        &applicant_pk_str,
+    )
+    .await?;
+    let applicant_pk_bytes: [u8; 32] = pending
+        .applicant_pk
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("pending applicant_pk must be 32 bytes"))?;
+
+    let (network_dir, original_pem, mut state) =
+        load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
+    let root = unlock_domain_root(&trust_domain_id, passphrase_file)?;
+    let now = now_unix_secs();
+    let cert = easytier::trust::UnsignedMemberCert {
+        trust_domain_id: root.id(),
+        network_local_id: NetworkLocalId::try_from_str(&network_local_id)?,
+        device_pk: VerifyingKey::from_bytes(&applicant_pk_bytes)
+            .context("pending applicant_pk is not a valid ed25519 key")?,
+        device_label: pending.device_label,
+        not_before: now.saturating_sub(1),
+        expires_at: now.saturating_add(365 * 24 * 60 * 60),
+        capabilities: easytier::trust::Capabilities {
+            can_relay_data: false,
+            can_relay_control: false,
+            can_proxy_subnet: Vec::new(),
+        },
+        network_state_version_ref: state.details.version,
+        hostname: None,
+    }
+    .sign(&root);
 
     let client = handler.get_trust_join_manage_client().await?;
     let response = client
@@ -3469,6 +3841,7 @@ async fn handle_trust_approve(
                 trust_domain_id: td_id_bytes.to_vec(),
                 network_local_id: network_local_id.clone(),
                 applicant_pk: applicant_pk_bytes.to_vec(),
+                member_cert_cbor: Some(to_canonical_cbor(&cert)),
             },
         )
         .await
@@ -3478,8 +3851,6 @@ async fn handle_trust_approve(
         .context("daemon returned invalid member cert CBOR")?;
     let fingerprint = cert.fingerprint();
 
-    let (network_dir, original_pem, mut state) =
-        load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
     let already_indexed = state
         .details
         .payload
@@ -3489,13 +3860,16 @@ async fn handle_trust_approve(
     let new_version = if already_indexed {
         state.details.version
     } else {
-        state.details.payload.member_cert_index.push(MemberCertIndexEntry {
-            fingerprint,
-            device_label: cert.details.device_label.clone(),
-            issued_at: cert.details.not_before,
-            expires_at: cert.details.expires_at,
-        });
-        let root = unlock_domain_root(&trust_domain_id, passphrase_file)?;
+        state
+            .details
+            .payload
+            .member_cert_index
+            .push(MemberCertIndexEntry {
+                fingerprint,
+                device_label: cert.details.device_label.clone(),
+                issued_at: cert.details.not_before,
+                expires_at: cert.details.expires_at,
+            });
         write_signed_network_state(&network_dir, &state, original_pem, &root)?
     };
 
@@ -3534,7 +3908,13 @@ async fn handle_trust_reject(
     applicant_pk_str: String,
 ) -> Result<(), Error> {
     let td_id_bytes = parse_url_safe_b64_32(&trust_domain_id, "trust_domain_id")?;
-    let applicant_pk_bytes = parse_url_safe_b64_32(&applicant_pk_str, "applicant_pk")?;
+    let applicant_pk_bytes = resolve_pending_applicant_pk(
+        handler,
+        &trust_domain_id,
+        &network_local_id,
+        &applicant_pk_str,
+    )
+    .await?;
 
     let client = handler.get_trust_join_manage_client().await?;
     client
@@ -3581,8 +3961,9 @@ async fn handle_trust_list_pending(
             .iter()
             .map(|r| {
                 serde_json::json!({
-                    "applicant_pk": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&r.applicant_pk),
-                    "trust_domain_id": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&r.trust_domain_id),
+                    "device_id": encode_device_id(&r.applicant_pk),
+                    "applicant_pk": encode_device_id(&r.applicant_pk),
+                    "trust_domain_id": encode_device_id(&r.trust_domain_id),
                     "network_local_id": r.network_local_id,
                     "device_label": r.device_label,
                     "hint": r.hint,
@@ -3596,13 +3977,12 @@ async fn handle_trust_list_pending(
         println!("(no pending join requests)");
         return Ok(());
     }
-    println!("applicant_pk\tdevice_label\thint\tnetwork_local_id");
+    println!("device_id\tdevice_label\thint\tnetwork_local_id");
     for r in &response.requests {
-        let pk = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&r.applicant_pk);
-        let short_pk: String = pk.chars().take(16).collect();
+        let device_id = encode_device_id(&r.applicant_pk);
         println!(
             "{}\t{}\t{}\t{}",
-            short_pk, r.device_label, r.hint, r.network_local_id
+            device_id, r.device_label, r.hint, r.network_local_id
         );
     }
     Ok(())
@@ -3671,7 +4051,12 @@ fn list_trust_domains(base_dir: &std::path::Path) -> Result<Vec<TrustDomainListR
             .unwrap_or_default();
         let meta = std::fs::read_to_string(path.join("meta.toml")).unwrap_or_default();
         let network_count = std::fs::read_dir(path.join("networks"))
-            .map(|entries| entries.filter_map(Result::ok).filter(|entry| entry.path().is_dir()).count())
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.path().is_dir())
+                    .count()
+            })
             .unwrap_or(0);
         rows.push(TrustDomainListRow {
             trust_domain_id,
@@ -3735,14 +4120,21 @@ fn handle_trust_create_network(
 
     let network_local_id = NetworkLocalId::try_from_str(&network_local_id)
         .with_context(|| format!("invalid network_local_id '{network_local_id}'"))?;
-    let network_dir = domain_dir.join("networks").join(network_local_id.to_string());
+    let network_dir = domain_dir
+        .join("networks")
+        .join(network_local_id.to_string());
     if network_dir.exists() {
         anyhow::bail!("network already exists: {}", network_dir.display());
     }
 
     let passphrase = read_root_passphrase(passphrase_file.as_ref())?;
     let root = TrustDomainRoot::load_from_file(&domain_dir.join("sk_root.age"), &passphrase)
-        .with_context(|| format!("failed to unlock {}", domain_dir.join("sk_root.age").display()))?;
+        .with_context(|| {
+            format!(
+                "failed to unlock {}",
+                domain_dir.join("sk_root.age").display()
+            )
+        })?;
     if root.id().to_string() != trust_domain_id {
         anyhow::bail!("trust_domain_id does not match sk_root.age");
     }
@@ -3814,7 +4206,8 @@ fn handle_trust_bootstrap_self(options: BootstrapSelfOptions) -> Result<(), Erro
     }
 
     let device_passphrase = read_device_passphrase(options.device_passphrase_file.as_ref())?;
-    let (sk_self, device_id, device_dir) = load_or_create_global_device_identity(&device_passphrase)?;
+    let (sk_self, device_id, device_dir) =
+        load_or_create_global_device_identity(&device_passphrase)?;
     let device_pk = sk_self.verify_key();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3847,7 +4240,8 @@ fn handle_trust_bootstrap_self(options: BootstrapSelfOptions) -> Result<(), Erro
         let cert = easytier::trust::UnsignedMemberCert {
             trust_domain_id: root.id(),
             network_local_id: state.details.network_local_id.clone(),
-            device_pk: VerifyingKey::from_bytes(&device_pk.0).expect("device public key must be valid"),
+            device_pk: VerifyingKey::from_bytes(&device_pk.0)
+                .expect("device public key must be valid"),
             device_label: label,
             not_before: now,
             expires_at,
@@ -3865,10 +4259,24 @@ fn handle_trust_bootstrap_self(options: BootstrapSelfOptions) -> Result<(), Erro
         (cert, true)
     };
 
-    std::fs::write(network_dir.join("device_id"), format!("{}\n", device_id))
-        .with_context(|| format!("failed to write {}", network_dir.join("device_id").display()))?;
-    std::fs::copy(device_dir.join("sk_self.age"), network_dir.join("sk_self.age"))
-        .with_context(|| format!("failed to write {}", network_dir.join("sk_self.age").display()))?;
+    std::fs::write(network_dir.join("device_id"), format!("{}\n", device_id)).with_context(
+        || {
+            format!(
+                "failed to write {}",
+                network_dir.join("device_id").display()
+            )
+        },
+    )?;
+    std::fs::copy(
+        device_dir.join("sk_self.age"),
+        network_dir.join("sk_self.age"),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            network_dir.join("sk_self.age").display()
+        )
+    })?;
 
     let fingerprint = cert.fingerprint();
     let already_indexed = state
@@ -3881,12 +4289,16 @@ fn handle_trust_bootstrap_self(options: BootstrapSelfOptions) -> Result<(), Erro
     let new_version = if already_indexed {
         old_version
     } else {
-        state.details.payload.member_cert_index.push(MemberCertIndexEntry {
-            fingerprint,
-            device_label: cert.details.device_label.clone(),
-            issued_at: cert.details.not_before,
-            expires_at: cert.details.expires_at,
-        });
+        state
+            .details
+            .payload
+            .member_cert_index
+            .push(MemberCertIndexEntry {
+                fingerprint,
+                device_label: cert.details.device_label.clone(),
+                issued_at: cert.details.not_before,
+                expires_at: cert.details.expires_at,
+            });
         write_signed_network_state(&network_dir, &state, original_pem, &root)?
     };
 
@@ -3934,18 +4346,31 @@ fn handle_trust_create_domain(
     let base_dir = out_dir.map(Ok).unwrap_or_else(default_trust_domains_dir)?;
     let domain_dir = base_dir.join(trust_domain_id.to_string());
     if domain_dir.exists() {
-        anyhow::bail!("trust domain directory already exists: {}", domain_dir.display());
+        anyhow::bail!(
+            "trust domain directory already exists: {}",
+            domain_dir.display()
+        );
     }
 
     std::fs::create_dir_all(&domain_dir)
         .with_context(|| format!("failed to create {}", domain_dir.display()))?;
     root.save_to_file(&domain_dir.join("sk_root.age"), &passphrase)
-        .with_context(|| format!("failed to write {}", domain_dir.join("sk_root.age").display()))?;
+        .with_context(|| {
+            format!(
+                "failed to write {}",
+                domain_dir.join("sk_root.age").display()
+            )
+        })?;
     std::fs::write(
         domain_dir.join("pk_root.pem"),
         wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes()),
     )
-    .with_context(|| format!("failed to write {}", domain_dir.join("pk_root.pem").display()))?;
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            domain_dir.join("pk_root.pem").display()
+        )
+    })?;
     std::fs::write(
         domain_dir.join("meta.toml"),
         format!(
@@ -3969,7 +4394,11 @@ fn handle_trust_create_domain(
             })
         );
     } else {
-        println!("Created trust domain {} at {}", trust_domain_id, domain_dir.display());
+        println!(
+            "Created trust domain {} at {}",
+            trust_domain_id,
+            domain_dir.display()
+        );
     }
     Ok(())
 }
@@ -4673,7 +5102,13 @@ async fn main() -> Result<(), Error> {
                 json,
                 passphrase_file,
             } => {
-                handle_trust_enable(trust_domain_id, network_local_id, fingerprint, json, passphrase_file)?;
+                handle_trust_enable(
+                    trust_domain_id,
+                    network_local_id,
+                    fingerprint,
+                    json,
+                    passphrase_file,
+                )?;
             }
             TrustSubCommand::ListMembers {
                 trust_domain_id,
@@ -4682,6 +5117,14 @@ async fn main() -> Result<(), Error> {
                 json,
             } => {
                 handle_trust_list_members(trust_domain_id, network_local_id, include, json)?;
+            }
+            TrustSubCommand::ShowDevice {
+                trust_domain_id,
+                network_local_id,
+                device_id,
+                json,
+            } => {
+                handle_trust_show_device(trust_domain_id, network_local_id, device_id, json)?;
             }
             TrustSubCommand::SetHostname {
                 trust_domain_id,

@@ -27,7 +27,9 @@ pub enum AclError {
     InvalidPortRange(u16, u16),
     #[error("hostname '{0}' violates LDH charset / length 1..=63 (D14)")]
     InvalidHostname(String),
-    #[error("rule references subnet '{0}' which no cert advertises via capabilities.can_proxy_subnet")]
+    #[error(
+        "rule references subnet '{0}' which no cert advertises via capabilities.can_proxy_subnet"
+    )]
     SubnetOrphan(String),
     #[error("rule references hostname '{0}' which resolves to no live cert in network_state")]
     UnresolvedHostname(String),

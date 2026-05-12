@@ -46,7 +46,8 @@ fn sample_member_cert_for_network(
     network_local_id: &str,
     device_label: &str,
 ) -> MemberCert {
-    let device_pk = VerifyingKey::from_bytes(&sk_self.verify_key().0).expect("verify key bytes valid");
+    let device_pk =
+        VerifyingKey::from_bytes(&sk_self.verify_key().0).expect("verify key bytes valid");
     UnsignedMemberCert {
         trust_domain_id: root.id(),
         network_local_id: NetworkLocalId::try_from_str(network_local_id).unwrap(),
@@ -105,10 +106,12 @@ async fn make_peer_conn_pair(
     secure_mode: bool,
 ) -> (PeerConn, PeerConn) {
     let (c, s) = create_ring_tunnel_pair();
-    let c_ctx =
-        get_mock_global_ctx_with_network(Some(NetworkIdentity::new(client_network_name.to_owned())));
-    let s_ctx =
-        get_mock_global_ctx_with_network(Some(NetworkIdentity::new(server_network_name.to_owned())));
+    let c_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+        client_network_name.to_owned(),
+    )));
+    let s_ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
+        server_network_name.to_owned(),
+    )));
 
     if secure_mode {
         set_secure_mode_cfg(&c_ctx, true);
@@ -139,7 +142,10 @@ async fn handshake_peer_conns(
     PeerConn,
     PeerConn,
 ) {
-    let (c_ret, s_ret) = tokio::join!(client.do_handshake_as_client(), server.do_handshake_as_server());
+    let (c_ret, s_ret) = tokio::join!(
+        client.do_handshake_as_client(),
+        server.do_handshake_as_server()
+    );
     (c_ret, s_ret, client, server)
 }
 
@@ -175,7 +181,10 @@ async fn create_peer_manager_with_trust(
     flags.disable_upnp = true;
     peer_mgr.get_global_ctx().set_flags(flags);
     if let Some(ctx) = trust_ctx {
-        peer_mgr.get_global_ctx().set_trust_context(Arc::new(ctx)).await;
+        peer_mgr
+            .get_global_ctx()
+            .set_trust_context(Arc::new(ctx))
+            .await;
     }
     peer_mgr.run().await.unwrap();
     peer_mgr
@@ -212,7 +221,13 @@ async fn wait_for_local_peer(server: Arc<PeerManager>) {
     wait_for_condition(
         || {
             let server = server.clone();
-            async move { !server.get_peer_map().list_peers_with_conn().await.is_empty() }
+            async move {
+                !server
+                    .get_peer_map()
+                    .list_peers_with_conn()
+                    .await
+                    .is_empty()
+            }
         },
         Duration::from_secs(5),
     )
@@ -281,8 +296,10 @@ async fn test_noise_member_cert_signed_by_wrong_root_rejected() {
     let server_root = TrustDomainRoot::generate();
     let client_sk = SignKey::generate();
     let server_sk = SignKey::generate();
-    let client_cert = sample_member_cert_for_network(&client_root, &client_sk, "office-net", "client-a");
-    let server_cert = sample_member_cert_for_network(&server_root, &server_sk, "office-net", "server-b");
+    let client_cert =
+        sample_member_cert_for_network(&client_root, &client_sk, "office-net", "client-a");
+    let server_cert =
+        sample_member_cert_for_network(&server_root, &server_sk, "office-net", "server-b");
     let pool = trust_pool_with_cert(&server_root, &server_cert);
 
     let (client, server) = make_peer_conn_pair(
@@ -350,7 +367,8 @@ async fn test_noise_expired_member_cert_rejected() {
     let root = TrustDomainRoot::generate();
     let client_sk = SignKey::generate();
     let server_sk = SignKey::generate();
-    let mut client_cert = sample_member_cert_for_network(&root, &client_sk, "office-net", "client-a");
+    let mut client_cert =
+        sample_member_cert_for_network(&root, &client_sk, "office-net", "client-a");
     client_cert.details.expires_at = 1;
     let server_cert = sample_member_cert_for_network(&root, &server_sk, "office-net", "server-b");
     let pool = trust_pool_with_expired_cert(&root, &client_cert);
@@ -445,7 +463,10 @@ async fn test_plain_path_replay_old_nonce_rejected() {
     );
     let mut server = PeerConn::new(new_peer_id(), s_ctx, Box::new(s), ps, Some(pool));
 
-    let (c_ret, s_ret) = tokio::join!(client.do_handshake_as_client(), server.do_handshake_as_server());
+    let (c_ret, s_ret) = tokio::join!(
+        client.do_handshake_as_client(),
+        server.do_handshake_as_server()
+    );
     assert!(c_ret.is_ok());
     assert!(s_ret.is_ok());
 
@@ -472,8 +493,10 @@ async fn test_plain_path_cross_trust_domain_rejected_by_caller() {
     let server_root = TrustDomainRoot::generate();
     let client_sk = SignKey::generate();
     let server_sk = SignKey::generate();
-    let client_cert = sample_member_cert_for_network(&client_root, &client_sk, "tenant-a", "client-a");
-    let server_cert = sample_member_cert_for_network(&server_root, &server_sk, "public", "server-b");
+    let client_cert =
+        sample_member_cert_for_network(&client_root, &client_sk, "tenant-a", "client-a");
+    let server_cert =
+        sample_member_cert_for_network(&server_root, &server_sk, "public", "server-b");
     let pool = pool_with_entries(&[(&client_root, &client_cert), (&server_root, &server_cert)]);
 
     let client = create_peer_manager_with_trust(
@@ -578,7 +601,13 @@ async fn test_same_root_different_network_routes_to_foreign() {
     server_ret.unwrap();
 
     wait_for_foreign_network(server.clone(), "tenant-a").await;
-    assert!(server.get_peer_map().list_peers_with_conn().await.is_empty());
+    assert!(
+        server
+            .get_peer_map()
+            .list_peers_with_conn()
+            .await
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -587,8 +616,10 @@ async fn test_different_root_rejected_in_private_mode() {
     let server_root = TrustDomainRoot::generate();
     let client_sk = SignKey::generate();
     let server_sk = SignKey::generate();
-    let client_cert = sample_member_cert_for_network(&client_root, &client_sk, "tenant-a", "client-a");
-    let server_cert = sample_member_cert_for_network(&server_root, &server_sk, "public", "server-b");
+    let client_cert =
+        sample_member_cert_for_network(&client_root, &client_sk, "tenant-a", "client-a");
+    let server_cert =
+        sample_member_cert_for_network(&server_root, &server_sk, "public", "server-b");
     let pool = pool_with_entries(&[(&client_root, &client_cert), (&server_root, &server_cert)]);
 
     let client = create_peer_manager_with_trust(
@@ -615,8 +646,10 @@ async fn test_different_root_routes_to_foreign_in_open_mode() {
     let server_root = TrustDomainRoot::generate();
     let client_sk = SignKey::generate();
     let server_sk = SignKey::generate();
-    let client_cert = sample_member_cert_for_network(&client_root, &client_sk, "tenant-a", "client-a");
-    let server_cert = sample_member_cert_for_network(&server_root, &server_sk, "public", "server-b");
+    let client_cert =
+        sample_member_cert_for_network(&client_root, &client_sk, "tenant-a", "client-a");
+    let server_cert =
+        sample_member_cert_for_network(&server_root, &server_sk, "public", "server-b");
     let pool = pool_with_entries(&[(&client_root, &client_cert), (&server_root, &server_cert)]);
 
     let client = create_peer_manager_with_trust(
@@ -637,5 +670,11 @@ async fn test_different_root_routes_to_foreign_in_open_mode() {
     server_ret.unwrap();
 
     wait_for_foreign_network(server.clone(), "tenant-a").await;
-    assert!(server.get_peer_map().list_peers_with_conn().await.is_empty());
+    assert!(
+        server
+            .get_peer_map()
+            .list_peers_with_conn()
+            .await
+            .is_empty()
+    );
 }

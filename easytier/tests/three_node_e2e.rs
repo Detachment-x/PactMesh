@@ -29,8 +29,16 @@ async fn test_three_node_join_approval_writes_member_certs() {
     write_member_cert(node_a_dir.path(), &trust_domain_id, &cert_a);
     write_member_cert(node_b_dir.path(), &trust_domain_id, &cert_b);
 
-    assert!(test_harness::network_dir(node_a_dir.path(), &trust_domain_id).join("member_cert.pem").is_file());
-    assert!(test_harness::network_dir(node_b_dir.path(), &trust_domain_id).join("member_cert.pem").is_file());
+    assert!(
+        test_harness::network_dir(node_a_dir.path(), &trust_domain_id)
+            .join("member_cert.pem")
+            .is_file()
+    );
+    assert!(
+        test_harness::network_dir(node_b_dir.path(), &trust_domain_id)
+            .join("member_cert.pem")
+            .is_file()
+    );
     assert_member_matches_join(&cert_a, &join_a, "node-a");
     assert_member_matches_join(&cert_b, &join_b, "node-b");
 }

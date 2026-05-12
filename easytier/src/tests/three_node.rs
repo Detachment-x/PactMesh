@@ -935,8 +935,7 @@ pub async fn foreign_network_forward_nic_data() {
     prepare_linux_namespaces();
 
     let center_node_config = get_inst_config("inst1", Some("net_a"), "10.144.144.1", "fd00::1/64");
-    center_node_config
-        .set_network_identity(NetworkIdentity::new("center".to_string()));
+    center_node_config.set_network_identity(NetworkIdentity::new("center".to_string()));
     let mut center_inst = Instance::new(center_node_config);
 
     let mut inst1 = Instance::new(get_inst_config(
@@ -1196,13 +1195,11 @@ pub async fn foreign_network_functional_cluster() {
     prepare_linux_namespaces();
 
     let center_node_config1 = get_inst_config("inst1", Some("net_a"), "10.144.144.1", "fd00::1/64");
-    center_node_config1
-        .set_network_identity(NetworkIdentity::new("center".to_string()));
+    center_node_config1.set_network_identity(NetworkIdentity::new("center".to_string()));
     let mut center_inst1 = Instance::new(center_node_config1);
 
     let center_node_config2 = get_inst_config("inst2", Some("net_b"), "10.144.144.2", "fd00::2/64");
-    center_node_config2
-        .set_network_identity(NetworkIdentity::new("center".to_string()));
+    center_node_config2.set_network_identity(NetworkIdentity::new("center".to_string()));
     let mut center_inst2 = Instance::new(center_node_config2);
 
     let inst1_config = get_inst_config("inst1", Some("net_c"), "10.144.145.1", "fd00:2::1/64");
@@ -1273,8 +1270,7 @@ pub async fn manual_reconnector(#[values(true, false)] is_foreign: bool) {
 
     let center_node_config = get_inst_config("inst1", Some("net_a"), "10.144.144.1", "fd00::1/64");
     if is_foreign {
-        center_node_config
-            .set_network_identity(NetworkIdentity::new("center".to_string()));
+        center_node_config.set_network_identity(NetworkIdentity::new("center".to_string()));
     }
     let mut center_inst = Instance::new(center_node_config);
 
