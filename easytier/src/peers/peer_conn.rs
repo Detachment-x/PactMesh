@@ -1,11 +1,13 @@
 use std::{
     any::Any,
+    collections::HashSet,
     fmt::Debug,
     pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crossbeam::atomic::AtomicCell;
@@ -13,11 +15,11 @@ use futures::{StreamExt, TryFutureExt};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use hmac::Mac;
 use prost::Message;
+use rand::{RngCore, rngs::OsRng};
 
 use tokio::{
-    sync::{Mutex, broadcast},
+    sync::{Mutex, RwLock, broadcast},
     task::JoinSet,
     time::{Duration, timeout},
 };
@@ -30,7 +32,7 @@ use snow::{HandshakeState, params::NoiseParams};
 use crate::{
     common::{
         PeerId,
-        config::{NetworkIdentity, NetworkSecretDigest},
+        config::NetworkIdentity,
         defer,
         error::Error,
         global_ctx::ArcGlobalCtx,
@@ -44,6 +46,9 @@ use crate::{
             PeerConnSessionActionPb, PeerIdentityType, SecureAuthLevel,
         },
     },
+    trust::{
+        BorrowedRelayProof, MemberCert, TrustDomainPool, VerifyKey, from_cbor, to_canonical_cbor,
+    },
     tunnel::{
         Tunnel, TunnelError, ZCPacketStream,
         filter::{StatsRecorderTunnelFilter, TunnelFilter, TunnelFilterChain, TunnelWithFilter},
@@ -51,8 +56,8 @@ use crate::{
         packet_def::{PacketType, ZCPacket},
         stats::{Throughput, WindowLatency},
     },
-    use_global_var,
 };
+use crate::trust::identity::{SignatureBytes, verify_signature};
 
 use super::{
     PacketRecvChan,
@@ -65,12 +70,21 @@ pub type PeerConnId = uuid::Uuid;
 
 const MAGIC: u32 = 0xd1e1a5e1;
 const VERSION: u32 = 1;
+const HANDSHAKE_NONCE_LEN: usize = 16;
 
-/// The proof of client secret.
-#[derive(Debug)]
-struct SecretProof {
-    challenge: Vec<u8>,
-    proof: Vec<u8>,
+#[derive(minicbor::Encode)]
+struct HandshakeSignaturePayload {
+    #[n(0)]
+    magic: u32,
+    #[n(1)]
+    my_peer_id: u32,
+    #[n(2)]
+    version: u32,
+    #[n(3)]
+    features: Vec<String>,
+    #[n(4)]
+    #[cbor(with = "minicbor::bytes")]
+    applicant_nonce: Vec<u8>,
 }
 
 /// The result of noise handshake.
@@ -84,13 +98,7 @@ struct NoiseHandshakeResult {
     secure_auth_level: SecureAuthLevel,
     peer_identity_type: PeerIdentityType,
     remote_network_name: String,
-
-    secret_digest: Vec<u8>,
-
-    // foreign network manager use this to verify peer.
-    // the challenge will be sent to authorized peer and compare the proof against it.
-    client_secret_proof: Option<SecretProof>,
-
+    member_cert: Option<MemberCert>,
     my_encrypt_algo: String,
     remote_encrypt_algo: String,
 }
@@ -293,6 +301,8 @@ pub struct PeerConn {
     secure_mode_cfg: Option<SecureModeConfig>,
     session_filter: PeerSessionTunnelFilter,
     noise_handshake_result: Option<NoiseHandshakeResult>,
+    borrowed_proof: Option<BorrowedRelayProof>,
+    client_borrowed_proof: Option<BorrowedRelayProof>,
 
     tunnel: Arc<Mutex<Box<dyn Any + Send + 'static>>>,
     sink: MpscTunnelSender,
@@ -303,6 +313,7 @@ pub struct PeerConn {
 
     info: Option<HandshakeRequest>,
     is_client: Option<bool>,
+    seen_handshake_nonces: Mutex<HashSet<Vec<u8>>>,
 
     // remote or local
     is_hole_punched: bool,
@@ -316,6 +327,7 @@ pub struct PeerConn {
     loss_rate_stats: Arc<AtomicU32>,
 
     peer_session_store: Arc<PeerSessionStore>,
+    trust_pool: Option<Arc<RwLock<TrustDomainPool>>>,
     my_encrypt_algo: String,
 }
 
@@ -325,6 +337,7 @@ impl Debug for PeerConn {
             .field("conn_id", &self.conn_id)
             .field("my_peer_id", &self.my_peer_id)
             .field("info", &self.info)
+            .field("has_trust_pool", &self.trust_pool.is_some())
             .finish()
     }
 }
@@ -335,8 +348,16 @@ impl PeerConn {
         global_ctx: ArcGlobalCtx,
         tunnel: Box<dyn Tunnel>,
         peer_session_store: Arc<PeerSessionStore>,
+        trust_pool: Option<Arc<RwLock<TrustDomainPool>>>,
     ) -> Self {
-        Self::new_with_peer_id_hint(my_peer_id, global_ctx, tunnel, None, peer_session_store)
+        Self::new_with_peer_id_hint(
+            my_peer_id,
+            global_ctx,
+            tunnel,
+            None,
+            peer_session_store,
+            trust_pool,
+        )
     }
 
     pub fn new_with_peer_id_hint(
@@ -345,6 +366,7 @@ impl PeerConn {
         tunnel: Box<dyn Tunnel>,
         peer_id_hint: Option<PeerId>,
         peer_session_store: Arc<PeerSessionStore>,
+        trust_pool: Option<Arc<RwLock<TrustDomainPool>>>,
     ) -> Self {
         let flags = global_ctx.get_flags();
         let tunnel_info = tunnel.info();
@@ -380,6 +402,8 @@ impl PeerConn {
             secure_mode_cfg,
             session_filter,
             noise_handshake_result: None,
+            borrowed_proof: None,
+            client_borrowed_proof: None,
 
             tunnel: Arc::new(Mutex::new(Box::new(defer::Defer::new(move || {
                 mpsc_tunnel.close()
@@ -392,6 +416,7 @@ impl PeerConn {
 
             info: None,
             is_client: None,
+            seen_handshake_nonces: Mutex::new(HashSet::new()),
 
             is_hole_punched: true,
 
@@ -404,12 +429,98 @@ impl PeerConn {
             loss_rate_stats: Arc::new(AtomicU32::new(0)),
 
             peer_session_store,
+            trust_pool,
             my_encrypt_algo,
         }
     }
 
     fn get_peer_session_store(&self) -> &Arc<PeerSessionStore> {
         &self.peer_session_store
+    }
+
+    fn current_unix_secs() -> Result<u64, Error> {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .map_err(|err| Error::WaitRespError(format!("system clock before unix epoch: {err}")))
+    }
+
+    fn encode_handshake_signature_payload(req: &HandshakeRequest) -> Vec<u8> {
+        to_canonical_cbor(&HandshakeSignaturePayload {
+            magic: req.magic,
+            my_peer_id: req.my_peer_id,
+            version: req.version,
+            features: req.features.clone(),
+            applicant_nonce: req.applicant_nonce.clone(),
+        })
+    }
+
+    fn decode_member_cert(bytes: &[u8]) -> Result<MemberCert, Error> {
+        from_cbor(bytes).map_err(|err| Error::WaitRespError(format!("invalid member cert cbor: {err}")))
+    }
+
+    fn decode_borrowed_relay_proof(bytes: &[u8]) -> Result<BorrowedRelayProof, Error> {
+        from_cbor(bytes)
+            .map_err(|err| Error::WaitRespError(format!("invalid borrowed relay proof cbor: {err}")))
+    }
+
+    fn verify_handshake_signature(req: &HandshakeRequest, cert: &MemberCert) -> Result<(), Error> {
+        if req.applicant_nonce.len() != HANDSHAKE_NONCE_LEN {
+            return Err(Error::WaitRespError("invalid applicant nonce".to_owned()));
+        }
+
+        let sig: [u8; 64] = req
+            .applicant_signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::WaitRespError("invalid applicant signature".to_owned()))?;
+
+        verify_signature(
+            &VerifyKey::from(&cert.details.device_pk),
+            &Self::encode_handshake_signature_payload(req),
+            &SignatureBytes(sig),
+        )
+        .map_err(|_| Error::WaitRespError("invalid applicant signature".to_owned()))
+    }
+
+    async fn decode_and_verify_plain_handshake(&self, req: HandshakeRequest) -> Result<HandshakeRequest, Error> {
+        let cert = Self::decode_member_cert(&req.member_cert_cbor)?;
+        Self::verify_handshake_signature(&req, &cert)?;
+
+        let mut seen = self.seen_handshake_nonces.lock().await;
+        if !seen.insert(req.applicant_nonce.clone()) {
+            return Err(Error::WaitRespError("replayed applicant nonce".to_owned()));
+        }
+
+        Ok(req)
+    }
+
+    async fn build_trust_handshake_request(&self) -> Result<HandshakeRequest, Error> {
+        let trust_ctx = self
+            .global_ctx
+            .get_trust_context()
+            .await
+            .ok_or_else(|| Error::WaitRespError("trust context not configured".to_owned()))?;
+
+        let mut nonce = vec![0u8; HANDSHAKE_NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce);
+
+        let mut req = HandshakeRequest {
+            magic: MAGIC,
+            my_peer_id: self.my_peer_id,
+            version: VERSION,
+            features: Vec::new(),
+            network_name: self.global_ctx.get_network_identity().network_name,
+            member_cert_cbor: to_canonical_cbor(&trust_ctx.member_cert),
+            applicant_nonce: nonce,
+            applicant_signature: Vec::new(),
+        };
+        req.applicant_signature = trust_ctx
+            .sk_self
+            .sign(&Self::encode_handshake_signature_payload(&req))
+            .0
+            .to_vec();
+        Ok(req)
     }
 
     pub fn is_secure_mode_enabled(&self) -> bool {
@@ -487,12 +598,7 @@ impl PeerConn {
         let rsp = HandshakeRequest::decode(rsp.payload()).map_err(|e| {
             Error::WaitRespError(format!("decode handshake response error: {:?}", e))
         })?;
-
-        if rsp.network_secret_digest.len() != std::mem::size_of::<NetworkSecretDigest>() {
-            return Err(Error::WaitRespError(
-                "invalid network secret digest".to_owned(),
-            ));
-        }
+        let rsp = self.decode_and_verify_plain_handshake(rsp).await?;
 
         self.record_control_rx(&rsp.network_name, rsp_len);
 
@@ -518,31 +624,8 @@ impl PeerConn {
         .await?
     }
 
-    async fn send_handshake(
-        &self,
-        send_secret_digest: bool,
-        metric_network_name: &str,
-    ) -> Result<(), Error> {
-        let network = self.global_ctx.get_network_identity();
-        let mut req = HandshakeRequest {
-            magic: MAGIC,
-            my_peer_id: self.my_peer_id,
-            version: VERSION,
-            features: Vec::new(),
-            network_name: network.network_name.clone(),
-            ..Default::default()
-        };
-
-        // only send network secret digest if the network is the same
-        if send_secret_digest {
-            req.network_secret_digest
-                .extend_from_slice(&network.network_secret_digest.unwrap_or_default());
-        } else {
-            // fill zero
-            req.network_secret_digest
-                .extend_from_slice(&[0u8; std::mem::size_of::<NetworkSecretDigest>()]);
-        }
-
+    async fn send_handshake(&self, metric_network_name: &str) -> Result<(), Error> {
+        let req = self.build_trust_handshake_request().await?;
         let hs_req = req.encode_to_vec();
         let mut zc_packet = ZCPacket::new_with_payload(hs_req.as_bytes());
         zc_packet.fill_peer_manager_hdr(
@@ -558,7 +641,6 @@ impl PeerConn {
         })?;
         self.record_control_tx(metric_network_name, pkt_len);
 
-        // yield to send the response packet
         tokio::task::yield_now().await;
 
         Ok(())
@@ -582,15 +664,20 @@ impl PeerConn {
             Error::WaitRespError(format!("decode handshake response error: {:?}", e))
         })?;
 
-        if rsp.network_secret_digest.len() != std::mem::size_of::<NetworkSecretDigest>() {
-            return Err(Error::WaitRespError(
-                "invalid network secret digest".to_owned(),
-            ));
+        if rsp.applicant_nonce.len() != HANDSHAKE_NONCE_LEN {
+            return Err(Error::WaitRespError("invalid applicant nonce".to_owned()));
+        }
+
+        if rsp.applicant_signature.len() != 64 {
+            return Err(Error::WaitRespError("invalid applicant signature".to_owned()));
+        }
+
+        if rsp.member_cert_cbor.is_empty() {
+            return Err(Error::WaitRespError("missing member cert cbor".to_owned()));
         }
 
         Ok(rsp)
     }
-
     async fn recv_next_peer_manager_packet(
         &self,
         expected_pkt_type: Option<PacketType>,
@@ -685,56 +772,29 @@ impl PeerConn {
 
     /// Unified remote peer authentication verification.
     ///
-    /// Auth outcome matrix (current behavior):
-    ///
-    /// | Client role | Server role | Typical credential condition | Client auth level | Server auth level | Client sees server type | Server sees client type |
-    /// | --- | --- | --- | --- | --- | --- | --- |
-    /// | Admin | Admin | same network_secret, proof verified | NetworkSecretConfirmed | NetworkSecretConfirmed | Admin | Admin |
-    /// | Credential | Admin | client pubkey is trusted by admin | EncryptedUnauthenticated | PeerVerified | Admin | Credential |
-    /// | Credential | Admin | client pubkey is unknown | handshake may fail | handshake reject | unknown | unknown |
-    /// | Admin | SharedNode | pinned key match | PeerVerified | EncryptedUnauthenticated | SharedNode | Admin |
-    /// | Admin | SharedNode | local has no pinned key requirement | EncryptedUnauthenticated | EncryptedUnauthenticated | SharedNode | Admin |
-    /// | Credential | SharedNode | no pin and not trusted | EncryptedUnauthenticated | EncryptedUnauthenticated | SharedNode | Credential |
-    /// | Credential | Credential | should reject | handshake reject | handshake reject | unknown | unknown |
-    ///
-    /// Logic (in priority order):
-    /// 1. **NetworkSecretConfirmed**: proof verification succeeds
-    /// 2. **PeerVerified**: pinned_pubkey matches and is in trusted list
-    ///    (if no network_secret, pinned_pubkey must be in trusted list)
-    /// 3. **PeerVerified**: pubkey is in trusted list
-    /// 4. **EncryptedUnauthenticated**: initiator without network_secret
-    /// 5. **Reject**: none of the above
+    /// Trust-domain member certificates take precedence. Pinned/noise pubkey
+    /// checks remain as fallback for shared-node style connections.
     #[allow(clippy::too_many_arguments)]
     fn verify_remote_auth(
         &self,
-        proof: Option<&[u8]>,
-        handshake_hash: &[u8],
+        verified_member_cert: Option<&MemberCert>,
         remote_pubkey: &[u8],
         pinned_pubkey: Option<&[u8]>,
-        has_network_secret: bool,
-        is_initiator: bool,
         remote_network_name: &str,
     ) -> Result<SecureAuthLevel, Error> {
-        // 1. Verify proof
-        if let Some(proof) = proof
-            && let Some(mac) = self.global_ctx.get_secret_proof(handshake_hash)
-            && mac.verify_slice(proof).is_ok()
-        {
-            return Ok(SecureAuthLevel::NetworkSecretConfirmed);
+        if verified_member_cert.is_some() {
+            return Ok(SecureAuthLevel::TrustDomainVerified);
         }
 
-        // 2. Check pinned pubkey
         if let Some(pinned) = pinned_pubkey {
             if pinned != remote_pubkey {
                 return Err(Error::WaitRespError(
                     "pinned remote static pubkey mismatch".to_owned(),
                 ));
             }
-            // If no network_secret, pinned key must be in trusted list
-            if !has_network_secret
-                && !self
-                    .global_ctx
-                    .is_pubkey_trusted(remote_pubkey, remote_network_name)
+            if !self
+                .global_ctx
+                .is_pubkey_trusted(remote_pubkey, remote_network_name)
             {
                 return Err(Error::WaitRespError(
                     "pinned pubkey not in trusted list".to_owned(),
@@ -743,7 +803,6 @@ impl PeerConn {
             return Ok(SecureAuthLevel::PeerVerified);
         }
 
-        // 3. Check if pubkey is in trusted list
         if self
             .global_ctx
             .is_pubkey_trusted(remote_pubkey, remote_network_name)
@@ -751,15 +810,7 @@ impl PeerConn {
             return Ok(SecureAuthLevel::PeerVerified);
         }
 
-        // 4. If we are the initiator without network_secret, keep encrypted channel only.
-        if is_initiator && !has_network_secret {
-            return Ok(SecureAuthLevel::EncryptedUnauthenticated);
-        }
-
-        // 5. Reject
-        Err(Error::WaitRespError(
-            "authentication failed: invalid proof and unknown credential".to_owned(),
-        ))
+        Ok(SecureAuthLevel::EncryptedUnauthenticated)
     }
 
     fn classify_remote_identity(
@@ -767,7 +818,6 @@ impl PeerConn {
         remote_network_name: &str,
         secure_auth_level: SecureAuthLevel,
         remote_role_hint_is_same_network: bool,
-        remote_sent_secret_proof: bool,
         is_client: bool,
     ) -> PeerIdentityType {
         if !remote_role_hint_is_same_network
@@ -775,15 +825,14 @@ impl PeerConn {
         {
             if is_client {
                 PeerIdentityType::SharedNode
-            } else if remote_sent_secret_proof {
-                PeerIdentityType::Admin
             } else {
                 PeerIdentityType::Credential
             }
         } else {
-            if matches!(secure_auth_level, SecureAuthLevel::NetworkSecretConfirmed)
-                || remote_sent_secret_proof
-            {
+            if matches!(
+                secure_auth_level,
+                SecureAuthLevel::TrustDomainVerified | SecureAuthLevel::PeerVerified
+            ) {
                 return PeerIdentityType::Admin;
             }
 
@@ -838,8 +887,6 @@ impl PeerConn {
         )
         .await?;
 
-        let server_handshake_hash = hs.get_handshake_hash().to_vec();
-
         let msg2 = timeout(
             Duration::from_secs(5),
             self.recv_next_peer_manager_packet(Some(PacketType::NoiseHandshakeMsg2)),
@@ -865,7 +912,6 @@ impl PeerConn {
         let action = PeerConnSessionActionPb::try_from(msg2_pb.action)
             .map_err(|_| Error::WaitRespError("invalid session action".to_owned()))?;
         let remote_network_name = msg2_pb.b_network_name.clone();
-        let remote_sent_secret_proof = msg2_pb.secret_proof_32.is_some();
 
         if remote_network_name == network.network_name && msg2_pb.role_hint != 1 {
             return Err(Error::WaitRespError(
@@ -873,26 +919,17 @@ impl PeerConn {
             ));
         }
 
-        let handshake_hash_for_proof = hs.get_handshake_hash().to_vec();
-        let secret_proof_32 = self
+        let trust_ctx = self
             .global_ctx
-            .get_secret_proof(&handshake_hash_for_proof)
-            .map(|mac| mac.finalize().into_bytes().to_vec());
-
-        let secret_digest = if use_global_var!(HMAC_SECRET_DIGEST) {
-            self.global_ctx
-                .get_secret_proof("digest".as_bytes())
-                .map(|mac| mac.finalize().into_bytes().to_vec())
-                .unwrap_or_default()
-        } else {
-            network.network_secret_digest.unwrap_or_default().to_vec()
-        };
+            .get_trust_context()
+            .await
+            .ok_or_else(|| Error::WaitRespError("trust context not configured".to_owned()))?;
 
         let msg3_pb = PeerConnNoiseMsg3Pb {
             a_conn_id_echo: Some(a_conn_id.into()),
             b_conn_id_echo: msg2_pb.b_conn_id,
-            secret_proof_32,
-            secret_digest: secret_digest.clone(),
+            member_cert_cbor: to_canonical_cbor(&trust_ctx.member_cert),
+            borrowed_relay_proof: self.client_borrowed_proof.as_ref().map(to_canonical_cbor),
         };
         self.send_noise_msg(
             msg3_pb,
@@ -915,17 +952,30 @@ impl PeerConn {
             None
         };
 
-        // Verify server authentication using unified logic
+        let verified_member_cert = if msg2_pb.role_hint == 1 {
+            let member_cert = Self::decode_member_cert(&msg2_pb.member_cert_cbor)?;
+            let now = Self::current_unix_secs()?;
+            Some(
+                self.trust_pool
+                    .as_ref()
+                    .ok_or_else(|| Error::WaitRespError("member_cert verify failed".to_owned()))?
+                    .read()
+                    .await
+                    .verify_member_cert(&member_cert, now)
+                    .map_err(|_| Error::WaitRespError("member_cert verify failed".to_owned()))?
+                    .cert,
+            )
+        } else {
+            None
+        };
+
         let secure_auth_level = if msg2_pb.role_hint != 1 && pinned_remote_pubkey.is_none() {
             SecureAuthLevel::EncryptedUnauthenticated
         } else {
             self.verify_remote_auth(
-                msg2_pb.secret_proof_32.as_deref(),
-                &server_handshake_hash,
+                verified_member_cert.as_ref(),
                 &remote_static,
                 pinned_remote_pubkey.as_deref(),
-                network.network_secret.is_some(),
-                true, // is_initiator
                 &remote_network_name,
             )?
         };
@@ -933,7 +983,6 @@ impl PeerConn {
             &remote_network_name,
             secure_auth_level,
             msg2_pb.role_hint == 1,
-            remote_sent_secret_proof,
             true,
         );
 
@@ -974,10 +1023,7 @@ impl PeerConn {
             secure_auth_level,
             peer_identity_type,
             remote_network_name,
-            // we have authorized the peer with noise handshake, so just set secret digest same as us even remote is a shared node.
-            secret_digest,
-            client_secret_proof: None,
-
+            member_cert: verified_member_cert,
             my_encrypt_algo: self.my_encrypt_algo.clone(),
             remote_encrypt_algo: msg2_pb.server_encryption_algorithm.clone(),
         })
@@ -1080,15 +1126,10 @@ impl PeerConn {
         handshake_recved(self, &remote_network_name)?;
 
         let server_network_name = self.global_ctx.get_network_name();
-        let (role_hint, secret_proof_32) = if msg1_pb.a_network_name == server_network_name {
-            (
-                1,
-                self.global_ctx
-                    .get_secret_proof(hs.get_handshake_hash())
-                    .map(|m| m.finalize().into_bytes().to_vec()),
-            )
+        let role_hint = if msg1_pb.a_network_name == server_network_name {
+            1
         } else {
-            (2, None)
+            2
         };
 
         let algo = self.global_ctx.get_flags().encryption_algorithm.clone();
@@ -1106,6 +1147,12 @@ impl PeerConn {
             None,
         )?;
 
+        let trust_ctx = self
+            .global_ctx
+            .get_trust_context()
+            .await
+            .ok_or_else(|| Error::WaitRespError("trust context not configured".to_owned()))?;
+
         let b_conn_id = uuid::Uuid::new_v4();
         let msg2_pb = PeerConnNoiseMsg2Pb {
             b_network_name: server_network_name,
@@ -1120,8 +1167,8 @@ impl PeerConn {
             initial_epoch,
             b_conn_id: Some(b_conn_id.into()),
             a_conn_id_echo: msg1_pb.a_conn_id,
-            secret_proof_32,
             server_encryption_algorithm: algo,
+            member_cert_cbor: to_canonical_cbor(&trust_ctx.member_cert),
         };
         self.send_noise_msg(
             msg2_pb,
@@ -1131,8 +1178,6 @@ impl PeerConn {
             &mut hs,
         )
         .await?;
-
-        let handshake_hash_for_proof = hs.get_handshake_hash().to_vec();
 
         let msg3_pkt = timeout(
             Duration::from_secs(5),
@@ -1170,19 +1215,44 @@ impl PeerConn {
         };
         session.check_or_set_peer_static_pubkey(remote_static_key)?;
 
-        // Verify client authentication using unified logic
-        // Note: Server doesn't use pinned_pubkey since it's the responder
+        let member_cert = Self::decode_member_cert(&msg3_pb.member_cert_cbor)?;
+        let now = Self::current_unix_secs()?;
+        let my_trust_domain_id = trust_ctx.trust_domain_id;
+        let borrowed_proof = if member_cert.details.trust_domain_id != my_trust_domain_id {
+            let proof_bytes = msg3_pb
+                .borrowed_relay_proof
+                .as_deref()
+                .ok_or(Error::TrustDomainMismatch)?;
+            let proof = Self::decode_borrowed_relay_proof(proof_bytes)?;
+            if proof.timestamp.abs_diff(now) > 300 {
+                return Err(Error::TrustDomainMismatch);
+            }
+            if proof.member_cert.fingerprint() != member_cert.fingerprint() {
+                return Err(Error::TrustDomainMismatch);
+            }
+            if proof.trust_domain_id != member_cert.details.trust_domain_id {
+                return Err(Error::TrustDomainMismatch);
+            }
+            Some(proof)
+        } else {
+            None
+        };
+        let verified_member_cert = self
+            .trust_pool
+            .as_ref()
+            .ok_or_else(|| Error::WaitRespError("member_cert verify failed".to_owned()))?
+            .read()
+            .await
+            .verify_member_cert(&member_cert, now)
+            .map_err(|_| Error::WaitRespError("member_cert verify failed".to_owned()))?
+            .cert;
+        self.borrowed_proof = borrowed_proof;
+
         let secure_auth_level = if role_hint == 1 {
             self.verify_remote_auth(
-                msg3_pb.secret_proof_32.as_deref(),
-                &handshake_hash_for_proof,
+                Some(&verified_member_cert),
                 &remote_static,
-                None, // Server doesn't have pinned_remote_pubkey
-                self.global_ctx
-                    .get_network_identity()
-                    .network_secret
-                    .is_some(),
-                false, // is_initiator
+                None,
                 &remote_network_name,
             )?
         } else {
@@ -1192,7 +1262,6 @@ impl PeerConn {
             &remote_network_name,
             secure_auth_level,
             role_hint == 1,
-            msg3_pb.secret_proof_32.is_some(),
             false,
         );
 
@@ -1207,12 +1276,7 @@ impl PeerConn {
             secure_auth_level,
             peer_identity_type,
             remote_network_name,
-            secret_digest: msg3_pb.secret_digest,
-            client_secret_proof: msg3_pb.secret_proof_32.as_ref().map(|p| SecretProof {
-                challenge: handshake_hash_for_proof,
-                proof: p.clone(),
-            }),
-
+            member_cert: Some(verified_member_cert),
             my_encrypt_algo: self.my_encrypt_algo.clone(),
             remote_encrypt_algo: msg1_pb.client_encryption_algorithm.clone(),
         })
@@ -1225,9 +1289,14 @@ impl PeerConn {
             my_peer_id: noise.peer_id,
             version: VERSION,
             network_name: noise.remote_network_name.clone(),
-
             features: Vec::new(),
-            network_secret_digest: noise.secret_digest.clone(),
+            member_cert_cbor: noise
+                .member_cert
+                .as_ref()
+                .map(to_canonical_cbor)
+                .unwrap_or_default(),
+            applicant_nonce: Vec::new(),
+            applicant_signature: Vec::new(),
         }
     }
 
@@ -1265,14 +1334,23 @@ impl PeerConn {
             self.is_client = Some(false);
         } else if hdr.packet_type == PacketType::HandShake as u8 {
             let rsp = Self::decode_handshake_packet(&first_pkt)?;
+            let rsp = self.decode_and_verify_plain_handshake(rsp).await?;
+            let member_cert = Self::decode_member_cert(&rsp.member_cert_cbor)?;
+            let now = Self::current_unix_secs()?;
+            self.trust_pool
+                .as_ref()
+                .ok_or_else(|| Error::WaitRespError("member_cert verify failed".to_owned()))?
+                .read()
+                .await
+                .verify_member_cert(&member_cert, now)
+                .map_err(|_| Error::WaitRespError("member_cert verify failed".to_owned()))?;
             handshake_recved(self, &rsp.network_name)?;
             tracing::info!("handshake request: {:?}", rsp);
             self.record_control_rx(&rsp.network_name, first_pkt.buf_len() as u64);
             self.info = Some(rsp);
             self.is_client = Some(false);
 
-            let send_digest = self.get_network_identity() == self.global_ctx.get_network_identity();
-            self.send_handshake(send_digest, &self.get_network_identity().network_name)
+            self.send_handshake(&self.get_network_identity().network_name)
                 .await?;
         } else {
             return Err(Error::WaitRespError(format!(
@@ -1306,7 +1384,7 @@ impl PeerConn {
             self.is_client = Some(true);
         } else {
             let network = self.global_ctx.get_network_identity();
-            self.send_handshake(true, &network.network_name).await?;
+            self.send_handshake(&network.network_name).await?;
             tracing::info!("waiting for handshake request from server");
             let rsp = self.wait_handshake_loop().await?;
             tracing::info!("handshake response: {:?}", rsp);
@@ -1470,50 +1548,67 @@ impl PeerConn {
 
     pub fn get_network_identity(&self) -> NetworkIdentity {
         let info = self.info.as_ref().unwrap();
-        let mut ret = NetworkIdentity {
+        NetworkIdentity {
             network_name: info.network_name.clone(),
-            network_secret: None,
-            network_secret_digest: Some([0u8; 32]),
-        };
-        ret.network_secret_digest
-            .as_mut()
-            .unwrap()
-            .copy_from_slice(&info.network_secret_digest);
-        ret
+        }
     }
 
-    fn network_secret_digest_is_empty(network: &NetworkIdentity) -> bool {
-        network
-            .network_secret_digest
-            .as_ref()
-            .is_none_or(|digest| digest.iter().all(|byte| *byte == 0))
-    }
-
-    fn matches_local_secret_proof(&self) -> bool {
-        let Some(secret_proof) = self
-            .noise_handshake_result
-            .as_ref()
-            .and_then(|noise| noise.client_secret_proof.as_ref())
-        else {
+    pub(crate) async fn matches_local_trust_domain(&self) -> bool {
+        let Some(my_ctx) = self.global_ctx.get_trust_context().await else {
             return false;
         };
 
-        self.global_ctx
-            .get_secret_proof(&secret_proof.challenge)
-            .is_some_and(|mac| mac.verify_slice(&secret_proof.proof).is_ok())
-    }
-
-    pub(crate) fn matches_local_network_secret(&self) -> bool {
-        if self.matches_local_secret_proof() {
-            return true;
+        if let Some(peer_cert) = self
+            .noise_handshake_result
+            .as_ref()
+            .and_then(|noise| noise.member_cert.as_ref())
+        {
+            return my_ctx.trust_domain_id == peer_cert.details.trust_domain_id
+                && my_ctx.network_local_id == peer_cert.details.network_local_id;
         }
 
-        let my_identity = self.global_ctx.get_network_identity();
-        let peer_identity = self.get_network_identity();
+        let Some(info) = self.info.as_ref() else {
+            return false;
+        };
+        let Ok(peer_cert) = Self::decode_member_cert(&info.member_cert_cbor) else {
+            return false;
+        };
 
-        !Self::network_secret_digest_is_empty(&my_identity)
-            && !Self::network_secret_digest_is_empty(&peer_identity)
-            && my_identity.network_secret_digest == peer_identity.network_secret_digest
+        my_ctx.trust_domain_id == peer_cert.details.trust_domain_id
+            && my_ctx.network_local_id == peer_cert.details.network_local_id
+    }
+
+    pub fn get_borrowed_proof(&self) -> Option<&BorrowedRelayProof> {
+        self.borrowed_proof.as_ref()
+    }
+
+    pub fn set_client_borrowed_proof(&mut self, proof: Option<BorrowedRelayProof>) {
+        self.client_borrowed_proof = proof;
+    }
+
+    pub(crate) fn peer_trust_domain_id(&self) -> Option<crate::trust::TrustDomainId> {
+        self.noise_handshake_result
+            .as_ref()
+            .and_then(|noise| noise.member_cert.as_ref())
+            .map(|cert| cert.details.trust_domain_id)
+            .or_else(|| {
+                self.info
+                    .as_ref()
+                    .and_then(|info| Self::decode_member_cert(&info.member_cert_cbor).ok())
+                    .map(|cert| cert.details.trust_domain_id)
+            })
+    }
+
+    pub(crate) fn peer_member_cert(&self) -> Option<MemberCert> {
+        self.noise_handshake_result
+            .as_ref()
+            .and_then(|noise| noise.member_cert.as_ref())
+            .cloned()
+            .or_else(|| {
+                self.info
+                    .as_ref()
+                    .and_then(|info| Self::decode_member_cert(&info.member_cert_cbor).ok())
+            })
     }
 
     pub fn get_close_notifier(&self) -> Arc<PeerConnCloseNotify> {
@@ -1649,8 +1744,8 @@ pub mod tests {
         let c_peer_id = new_peer_id();
         let s_peer_id = c_peer_id;
 
-        let mut c_peer = PeerConn::new(c_peer_id, get_mock_global_ctx(), Box::new(c), ps.clone());
-        let mut s_peer = PeerConn::new(s_peer_id, get_mock_global_ctx(), Box::new(s), ps.clone());
+        let mut c_peer = PeerConn::new(c_peer_id, get_mock_global_ctx(), Box::new(c), ps.clone(), None);
+        let mut s_peer = PeerConn::new(s_peer_id, get_mock_global_ctx(), Box::new(s), ps.clone(), None);
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -1678,9 +1773,9 @@ pub mod tests {
         let c_ctx = get_mock_global_ctx();
         let s_ctx = get_mock_global_ctx();
 
-        let mut c_peer = PeerConn::new(c_peer_id, c_ctx.clone(), Box::new(c), ps.clone());
+        let mut c_peer = PeerConn::new(c_peer_id, c_ctx.clone(), Box::new(c), ps.clone(), None);
 
-        let mut s_peer = PeerConn::new(s_peer_id, s_ctx.clone(), Box::new(s), ps.clone());
+        let mut s_peer = PeerConn::new(s_peer_id, s_ctx.clone(), Box::new(s), ps.clone(), None);
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -1744,11 +1839,6 @@ pub mod tests {
             c_peer.get_network_identity().network_name,
             NetworkIdentity::default().network_name
         );
-        assert_eq!(c_peer.get_network_identity().network_secret, None);
-        assert_eq!(
-            c_peer.get_network_identity().network_secret_digest,
-            NetworkIdentity::default().network_secret_digest
-        );
     }
 
     #[tokio::test]
@@ -1770,8 +1860,8 @@ pub mod tests {
         set_secure_mode_cfg(&s_ctx, true);
 
         let ps = Arc::new(PeerSessionStore::new());
-        let mut c_peer = PeerConn::new(c_peer_id, c_ctx.clone(), Box::new(c), ps.clone());
-        let mut s_peer = PeerConn::new(s_peer_id, s_ctx.clone(), Box::new(s), ps.clone());
+        let mut c_peer = PeerConn::new(c_peer_id, c_ctx.clone(), Box::new(c), ps.clone(), None);
+        let mut s_peer = PeerConn::new(s_peer_id, s_ctx.clone(), Box::new(s), ps.clone(), None);
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -1840,18 +1930,15 @@ pub mod tests {
         );
 
         let network = s_ctx.get_network_identity();
-        let mut expected = HandshakeRequest {
+        let expected_payload = HandshakeRequest {
             magic: MAGIC,
             my_peer_id: s_peer_id,
             version: VERSION,
             features: Vec::new(),
             network_name: network.network_name.clone(),
             ..Default::default()
-        };
-        expected
-            .network_secret_digest
-            .extend_from_slice(&network.network_secret_digest.unwrap_or_default());
-        let expected_payload = expected.encode_to_vec();
+        }
+        .encode_to_vec();
 
         println!("sent: {:?}", c_recorder.sent.lock().unwrap());
 
@@ -1881,17 +1968,17 @@ pub mod tests {
 
         c_ctx
             .config
-            .set_network_identity(NetworkIdentity::new("user".to_string(), "sec1".to_string()));
-        s_ctx.config.set_network_identity(NetworkIdentity {
-            network_name: "shared".to_string(),
-            network_secret: None,
-            network_secret_digest: None,
-        });
+            .set_network_identity(NetworkIdentity::new("user".to_string()));
+        s_ctx
+            .config
+            .set_network_identity(NetworkIdentity {
+                network_name: "shared".to_string(),
+            });
         set_secure_mode_cfg(&s_ctx, true);
 
         let ps = Arc::new(PeerSessionStore::new());
-        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone());
-        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone());
+        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone(), None);
+        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone(), None);
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -1926,18 +2013,15 @@ pub mod tests {
 
         c_ctx
             .config
-            .set_network_identity(NetworkIdentity::new("user".to_string(), "sec1".to_string()));
-        s_ctx.config.set_network_identity(NetworkIdentity::new(
-            "shared".to_string(),
-            "sec2".to_string(),
-        ));
+            .set_network_identity(NetworkIdentity::new("user".to_string()));
+        s_ctx.config.set_network_identity(NetworkIdentity::new("shared".to_string()));
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
 
         let ps = Arc::new(PeerSessionStore::new());
-        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone());
-        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone());
+        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone(), None);
+        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone(), None);
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -1972,8 +2056,8 @@ pub mod tests {
         set_secure_mode_cfg(&s_ctx, true);
 
         let ps = Arc::new(PeerSessionStore::new());
-        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone());
-        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone());
+        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone(), None);
+        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone(), None);
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -2016,17 +2100,17 @@ pub mod tests {
 
         c_ctx
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
         s_ctx
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
 
         let ps = Arc::new(PeerSessionStore::new());
-        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone());
-        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone());
+        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone(), None);
+        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone(), None);
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -2037,11 +2121,11 @@ pub mod tests {
 
         assert_eq!(
             c_peer.get_conn_info().secure_auth_level,
-            SecureAuthLevel::NetworkSecretConfirmed as i32,
+            SecureAuthLevel::TrustDomainVerified as i32,
         );
         assert_eq!(
             s_peer.get_conn_info().secure_auth_level,
-            SecureAuthLevel::NetworkSecretConfirmed as i32,
+            SecureAuthLevel::TrustDomainVerified as i32,
         );
         assert_eq!(
             c_peer.get_conn_info().peer_identity_type,
@@ -2065,12 +2149,12 @@ pub mod tests {
 
         c_ctx
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec2".to_string()));
-        s_ctx.config.set_network_identity(NetworkIdentity {
-            network_name: "net2".to_string(),
-            network_secret: None,
-            network_secret_digest: None,
-        });
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
+        s_ctx
+            .config
+            .set_network_identity(NetworkIdentity {
+                network_name: "net2".to_string(),
+            });
 
         let remote_url: url::Url = c.info().unwrap().remote_addr.unwrap().url.parse().unwrap();
 
@@ -2087,11 +2171,12 @@ pub mod tests {
                     .local_public_key
                     .unwrap(),
             ),
+            target_bootstrap_path: None,
         }]);
 
         let ps = Arc::new(PeerSessionStore::new());
-        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone());
-        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone());
+        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone(), None);
+        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone(), None);
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -2126,19 +2211,19 @@ pub mod tests {
 
         c_ctx
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec2".to_string()));
-        s_ctx.config.set_network_identity(NetworkIdentity {
-            network_name: "net2".to_string(),
-            network_secret: None,
-            network_secret_digest: None,
-        });
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
+        s_ctx
+            .config
+            .set_network_identity(NetworkIdentity {
+                network_name: "net2".to_string(),
+            });
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
 
         let ps = Arc::new(PeerSessionStore::new());
-        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone());
-        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone());
+        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone(), None);
+        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone(), None);
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -2181,8 +2266,8 @@ pub mod tests {
         let s_peer_id = new_peer_id();
 
         let ps = Arc::new(PeerSessionStore::new());
-        let mut c_peer = PeerConn::new(c_peer_id, get_mock_global_ctx(), Box::new(c), ps.clone());
-        let mut s_peer = PeerConn::new(s_peer_id, get_mock_global_ctx(), Box::new(s), ps.clone());
+        let mut c_peer = PeerConn::new(c_peer_id, get_mock_global_ctx(), Box::new(c), ps.clone(), None);
+        let mut s_peer = PeerConn::new(s_peer_id, get_mock_global_ctx(), Box::new(s), ps.clone(), None);
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -2230,8 +2315,8 @@ pub mod tests {
         let c_ctx = get_mock_global_ctx();
         let s_ctx = get_mock_global_ctx();
         let ps = Arc::new(PeerSessionStore::new());
-        let mut c_peer = PeerConn::new(c_peer_id, c_ctx.clone(), Box::new(c), ps.clone());
-        let mut s_peer = PeerConn::new(s_peer_id, s_ctx.clone(), Box::new(s), ps.clone());
+        let mut c_peer = PeerConn::new(c_peer_id, c_ctx.clone(), Box::new(c), ps.clone(), None);
+        let mut s_peer = PeerConn::new(s_peer_id, s_ctx.clone(), Box::new(s), ps.clone(), None);
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -2285,6 +2370,7 @@ pub mod tests {
             get_mock_global_ctx(),
             Box::new(c),
             ps.clone(),
+            None,
         );
         let j = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -2308,7 +2394,7 @@ pub mod tests {
         let public = x25519_dalek::PublicKey::from(private_key);
         global_ctx
             .config
-            .set_network_identity(NetworkIdentity::new_credential(network_name.to_string()));
+            .set_network_identity(NetworkIdentity::new(network_name.to_string()));
         global_ctx.config.set_secure_mode(Some(SecureModeConfig {
             enabled: true,
             local_private_key: Some(BASE64_STANDARD.encode(private_key.as_bytes())),
@@ -2327,10 +2413,7 @@ pub mod tests {
 
         // Admin node (server) has network_secret
         let s_ctx = get_mock_global_ctx();
-        s_ctx.config.set_network_identity(NetworkIdentity::new(
-            "net1".to_string(),
-            "secret".to_string(),
-        ));
+        s_ctx.config.set_network_identity(NetworkIdentity::new("net1".to_string()));
         set_secure_mode_cfg(&s_ctx, true);
 
         // Generate a credential on admin and get the private key for the client
@@ -2352,8 +2435,8 @@ pub mod tests {
         set_credential_mode_cfg(&c_ctx, "net1", &private);
 
         let ps = Arc::new(PeerSessionStore::new());
-        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone());
-        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone());
+        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone(), None);
+        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone(), None);
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -2397,10 +2480,7 @@ pub mod tests {
 
         // Admin node (server) with no credentials generated
         let s_ctx = get_mock_global_ctx();
-        s_ctx.config.set_network_identity(NetworkIdentity::new(
-            "net1".to_string(),
-            "secret".to_string(),
-        ));
+        s_ctx.config.set_network_identity(NetworkIdentity::new("net1".to_string()));
         set_secure_mode_cfg(&s_ctx, true);
 
         // Unknown credential node (client) with random key, not in admin's trusted list
@@ -2409,8 +2489,8 @@ pub mod tests {
         set_credential_mode_cfg(&c_ctx, "net1", &random_private);
 
         let ps = Arc::new(PeerSessionStore::new());
-        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone());
-        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone());
+        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone(), None);
+        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone(), None);
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -2423,8 +2503,8 @@ pub mod tests {
         let _ = c_ret;
     }
 
-    /// Test: two admin nodes with same network_secret still get NetworkSecretConfirmed.
-    /// (Regression test: credential system should not break normal admin-to-admin auth)
+    /// Test: two trust-domain peers still get TrustDomainVerified on the server-authenticated path.
+    /// (Regression test: trust handshake should preserve authenticated same-domain connectivity)
     #[tokio::test]
     async fn peer_conn_admin_to_admin_still_works() {
         let (c, s) = create_ring_tunnel_pair();
@@ -2435,21 +2515,15 @@ pub mod tests {
         let c_ctx = get_mock_global_ctx();
         let s_ctx = get_mock_global_ctx();
 
-        c_ctx.config.set_network_identity(NetworkIdentity::new(
-            "net1".to_string(),
-            "secret".to_string(),
-        ));
-        s_ctx.config.set_network_identity(NetworkIdentity::new(
-            "net1".to_string(),
-            "secret".to_string(),
-        ));
+        c_ctx.config.set_network_identity(NetworkIdentity::new("net1".to_string()));
+        s_ctx.config.set_network_identity(NetworkIdentity::new("net1".to_string()));
 
         set_secure_mode_cfg(&c_ctx, true);
         set_secure_mode_cfg(&s_ctx, true);
 
         let ps = Arc::new(PeerSessionStore::new());
-        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone());
-        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone());
+        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone(), None);
+        let mut s_peer = PeerConn::new(s_peer_id, s_ctx, Box::new(s), ps.clone(), None);
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),
@@ -2461,11 +2535,11 @@ pub mod tests {
 
         assert_eq!(
             c_peer.get_conn_info().secure_auth_level,
-            SecureAuthLevel::NetworkSecretConfirmed as i32,
+            SecureAuthLevel::TrustDomainVerified as i32,
         );
         assert_eq!(
             s_peer.get_conn_info().secure_auth_level,
-            SecureAuthLevel::NetworkSecretConfirmed as i32,
+            SecureAuthLevel::TrustDomainVerified as i32,
         );
     }
 
@@ -2474,10 +2548,7 @@ pub mod tests {
     async fn peer_conn_revoked_credential_rejected() {
         // Admin generates credential, then revokes it
         let admin_ctx = get_mock_global_ctx();
-        admin_ctx.config.set_network_identity(NetworkIdentity::new(
-            "net1".to_string(),
-            "secret".to_string(),
-        ));
+        admin_ctx.config.set_network_identity(NetworkIdentity::new("net1".to_string()));
         set_secure_mode_cfg(&admin_ctx, true);
 
         let (cred_id, cred_secret) = admin_ctx.get_credential_manager().generate_credential(
@@ -2509,8 +2580,8 @@ pub mod tests {
         set_credential_mode_cfg(&c_ctx, "net1", &private);
 
         let ps = Arc::new(PeerSessionStore::new());
-        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone());
-        let mut s_peer = PeerConn::new(s_peer_id, admin_ctx, Box::new(s), ps.clone());
+        let mut c_peer = PeerConn::new(c_peer_id, c_ctx, Box::new(c), ps.clone(), None);
+        let mut s_peer = PeerConn::new(s_peer_id, admin_ctx, Box::new(s), ps.clone(), None);
 
         let (c_ret, s_ret) = tokio::join!(
             c_peer.do_handshake_as_client(),

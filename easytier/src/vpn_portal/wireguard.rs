@@ -31,12 +31,9 @@ use super::VpnPortal;
 
 type WgPeerIpTable = Arc<DashMap<Ipv4Addr, Arc<ClientEntry>>>;
 
-pub(crate) fn get_wg_config_for_portal(nid: &NetworkIdentity) -> WgConfig {
-    let key_seed = format!(
-        "{}{}",
-        nid.network_name,
-        nid.network_secret.as_ref().unwrap_or(&"".to_string())
-    );
+pub(crate) fn get_wg_config_for_portal(_nid: &NetworkIdentity) -> WgConfig {
+    // FIXME(§10): trust-derived key path; zero-placeholder during transition
+    let key_seed = String::new();
     WgConfig::new_for_portal(&key_seed, &key_seed)
 }
 

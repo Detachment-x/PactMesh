@@ -6,7 +6,8 @@ use crate::{
         config::{
             ConfigFileControl, ConfigLoader, ConsoleLoggerConfig, EncryptionAlgorithm,
             FileLoggerConfig, LoggingConfigLoader, NetworkIdentity, PeerConfig, PortForwardConfig,
-            TomlConfigLoader, VpnPortalConfig, load_config_from_file, process_secure_mode_cfg,
+            TomlConfigLoader, TrustDomainConfig, VpnPortalConfig, load_config_from_file,
+            process_secure_mode_cfg,
         },
         constants::EASYTIER_VERSION,
         log,
@@ -17,7 +18,6 @@ use crate::{
     proto::common::{CompressionAlgoPb, SecureModeConfig},
     rpc_service::ApiRpcServer,
     utils::panic::setup_panic_handler,
-    web_client,
 };
 use anyhow::Context;
 use cidr::IpCidr;
@@ -86,14 +86,6 @@ fn dump_profile(_cur_allocated: usize) {
 #[command(name = "easytier-core", author, version = EASYTIER_VERSION , about, long_about = None)]
 struct Cli {
     #[arg(
-        short = 'w',
-        long,
-        env = "ET_CONFIG_SERVER",
-        help = t!("core_clap.config_server").to_string()
-    )]
-    config_server: Option<String>,
-
-    #[arg(
         long,
         env = "ET_MACHINE_ID",
         help = t!("core_clap.machine_id").to_string()
@@ -150,10 +142,24 @@ struct NetworkOptions {
 
     #[arg(
         long,
-        env = "ET_NETWORK_SECRET",
-        help = t!("core_clap.network_secret").to_string(),
+        env = "ET_TRUST_DOMAIN_DIR",
+        help = "Trust domain directory path",
     )]
-    network_secret: Option<String>,
+    trust_domain_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        env = "ET_NETWORK_LOCAL_ID",
+        help = "Trust network local identifier",
+    )]
+    network_local_id: Option<String>,
+
+    #[arg(
+        long,
+        env = "ET_SK_SELF_PASSWORD_ENV",
+        help = "Environment variable name for sk_self password",
+    )]
+    sk_self_password_env: Option<String>,
 
     #[arg(
         short,
@@ -828,6 +834,13 @@ impl NetworkOptions {
             return true;
         }
 
+        if source == ConfigFileSource::ConfigDir
+            && explicit_config_file_count == 0
+            && config_dir_file_count == 1
+        {
+            return true;
+        }
+
         let Some(network_name) = &self.network_name else {
             return false;
         };
@@ -847,15 +860,35 @@ impl NetworkOptions {
         let old_ns = cfg.get_network_identity();
         let network_name = self.network_name.clone().unwrap_or(old_ns.network_name);
 
-        if self.credential.is_some() {
-            // Credential mode: no network_secret, authenticate via credential keypair
-            cfg.set_network_identity(NetworkIdentity::new_credential(network_name));
-        } else {
-            let network_secret = self
-                .network_secret
+        cfg.set_network_identity(NetworkIdentity::new(network_name));
+
+        if self.trust_domain_dir.is_some()
+            || self.network_local_id.is_some()
+            || self.sk_self_password_env.is_some()
+        {
+            let existing = cfg.get_trust_domain();
+            let domain_dir = self
+                .trust_domain_dir
                 .clone()
-                .unwrap_or(old_ns.network_secret.unwrap_or_default());
-            cfg.set_network_identity(NetworkIdentity::new(network_name, network_secret));
+                .or_else(|| existing.as_ref().map(|config| config.domain_dir.clone()))
+                .ok_or_else(|| anyhow::anyhow!("trust_domain.domain_dir is required"))?;
+            let network_local_id = self
+                .network_local_id
+                .clone()
+                .or_else(|| existing.as_ref().map(|config| config.network_local_id.clone()))
+                .ok_or_else(|| anyhow::anyhow!("trust_domain.network_local_id is required"))?;
+            let sk_self_password_env = self
+                .sk_self_password_env
+                .clone()
+                .or_else(|| existing.as_ref().map(|config| config.sk_self_password_env.clone()))
+                .ok_or_else(|| anyhow::anyhow!("trust_domain.sk_self_password_env is required"))?;
+
+            cfg.set_trust_domain(Some(TrustDomainConfig {
+                domain_dir,
+                network_local_id,
+                sk_self_password_env,
+                relay_serving: Vec::new(),
+            }));
         }
 
         if let Some(dhcp) = self.dhcp {
@@ -883,6 +916,7 @@ impl NetworkOptions {
                         .parse()
                         .with_context(|| format!("failed to parse peer uri: {}", p))?,
                     peer_public_key: None,
+                    target_bootstrap_path: None,
                 });
             }
             cfg.set_peers(peers);
@@ -945,6 +979,7 @@ impl NetworkOptions {
                     format!("failed to parse external node uri: {}", external_nodes)
                 })?,
                 peer_public_key: None,
+                target_bootstrap_path: None,
             });
             cfg.set_peers(old_peers);
         }
@@ -1318,30 +1353,6 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
     .serve()
     .await?;
 
-    let _web_client = if let Some(config_server_url_s) = cli.config_server.as_ref() {
-        let wc = web_client::run_web_client(
-            config_server_url_s,
-            cli.machine_id.clone(),
-            cli.network_options.hostname.clone(),
-            cli.network_options.secure_mode.unwrap_or(false),
-            manager.clone(),
-            None,
-        )
-        .await
-        .inspect(|_| {
-            log::info!(
-                server = config_server_url_s,
-                "Web client started successfully...",
-            );
-
-            log::info!("Official config website: https://easytier.cn/web");
-        })?;
-
-        Some(wc)
-    } else {
-        None
-    };
-
     let _daemon_guard = if cli.daemon {
         Some(manager.register_daemon())
     } else {
@@ -1383,7 +1394,7 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
     let mut crate_cli_network = {
         if cli.daemon {
             false
-        } else if config_file_count == 0 && cli.config_server.is_none() {
+        } else if config_file_count == 0 {
             true
         } else {
             cli.network_options.network_name.is_some()

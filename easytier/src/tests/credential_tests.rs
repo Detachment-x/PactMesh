@@ -110,7 +110,7 @@ fn build_credential_config(
     config.set_ipv4(Some(ipv4.parse().unwrap()));
     config.set_ipv6(Some(ipv6.parse().unwrap()));
     config.set_listeners(vec![]);
-    config.set_network_identity(NetworkIdentity::new_credential(network_name));
+    config.set_network_identity(NetworkIdentity::new(network_name));
     config.set_secure_mode(Some(generate_secure_mode_config_with_key(private_key)));
 
     config
@@ -189,10 +189,7 @@ fn create_admin_config(
         "tcp://0.0.0.0:11010".parse().unwrap(),
         "udp://0.0.0.0:11010".parse().unwrap(),
     ]);
-    config.set_network_identity(NetworkIdentity::new(
-        "test_network".to_string(),
-        "test_secret".to_string(),
-    ));
+    config.set_network_identity(NetworkIdentity::new("test_network".to_string()));
     config.set_secure_mode(Some(generate_secure_mode_config()));
 
     config
@@ -213,10 +210,7 @@ fn create_shared_config(
         "tcp://0.0.0.0:11010".parse().unwrap(),
         "udp://0.0.0.0:11010".parse().unwrap(),
     ]);
-    config.set_network_identity(NetworkIdentity::new(
-        "shared_network".to_string(),
-        "".to_string(),
-    ));
+    config.set_network_identity(NetworkIdentity::new("shared_network".to_string()));
     config.set_secure_mode(Some(generate_secure_mode_config()));
     config
 }
@@ -540,7 +534,7 @@ async fn credential_relay_capability(#[case] allow_relay: bool) {
         config.set_netns(Some("ns_c1".to_string()));
         config.set_ipv4(Some("10.144.144.2".parse().unwrap()));
         config.set_ipv6(Some("fd00::2/64".parse().unwrap()));
-        config.set_network_identity(NetworkIdentity::new_credential(
+        config.set_network_identity(NetworkIdentity::new(
             admin_inst
                 .get_global_ctx()
                 .get_network_identity()
@@ -567,7 +561,7 @@ async fn credential_relay_capability(#[case] allow_relay: bool) {
         config.set_netns(Some("ns_c2".to_string()));
         config.set_ipv4(Some("10.144.144.3".parse().unwrap()));
         config.set_ipv6(Some("fd00::3/64".parse().unwrap()));
-        config.set_network_identity(NetworkIdentity::new_credential(
+        config.set_network_identity(NetworkIdentity::new(
             admin_inst
                 .get_global_ctx()
                 .get_network_identity()
@@ -596,7 +590,7 @@ async fn credential_relay_capability(#[case] allow_relay: bool) {
         config.set_ipv6(Some("fd00::4/64".parse().unwrap()));
         // C has listener so A and B can connect to it
         config.set_listeners(vec!["tcp://0.0.0.0:11020".parse().unwrap()]);
-        config.set_network_identity(NetworkIdentity::new_credential(
+        config.set_network_identity(NetworkIdentity::new(
             admin_inst
                 .get_global_ctx()
                 .get_network_identity()
@@ -876,7 +870,7 @@ async fn credential_revocation_propagates() {
         config.set_ipv4(Some("10.144.144.2".parse().unwrap()));
         config.set_ipv6(Some("fd00::2/64".parse().unwrap()));
         config.set_listeners(vec![]);
-        config.set_network_identity(NetworkIdentity::new_credential(
+        config.set_network_identity(NetworkIdentity::new(
             admin_inst
                 .get_global_ctx()
                 .get_network_identity()
@@ -1140,7 +1134,7 @@ async fn credential_unknown_rejected() {
         config.set_ipv4(Some("10.144.144.2".parse().unwrap()));
         config.set_ipv6(Some("fd00::2/64".parse().unwrap()));
         config.set_listeners(vec![]);
-        config.set_network_identity(NetworkIdentity::new_credential(
+        config.set_network_identity(NetworkIdentity::new(
             admin_inst
                 .get_global_ctx()
                 .get_network_identity()

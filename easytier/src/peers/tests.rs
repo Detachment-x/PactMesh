@@ -37,6 +37,7 @@ pub async fn create_mock_peer_manager() -> Arc<PeerManager> {
         RouteAlgoType::Ospf,
         get_mock_global_ctx(),
         s,
+        None,
     ));
     peer_mgr.run().await.unwrap();
     peer_mgr
@@ -45,21 +46,21 @@ pub async fn create_mock_peer_manager() -> Arc<PeerManager> {
 pub async fn create_mock_peer_manager_with_name(network_name: String) -> Arc<PeerManager> {
     let (s, _r) = create_packet_recv_chan();
     let g =
-        get_mock_global_ctx_with_network(Some(NetworkIdentity::new(network_name, "".to_string())));
-    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, g, s));
+        get_mock_global_ctx_with_network(Some(NetworkIdentity::new(network_name)));
+    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, g, s, None));
     peer_mgr.run().await.unwrap();
     peer_mgr
 }
 
 pub async fn create_mock_peer_manager_secure(
     network_name: String,
-    network_secret: String,
+    _network_secret: String,
 ) -> Arc<PeerManager> {
     let (s, _r) = create_packet_recv_chan();
     let g =
-        get_mock_global_ctx_with_network(Some(NetworkIdentity::new(network_name, network_secret)));
+        get_mock_global_ctx_with_network(Some(NetworkIdentity::new(network_name)));
     set_secure_mode_cfg(&g, true);
-    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, g, s));
+    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, g, s, None));
     peer_mgr.run().await.unwrap();
     peer_mgr
 }
@@ -256,10 +257,7 @@ async fn foreign_mgr_stress_test() {
 #[tokio::test]
 async fn relay_peer_map_secure_session_decrypt() {
     let (s, _r) = create_packet_recv_chan();
-    let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
-        "net1".to_string(),
-        "sec1".to_string(),
-    )));
+    let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string())));
     set_secure_mode_cfg(&ctx, true);
     let peer_map = Arc::new(PeerMap::new(s, ctx.clone(), 10));
     let store = Arc::new(PeerSessionStore::new());
@@ -480,10 +478,7 @@ async fn relay_peer_map_pending_packet_buffer() {
     // Verify that packets sent during handshake are buffered (not dropped),
     // and flushed after handshake completes.
     let (s, _r) = create_packet_recv_chan();
-    let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
-        "net1".to_string(),
-        "sec1".to_string(),
-    )));
+    let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string())));
     set_secure_mode_cfg(&ctx, true);
     let peer_map = Arc::new(PeerMap::new(s, ctx.clone(), 10));
     let store = Arc::new(PeerSessionStore::new());
@@ -799,10 +794,7 @@ async fn relay_peer_map_responder_rejects_mismatched_pubkey() {
 #[tokio::test]
 async fn relay_peer_map_remove_peer() {
     let (s, _r) = create_packet_recv_chan();
-    let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
-        "net1".to_string(),
-        "sec1".to_string(),
-    )));
+    let ctx = get_mock_global_ctx_with_network(Some(NetworkIdentity::new("net1".to_string())));
     set_secure_mode_cfg(&ctx, true);
     let peer_map = Arc::new(PeerMap::new(s, ctx.clone(), 10));
     let store = Arc::new(PeerSessionStore::new());
@@ -974,7 +966,7 @@ pub async fn create_mock_peer_manager_credential(
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
     let (s, _r) = create_packet_recv_chan();
-    let g = get_mock_global_ctx_with_network(Some(NetworkIdentity::new_credential(network_name)));
+    let g = get_mock_global_ctx_with_network(Some(NetworkIdentity::new(network_name)));
 
     let public = x25519_dalek::PublicKey::from(private_key);
     g.config.set_secure_mode(Some(SecureModeConfig {
@@ -983,7 +975,7 @@ pub async fn create_mock_peer_manager_credential(
         local_public_key: Some(BASE64_STANDARD.encode(public.as_bytes())),
     }));
 
-    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, g, s));
+    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, g, s, None));
     peer_mgr.run().await.unwrap();
     peer_mgr
 }

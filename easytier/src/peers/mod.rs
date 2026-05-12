@@ -26,6 +26,8 @@ pub mod peer_task;
 
 #[cfg(test)]
 pub mod tests;
+#[cfg(test)]
+mod handshake_trust_tests;
 
 use crate::tunnel::packet_def::ZCPacket;
 

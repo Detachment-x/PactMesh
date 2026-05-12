@@ -1,6 +1,5 @@
 use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
-    hash::Hasher,
+    collections::HashMap,
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -32,8 +31,6 @@ use crate::{
     tunnel::matches_protocol,
 };
 use crossbeam::atomic::AtomicCell;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use socket2::Protocol;
 
 pub type NetworkIdentity = crate::common::config::NetworkIdentity;
@@ -195,6 +192,7 @@ pub struct GlobalCtx {
     pub config: Box<dyn ConfigLoader>,
     pub net_ns: NetNS,
     pub network: NetworkIdentity,
+    pub trust_context: tokio::sync::RwLock<Option<Arc<crate::common::trust_context::TrustDomainContext>>>,
 
     event_bus: EventBus,
 
@@ -291,6 +289,7 @@ impl GlobalCtx {
             config: Box::new(config_fs),
             net_ns: net_ns.clone(),
             network,
+            trust_context: tokio::sync::RwLock::new(None),
 
             event_bus,
             cached_ipv4: AtomicCell::new(None),
@@ -403,15 +402,6 @@ impl GlobalCtx {
         self.config.get_network_identity()
     }
 
-    pub fn get_secret_proof(&self, challenge: &[u8]) -> Option<Hmac<Sha256>> {
-        let network_secret = self.get_network_identity().network_secret?;
-        let key = network_secret.as_bytes();
-        let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
-        mac.update(b"easytier secret proof");
-        mac.update(challenge);
-        Some(mac)
-    }
-
     pub fn get_network_name(&self) -> String {
         self.get_network_identity().network_name
     }
@@ -474,47 +464,15 @@ impl GlobalCtx {
     pub fn flags_arc(&self) -> Arc<Flags> {
         self.flags.load_full()
     }
-
+    // FIXME(§10): trust-derived key path; zero-placeholder during transition
     pub fn get_128_key(&self) -> [u8; 16] {
-        let mut key = [0u8; 16];
-        let secret = self
-            .config
-            .get_network_identity()
-            .network_secret
-            .unwrap_or_default();
-        // fill key according to network secret
-        let mut hasher = DefaultHasher::new();
-        hasher.write(secret.as_bytes());
-        key[0..8].copy_from_slice(&hasher.finish().to_be_bytes());
-        hasher.write(&key[0..8]);
-        key[8..16].copy_from_slice(&hasher.finish().to_be_bytes());
-        hasher.write(&key[0..16]);
-        key
+        [0u8; 16]
     }
 
+    // FIXME(§10): trust-derived key path; zero-placeholder during transition
     pub fn get_256_key(&self) -> [u8; 32] {
-        let mut key = [0u8; 32];
-        let secret = self
-            .config
-            .get_network_identity()
-            .network_secret
-            .unwrap_or_default();
-        // fill key according to network secret
-        let mut hasher = DefaultHasher::new();
-        hasher.write(secret.as_bytes());
-        hasher.write(b"easytier-256bit-key"); // 添加固定盐值以区分128位和256位密钥
-
-        // 生成32字节密钥
-        for i in 0..4 {
-            let chunk_start = i * 8;
-            let chunk_end = chunk_start + 8;
-            hasher.write(&key[0..chunk_start]);
-            hasher.write(&[i as u8]); // 添加索引以确保每个8字节块都不同
-            key[chunk_start..chunk_end].copy_from_slice(&hasher.finish().to_be_bytes());
-        }
-        key
+        [0u8; 32]
     }
-
     pub fn enable_exit_node(&self) -> bool {
         self.flags.load().enable_exit_node || cfg!(target_env = "ohos")
     }
@@ -668,6 +626,19 @@ impl GlobalCtx {
         } else {
             false
         }
+    }
+
+    pub async fn get_trust_context(
+        &self,
+    ) -> Option<Arc<crate::common::trust_context::TrustDomainContext>> {
+        self.trust_context.read().await.clone()
+    }
+
+    pub async fn set_trust_context(
+        &self,
+        ctx: Arc<crate::common::trust_context::TrustDomainContext>,
+    ) {
+        *self.trust_context.write().await = Some(ctx);
     }
 }
 

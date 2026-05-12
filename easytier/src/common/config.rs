@@ -1,11 +1,11 @@
 use std::{
-    hash::Hasher,
     net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
 
 use anyhow::Context;
+use ed25519_dalek::VerifyingKey;
 use base64::{Engine as _, prelude::BASE64_STANDARD};
 use clap::ValueEnum;
 use clap::builder::PossibleValue;
@@ -21,12 +21,24 @@ use crate::{
         api::manage::ConfigSource as RpcConfigSource,
         common::{CompressionAlgoPb, PortForwardConfigPb, SecureModeConfig, SocketType},
     },
-    tunnel::generate_digest_from_str,
+    trust::{RelayCapabilities, RelayGrantEntry, RelayGrantTable, TrustDomainId},
 };
 
 use super::env_parser;
 
 pub type Flags = crate::proto::common::FlagsInConfig;
+
+pub(crate) fn parse_root_pk_hex(s: &str) -> Result<[u8; 32], String> {
+    if s.len() != 64 {
+        return Err(format!("expected 64 hex chars, got {}", s.len()));
+    }
+
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
 
 pub fn gen_default_flags() -> Flags {
     #[allow(deprecated)]
@@ -202,6 +214,14 @@ pub trait ConfigLoader: Send + Sync {
     fn get_secure_mode(&self) -> Option<SecureModeConfig>;
     fn set_secure_mode(&self, secure_mode: Option<SecureModeConfig>);
 
+    fn get_relay_grant_table(&self) -> RelayGrantTable {
+        RelayGrantTable::empty()
+    }
+
+    fn get_trust_domain(&self) -> Option<TrustDomainConfig> {
+        None
+    }
+
     fn get_credential_file(&self) -> Option<std::path::PathBuf> {
         None
     }
@@ -221,15 +241,11 @@ pub trait LoggingConfigLoader {
     fn get_console_logger_config(&self) -> ConsoleLoggerConfig;
 }
 
-pub type NetworkSecretDigest = [u8; 32];
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub struct NetworkIdentity {
     pub network_name: String,
-    pub network_secret: Option<String>,
-    #[serde(skip)]
-    pub network_secret_digest: Option<NetworkSecretDigest>,
 }
+
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -280,89 +296,42 @@ struct ConfigSourceConfig {
     source: ConfigSource,
 }
 
-#[derive(Eq, PartialEq, Hash)]
-struct NetworkIdentityWithOnlyDigest {
-    network_name: String,
-    network_secret_digest: Option<NetworkSecretDigest>,
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RelayServingEntryConfig {
+    pub foreign_root_pk_hex: String,
+    #[serde(default)]
+    pub foreign_trust_domain_meta_pem: Option<PathBuf>,
+    #[serde(default)]
+    pub foreign_network_state_pem: Option<PathBuf>,
+    #[serde(default)]
+    pub foreign_bootstrap_cbor: Option<PathBuf>,
+    pub can_relay_data: bool,
+    pub can_assist_holepunch: bool,
+    pub expires_at: u64,
 }
 
-impl From<NetworkIdentity> for NetworkIdentityWithOnlyDigest {
-    fn from(identity: NetworkIdentity) -> Self {
-        if identity.network_secret_digest.is_some() {
-            Self {
-                network_name: identity.network_name,
-                network_secret_digest: identity.network_secret_digest,
-            }
-        } else if identity.network_secret.is_some() {
-            let mut network_secret_digest = [0u8; 32];
-            generate_digest_from_str(
-                &identity.network_name,
-                identity.network_secret.as_ref().unwrap(),
-                &mut network_secret_digest,
-            );
-            Self {
-                network_name: identity.network_name,
-                network_secret_digest: Some(network_secret_digest),
-            }
-        } else {
-            Self {
-                network_name: identity.network_name,
-                network_secret_digest: None,
-            }
-        }
-    }
-}
-
-impl PartialEq for NetworkIdentity {
-    fn eq(&self, other: &Self) -> bool {
-        let self_with_digest = NetworkIdentityWithOnlyDigest::from(self.clone());
-        let other_with_digest = NetworkIdentityWithOnlyDigest::from(other.clone());
-        self_with_digest == other_with_digest
-    }
-}
-
-impl Eq for NetworkIdentity {}
-
-impl std::hash::Hash for NetworkIdentity {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        let self_with_digest = NetworkIdentityWithOnlyDigest::from(self.clone());
-        self_with_digest.hash(state);
-    }
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TrustDomainConfig {
+    pub domain_dir: PathBuf,
+    pub network_local_id: String,
+    pub sk_self_password_env: String,
+    #[serde(default)]
+    pub relay_serving: Vec<RelayServingEntryConfig>,
 }
 
 impl NetworkIdentity {
-    pub fn new(network_name: String, network_secret: String) -> Self {
-        let mut network_secret_digest = [0u8; 32];
-        generate_digest_from_str(&network_name, &network_secret, &mut network_secret_digest);
-
-        NetworkIdentity {
-            network_name,
-            network_secret: Some(network_secret),
-            network_secret_digest: Some(network_secret_digest),
-        }
-    }
-
-    /// Create a NetworkIdentity for a credential node (no network_secret).
-    /// The node identifies by network_name only and authenticates via credential keypair.
-    pub fn new_credential(network_name: String) -> Self {
-        NetworkIdentity {
-            network_name,
-            network_secret: None,
-            network_secret_digest: None,
-        }
+    pub fn new(network_name: String) -> Self {
+        Self { network_name }
     }
 }
 
-impl Default for NetworkIdentity {
-    fn default() -> Self {
-        Self::new("default".to_string(), "".to_string())
-    }
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct PeerConfig {
     pub uri: url::Url,
     pub peer_public_key: Option<String>,
+    #[serde(default)]
+    pub target_bootstrap_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -491,6 +460,7 @@ struct Config {
     ipv6: Option<String>,
     dhcp: Option<bool>,
     network_identity: Option<NetworkIdentity>,
+    trust_domain: Option<TrustDomainConfig>,
     listeners: Option<Vec<url::Url>>,
     mapped_listeners: Option<Vec<url::Url>>,
     exit_nodes: Option<Vec<IpAddr>>,
@@ -550,7 +520,6 @@ impl TomlConfigLoader {
             .with_context(|| format!("failed to parse config file: {}", config_str))?;
 
         Self::normalize_config_source(&mut config);
-
         config.flags_struct = Some(Self::gen_flags(config.flags.clone().unwrap_or_default()));
 
         let config = TomlConfigLoader {
@@ -558,10 +527,7 @@ impl TomlConfigLoader {
         };
 
         let old_ns = config.get_network_identity();
-        config.set_network_identity(NetworkIdentity::new(
-            old_ns.network_name,
-            old_ns.network_secret.unwrap_or_default(),
-        ));
+        config.set_network_identity(NetworkIdentity::new(old_ns.network_name));
 
         Ok(config)
     }
@@ -572,6 +538,14 @@ impl TomlConfigLoader {
         let ret = Self::new_from_str(&config_str)?;
 
         Ok(ret)
+    }
+
+    pub fn get_trust_domain(&self) -> Option<TrustDomainConfig> {
+        self.config.lock().unwrap().trust_domain.clone()
+    }
+
+    pub fn set_trust_domain(&self, trust_domain: Option<TrustDomainConfig>) {
+        self.config.lock().unwrap().trust_domain = trust_domain;
     }
 
     fn gen_flags(mut flags_hashmap: serde_json::Map<String, serde_json::Value>) -> Flags {
@@ -846,7 +820,6 @@ impl ConfigLoader for TomlConfigLoader {
     fn set_routes(&self, routes: Option<Vec<cidr::Ipv4Cidr>>) {
         self.config.lock().unwrap().routes = routes;
     }
-
     fn get_socks5_portal(&self) -> Option<url::Url> {
         self.config.lock().unwrap().socks5_proxy.clone()
     }
@@ -924,6 +897,47 @@ impl ConfigLoader for TomlConfigLoader {
 
     fn set_secure_mode(&self, secure_mode: Option<SecureModeConfig>) {
         self.config.lock().unwrap().secure_mode = secure_mode;
+    }
+
+    fn get_trust_domain(&self) -> Option<TrustDomainConfig> {
+        TomlConfigLoader::get_trust_domain(self)
+    }
+
+    fn get_relay_grant_table(&self) -> RelayGrantTable {
+        let relay_serving = self
+            .config
+            .lock()
+            .unwrap()
+            .trust_domain
+            .as_ref()
+            .map(|trust| trust.relay_serving.clone())
+            .unwrap_or_default();
+
+        let entries = relay_serving
+            .into_iter()
+            .map(|entry| {
+                let bytes = parse_root_pk_hex(&entry.foreign_root_pk_hex).unwrap_or_else(|err| {
+                    panic!(
+                        "invalid trust_domain.relay_serving.foreign_root_pk_hex '{}': {err}",
+                        entry.foreign_root_pk_hex
+                    )
+                });
+                let foreign_root_pk = VerifyingKey::from_bytes(&bytes)
+                    .map(|pk| TrustDomainId::from_root_pubkey(&pk))
+                    .unwrap_or(TrustDomainId(bytes));
+
+                RelayGrantEntry {
+                    foreign_root_pk,
+                    capabilities: RelayCapabilities {
+                        can_relay_data: entry.can_relay_data,
+                        can_assist_holepunch: entry.can_assist_holepunch,
+                    },
+                    expires_at: entry.expires_at,
+                }
+            })
+            .collect();
+
+        RelayGrantTable::from_entries(entries)
     }
 
     fn get_credential_file(&self) -> Option<PathBuf> {
@@ -1362,10 +1376,6 @@ network_secret = "${TEST_SECRET}"
         // 验证环境变量已被替换
         let network_identity = config.get_network_identity();
         assert_eq!(network_identity.network_name, "test-network");
-        assert_eq!(
-            network_identity.network_secret.as_ref().unwrap(),
-            "my-test-secret-123"
-        );
 
         // 验证权限标记：包含环境变量的配置应被标记为只读和禁止删除
         assert!(
@@ -1441,7 +1451,7 @@ network_secret = "${API_TEST_SECRET}"
 instance_name = "disable-test"
 
 [network_identity]
-network_name = "test"
+network_name = "${DISABLED_TEST_VAR}"
 network_secret = "${DISABLED_TEST_VAR}"
 "#;
         temp_file.write_all(config_content.as_bytes()).unwrap();
@@ -1457,7 +1467,7 @@ network_secret = "${DISABLED_TEST_VAR}"
         // 验证环境变量未被替换（保持原样）
         let network_identity = config.get_network_identity();
         assert_eq!(
-            network_identity.network_secret.as_ref().unwrap(),
+            network_identity.network_name,
             "${DISABLED_TEST_VAR}",
             "Env var should not be expanded when parsing is disabled"
         );
@@ -1503,14 +1513,6 @@ network_secret = "${INSTANCE_SECRET}"
 
         // 验证实例1的配置
         assert_eq!(config1.get_inst_name(), "instance-one");
-        assert_eq!(
-            config1
-                .get_network_identity()
-                .network_secret
-                .as_ref()
-                .unwrap(),
-            "instance1-secret"
-        );
 
         // 实例2：修改环境变量后加载同一模板
         set_env_var("INSTANCE_SECRET", "instance2-secret");
@@ -1527,21 +1529,9 @@ network_secret = "${INSTANCE_SECRET}"
 
         // 验证实例2使用了不同的环境变量值
         assert_eq!(config2.get_inst_name(), "instance-two");
-        assert_eq!(
-            config2
-                .get_network_identity()
-                .network_secret
-                .as_ref()
-                .unwrap(),
-            "instance2-secret"
-        );
 
         // 验证两个实例的配置确实不同
         assert_ne!(config1.get_inst_name(), config2.get_inst_name());
-        assert_ne!(
-            config1.get_network_identity().network_secret,
-            config2.get_network_identity().network_secret
-        );
 
         // 清理
         remove_env_var("INSTANCE_SECRET");
@@ -1590,10 +1580,6 @@ uri = "tcp://${PEER_HOST}:${PEER_PORT}"
         // 验证 network_identity 字段
         let identity = config.get_network_identity();
         assert_eq!(identity.network_name, "prod-network");
-        assert_eq!(
-            identity.network_secret.as_ref().unwrap(),
-            "production-secret-key"
-        );
 
         // 验证 listeners 字段
         let listeners = config.get_listener_uris();
@@ -1633,7 +1619,7 @@ instance_name = "default-test"
 listeners = ["tcp://0.0.0.0:${UNDEFINED_PORT:-11010}"]
 
 [network_identity]
-network_name = "test"
+network_name = "${UNDEFINED_SECRET:-default-secret}"
 network_secret = "${UNDEFINED_SECRET:-default-secret}"
 "#;
         temp_file.write_all(config_content.as_bytes()).unwrap();
@@ -1647,11 +1633,7 @@ network_secret = "${UNDEFINED_SECRET:-default-secret}"
 
         // 验证使用了默认值
         assert_eq!(
-            config
-                .get_network_identity()
-                .network_secret
-                .as_ref()
-                .unwrap(),
+            config.get_network_identity().network_name,
             "default-secret"
         );
         assert_eq!(
@@ -1673,7 +1655,7 @@ network_secret = "${UNDEFINED_SECRET:-default-secret}"
 instance_name = "undefined-test"
 
 [network_identity]
-network_name = "test"
+network_name = "${COMPLETELY_UNDEFINED}"
 network_secret = "${COMPLETELY_UNDEFINED}"
 "#;
         temp_file.write_all(config_content.as_bytes()).unwrap();
@@ -1686,14 +1668,9 @@ network_secret = "${COMPLETELY_UNDEFINED}"
 
         // 验证变量保持原样
         assert_eq!(
-            config
-                .get_network_identity()
-                .network_secret
-                .as_ref()
-                .unwrap(),
+            config.get_network_identity().network_name,
             "${COMPLETELY_UNDEFINED}"
         );
-
         // 注意：由于没有实际替换发生，控制标记不应因环境变量而设置
         // 但会因为其他原因（如没有 config_dir）被标记为 NO_DELETE
         // 这里我们主要验证 NO_DELETE 标记的逻辑
@@ -1844,10 +1821,6 @@ enable_encryption = ${MIXED_ENCRYPTION}
         // 验证字符串类型
         let identity = config.get_network_identity();
         assert_eq!(identity.network_name, "production");
-        assert_eq!(
-            identity.network_secret.as_ref().unwrap(),
-            "mixed-secret-key"
-        );
 
         // 验证布尔类型
         assert!(config.get_dhcp());

@@ -10,6 +10,7 @@ use crate::{
             ConfigLoader, NetworkIdentity, PeerConfig, TomlConfigLoader, VpnPortalConfig,
             gen_default_flags,
         },
+        trust_context::TrustDomainContext,
         constants::EASYTIER_VERSION,
         global_ctx::{EventBusSubscriber, GlobalCtxEvent},
     },
@@ -57,6 +58,174 @@ impl Default for EasyTierData {
             instance_stop_notifier: Arc::new(tokio::sync::Notify::new()),
         }
     }
+}
+
+pub async fn inject_trust_domain_context_from_config(
+    cfg: &TomlConfigLoader,
+    global_ctx: Arc<crate::common::global_ctx::GlobalCtx>,
+) -> Result<(), anyhow::Error> {
+    let Some(trust_domain) = cfg.get_trust_domain() else {
+        return Ok(());
+    };
+
+    let member_cert_path = trust_domain
+        .domain_dir
+        .join("networks")
+        .join(&trust_domain.network_local_id)
+        .join("member_cert.pem");
+    if !member_cert_path.is_file() {
+        anyhow::bail!(
+            "trust_domain member_cert.pem not found: {}",
+            member_cert_path.display()
+        );
+    }
+
+    let password = std::env::var(&trust_domain.sk_self_password_env).with_context(|| {
+        format!(
+            "failed to read sk_self password from env var {}",
+            trust_domain.sk_self_password_env
+        )
+    })?;
+
+    let ctx = TrustDomainContext::load_from_dir(
+        trust_domain.domain_dir.as_path(),
+        &trust_domain.network_local_id,
+        &password,
+    )
+    .with_context(|| {
+        format!(
+            "failed to load trust domain context from {} for network_local_id {}",
+            trust_domain.domain_dir.display(),
+            trust_domain.network_local_id
+        )
+    })?;
+
+    global_ctx.set_trust_context(Arc::new(ctx)).await;
+    Ok(())
+}
+
+const TRUST_DOMAIN_META_PEM_LABEL: &str = "PNW-TRUST-DOMAIN-META";
+
+fn load_local_network_state(
+    domain_dir: &std::path::Path,
+    network_local_id: &str,
+) -> Result<crate::trust::SignedNetworkState, anyhow::Error> {
+    let state_path = domain_dir
+        .join("networks")
+        .join(network_local_id)
+        .join("network_state.cbor.pem");
+    let state_pem = std::fs::read_to_string(&state_path)
+        .with_context(|| format!("failed to read {}", state_path.display()))?;
+    crate::trust::SignedNetworkState::from_pem(&state_pem)
+        .map_err(|err| anyhow::anyhow!("failed to decode {}: {err}", state_path.display()))
+}
+
+fn load_trust_domain_meta_from_pem(
+    path: &std::path::Path,
+) -> Result<crate::trust::SignedTrustDomainMeta, anyhow::Error> {
+    let pem = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let payload = crate::trust::unwrap_armored(&pem, TRUST_DOMAIN_META_PEM_LABEL)
+        .map_err(|err| anyhow::anyhow!("failed to unwrap {}: {err}", path.display()))?;
+    crate::trust::from_cbor(&payload)
+        .map_err(|err| anyhow::anyhow!("failed to decode {}: {err}", path.display()))
+}
+
+
+fn load_network_bootstrap(
+    path: &std::path::Path,
+) -> Result<crate::trust::NetworkBootstrap, anyhow::Error> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    if let Ok(text) = std::str::from_utf8(&bytes)
+        && let Ok(bootstrap) = crate::trust::NetworkBootstrap::from_pem(text)
+    {
+        return Ok(bootstrap);
+    }
+    crate::trust::from_cbor(&bytes)
+        .map_err(|err| anyhow::anyhow!("failed to decode {}: {err}", path.display()))
+}
+
+pub async fn inject_trust_pool_from_config(
+    cfg: &TomlConfigLoader,
+    global_ctx: Arc<crate::common::global_ctx::GlobalCtx>,
+) -> Result<Option<Arc<tokio::sync::RwLock<crate::trust::TrustDomainPool>>>, anyhow::Error> {
+    let Some(trust_domain) = cfg.get_trust_domain() else {
+        return Ok(None);
+    };
+
+    let password = std::env::var(&trust_domain.sk_self_password_env).with_context(|| {
+        format!(
+            "failed to read sk_self password from env var {}",
+            trust_domain.sk_self_password_env
+        )
+    })?;
+
+    let trust_ctx = TrustDomainContext::load_from_dir(
+        trust_domain.domain_dir.as_path(),
+        &trust_domain.network_local_id,
+        &password,
+    )
+    .with_context(|| {
+        format!(
+            "failed to load trust domain context from {} for network_local_id {}",
+            trust_domain.domain_dir.display(),
+            trust_domain.network_local_id
+        )
+    })?;
+
+    global_ctx.set_trust_context(Arc::new(trust_ctx.clone())).await;
+
+    let mut pool = crate::trust::TrustDomainPool::new();
+    let self_root_pk = crate::common::trust_context::load_root_public_key(
+        &trust_domain.domain_dir.join("pk_root.pem"),
+    )
+    .map_err(|err| anyhow::anyhow!("failed to load self pk_root.pem: {err}"))?;
+    pool.add_root(self_root_pk.into());
+    let self_state = load_local_network_state(
+        trust_domain.domain_dir.as_path(),
+        &trust_domain.network_local_id,
+    )?;
+    pool.apply_network_state(self_state)
+        .map_err(|err| anyhow::anyhow!("failed to apply self network_state: {err}"))?;
+
+    for entry in trust_domain.relay_serving {
+        let root_bytes = crate::common::config::parse_root_pk_hex(&entry.foreign_root_pk_hex)
+            .map_err(|err| anyhow::anyhow!(
+                "invalid trust_domain.relay_serving.foreign_root_pk_hex '{}': {err}",
+                entry.foreign_root_pk_hex
+            ))?;
+        let foreign_root_pk = ed25519_dalek::VerifyingKey::from_bytes(&root_bytes)
+            .map_err(|err| anyhow::anyhow!(
+                "invalid foreign root public key '{}': {err}",
+                entry.foreign_root_pk_hex
+            ))?;
+        pool.add_root(foreign_root_pk.into());
+
+        if let Some(meta_path) = entry.foreign_trust_domain_meta_pem.as_ref() {
+            let meta = load_trust_domain_meta_from_pem(meta_path)?;
+            pool.apply_trust_domain_meta(meta)
+                .map_err(|err| anyhow::anyhow!("failed to apply {}: {err}", meta_path.display()))?;
+        }
+
+        if let Some(state_path) = entry.foreign_network_state_pem.as_ref() {
+            let state_pem = std::fs::read_to_string(state_path)
+                .with_context(|| format!("failed to read {}", state_path.display()))?;
+            let state = crate::trust::SignedNetworkState::from_pem(&state_pem)
+                .map_err(|err| anyhow::anyhow!("failed to decode {}: {err}", state_path.display()))?;
+            pool.apply_network_state(state)
+                .map_err(|err| anyhow::anyhow!("failed to apply {}: {err}", state_path.display()))?;
+        }
+
+        if let Some(bootstrap_path) = entry.foreign_bootstrap_cbor.as_ref() {
+            let bootstrap = load_network_bootstrap(bootstrap_path)?;
+            let tdid = bootstrap.trust_domain_id;
+            pool.apply_network_bootstrap(&tdid, bootstrap)
+                .map_err(|err| anyhow::anyhow!("failed to apply {}: {err}", bootstrap_path.display()))?;
+        }
+    }
+
+    Ok(Some(Arc::new(tokio::sync::RwLock::new(pool))))
 }
 
 pub struct EasyTierLauncher {
@@ -130,7 +299,9 @@ impl EasyTierLauncher {
         api_service: ArcMutApiService,
         data: Arc<EasyTierData>,
     ) -> Result<(), anyhow::Error> {
-        let mut instance = Instance::new(cfg);
+        let preload_ctx = Arc::new(crate::common::global_ctx::GlobalCtx::new(cfg.clone()));
+        let trust_pool = inject_trust_pool_from_config(&cfg, preload_ctx).await?;
+        let mut instance = Instance::new_with_trust_pool(cfg.clone(), trust_pool);
         let mut tasks = JoinSet::new();
 
         // Subscribe to global context events
@@ -502,28 +673,9 @@ impl NetworkConfig {
         cfg.set_dhcp(self.dhcp.unwrap_or_default());
         cfg.set_inst_name(self.network_name.clone().unwrap_or_default());
 
-        // The web UI does not expose credential inputs directly, but imported/saved
-        // NetworkConfig objects still need to preserve credential-mode instances via
-        // secure_mode.local_private_key + empty network_secret.
-        let credential_secret = if self.network_secret.is_some() {
-            None
-        } else {
-            self.secure_mode
-                .as_ref()
-                .and_then(|mode| mode.local_private_key.clone())
-                .filter(|s| !s.is_empty())
-        };
-
-        if credential_secret.is_some() {
-            cfg.set_network_identity(NetworkIdentity::new_credential(
-                self.network_name.clone().unwrap_or_default(),
-            ));
-        } else {
-            cfg.set_network_identity(NetworkIdentity::new(
-                self.network_name.clone().unwrap_or_default(),
-                self.network_secret.clone().unwrap_or_default(),
-            ));
-        }
+        cfg.set_network_identity(NetworkIdentity::new(
+            self.network_name.clone().unwrap_or_default(),
+        ));
 
         if !cfg.get_dhcp() {
             let virtual_ipv4 = self.virtual_ipv4.clone().unwrap_or_default();
@@ -550,6 +702,7 @@ impl NetworkConfig {
                         format!("failed to parse public server uri: {}", public_server_url)
                     })?,
                     peer_public_key: None,
+                    target_bootstrap_path: None,
                 }]);
             }
             NetworkingMethod::Manual => {
@@ -563,6 +716,7 @@ impl NetworkConfig {
                             .parse()
                             .with_context(|| format!("failed to parse peer uri: {}", peer_url))?,
                         peer_public_key: None,
+                        target_bootstrap_path: None,
                     });
                 }
                 if !peers.is_empty() {
@@ -696,23 +850,12 @@ impl NetworkConfig {
         {
             cfg.set_credential_file(Some(credential_file.into()));
         }
-
-        if let Some(credential_secret) = credential_secret {
-            cfg.set_secure_mode(Some(process_secure_mode_cfg(
-                crate::proto::common::SecureModeConfig {
-                    enabled: true,
-                    local_private_key: Some(credential_secret),
-                    local_public_key: None,
-                },
-            )?));
-        } else {
-            cfg.set_secure_mode(
-                self.secure_mode
-                    .clone()
-                    .map(process_secure_mode_cfg)
-                    .transpose()?,
-            );
-        }
+        cfg.set_secure_mode(
+            self.secure_mode
+                .clone()
+                .map(process_secure_mode_cfg)
+                .transpose()?,
+        );
 
         let mut flags = gen_default_flags();
         if let Some(latency_first) = self.latency_first {
@@ -869,7 +1012,6 @@ impl NetworkConfig {
 
         let network_identity = config.get_network_identity();
         result.network_name = Some(network_identity.network_name.clone());
-        result.network_secret = network_identity.network_secret;
 
         if let Some(ipv4) = config.get_ipv4() {
             result.virtual_ipv4 = Some(ipv4.address().to_string());
@@ -1051,18 +1193,23 @@ mod tests {
             let config = gen_default_config();
 
             config.set_id(uuid::Uuid::new_v4());
-
             config.set_dhcp(rng.gen_bool(0.5));
+
+            config.set_network_identity(crate::common::config::NetworkIdentity::new(format!(
+                "network-{}",
+                rng.r#gen::<u16>()
+            )));
+            config.set_inst_name(config.get_network_identity().network_name.clone());
 
             if rng.gen_bool(0.7) {
                 let hostname = format!("host-{}", rng.r#gen::<u16>());
                 config.set_hostname(Some(hostname));
             }
 
-            config.set_network_identity(crate::common::config::NetworkIdentity::new(
-                format!("network-{}", rng.r#gen::<u16>()),
-                format!("secret-{}", rng.r#gen::<u64>()),
-            ));
+            config.set_network_identity(crate::common::config::NetworkIdentity::new(format!(
+                "network-{}",
+                rng.r#gen::<u16>()
+            )));
             config.set_inst_name(config.get_network_identity().network_name.clone());
 
             if !config.get_dhcp() {
@@ -1088,6 +1235,7 @@ mod tests {
                 peers.push(crate::common::config::PeerConfig {
                     uri,
                     peer_public_key: None,
+                    target_bootstrap_path: None,
                 });
             }
             config.set_peers(peers);
@@ -1294,7 +1442,7 @@ mod tests {
         let credential_file = "/tmp/easytier-credentials.json".to_string();
 
         let config = gen_default_config();
-        config.set_network_identity(crate::common::config::NetworkIdentity::new_credential(
+        config.set_network_identity(crate::common::config::NetworkIdentity::new(
             "credential-net".to_string(),
         ));
         config.set_inst_name("credential-net".to_string());
@@ -1321,9 +1469,9 @@ mod tests {
 
         let generated_config = network_config.gen_config()?;
         assert_eq!(
-            generated_config.get_network_identity().network_secret,
-            None,
-            "credential mode should not be converted back into network_secret mode"
+            generated_config.get_network_identity().network_name,
+            "credential-net",
+            "credential mode should preserve network_name"
         );
         assert_eq!(
             generated_config

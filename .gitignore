@@ -43,3 +43,7 @@ easytier-gui/src-tauri/*.sys
 
 .direnv
 .flake-profile
+
+# privateNetwork local-only docs (symlinks to parent)
+/.design/
+/.agent

@@ -49,6 +49,9 @@ pub enum Error {
     #[error("secret key error: {0}")]
     SecretKeyError(String),
 
+    #[error("trust domain mismatch")]
+    TrustDomainMismatch,
+
     #[error("noise protocol error: {0}")]
     NoiseError(#[from] snow::Error),
 }

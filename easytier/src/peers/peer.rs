@@ -338,12 +338,14 @@ mod tests {
             global_ctx.clone(),
             local_tunnel,
             ps.clone(),
+            None,
         );
         let mut remote_peer_conn = PeerConn::new(
             remote_peer.peer_node_id,
             global_ctx.clone(),
             remote_tunnel,
             ps.clone(),
+            None,
         );
 
         assert!(!local_peer_conn.handshake_done());
@@ -395,14 +397,12 @@ mod tests {
         let shared_server_ctx = get_mock_global_ctx();
         shared_client_ctx
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec2".to_string()));
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
         shared_server_ctx
             .config
             .set_network_identity(NetworkIdentity {
                 network_name: "net2".to_string(),
-                network_secret: None,
-                network_secret_digest: None,
-            });
+                            });
         set_secure_mode_cfg(&shared_client_ctx, true);
         set_secure_mode_cfg(&shared_server_ctx, true);
         let remote_url: url::Url = shared_client_tunnel
@@ -423,18 +423,21 @@ mod tests {
                     .local_public_key
                     .unwrap(),
             ),
+            target_bootstrap_path: None,
         }]);
         let mut shared_client_conn = PeerConn::new(
             local_peer_id,
             shared_client_ctx,
             Box::new(shared_client_tunnel),
             ps.clone(),
+            None,
         );
         let mut shared_server_conn = PeerConn::new(
             remote_peer_id,
             shared_server_ctx,
             Box::new(shared_server_tunnel),
             ps.clone(),
+            None,
         );
         let (c1, s1) = tokio::join!(
             shared_client_conn.do_handshake_as_client(),
@@ -452,10 +455,10 @@ mod tests {
         let admin_server_ctx = get_mock_global_ctx();
         admin_client_ctx
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec2".to_string()));
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
         admin_server_ctx
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec2".to_string()));
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
         set_secure_mode_cfg(&admin_client_ctx, true);
         set_secure_mode_cfg(&admin_server_ctx, true);
         let mut admin_client_conn = PeerConn::new(
@@ -463,12 +466,14 @@ mod tests {
             admin_client_ctx,
             Box::new(admin_client_tunnel),
             Arc::new(PeerSessionStore::new()),
+            None,
         );
         let mut admin_server_conn = PeerConn::new(
             remote_peer_id,
             admin_server_ctx,
             Box::new(admin_server_tunnel),
             Arc::new(PeerSessionStore::new()),
+            None,
         );
         let (c2, s2) = tokio::join!(
             admin_client_conn.do_handshake_as_client(),
@@ -499,10 +504,10 @@ mod tests {
         let server_ctx_1 = get_mock_global_ctx();
         client_ctx_1
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
         server_ctx_1
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
         set_secure_mode_cfg(&client_ctx_1, true);
         set_secure_mode_cfg(&server_ctx_1, true);
         let mut client_conn_1 = PeerConn::new(
@@ -510,12 +515,14 @@ mod tests {
             client_ctx_1,
             Box::new(client_tunnel_1),
             ps.clone(),
+            None,
         );
         let mut server_conn_1 = PeerConn::new(
             remote_peer_id,
             server_ctx_1,
             Box::new(server_tunnel_1),
             ps.clone(),
+            None,
         );
         let (c1, s1) = tokio::join!(
             client_conn_1.do_handshake_as_client(),
@@ -529,10 +536,10 @@ mod tests {
         let server_ctx_2 = get_mock_global_ctx();
         client_ctx_2
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
         server_ctx_2
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
         set_secure_mode_cfg(&client_ctx_2, true);
         set_secure_mode_cfg(&server_ctx_2, true);
         let mut client_conn_2 = PeerConn::new(
@@ -540,12 +547,14 @@ mod tests {
             client_ctx_2,
             Box::new(client_tunnel_2),
             Arc::new(PeerSessionStore::new()),
+            None,
         );
         let mut server_conn_2 = PeerConn::new(
             remote_peer_id,
             server_ctx_2,
             Box::new(server_tunnel_2),
             Arc::new(PeerSessionStore::new()),
+            None,
         );
         let (c2, s2) = tokio::join!(
             client_conn_2.do_handshake_as_client(),

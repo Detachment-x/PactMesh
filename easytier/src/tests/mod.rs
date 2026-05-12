@@ -9,6 +9,8 @@ mod credential_tests;
 #[cfg(target_os = "linux")]
 mod upnp_test;
 
+pub mod trust_pool_fixture;
+
 use crate::common::PeerId;
 use crate::peers::peer_manager::PeerManager;
 

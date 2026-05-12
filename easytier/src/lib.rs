@@ -8,11 +8,11 @@ use clap_complete::{Generator, Shell};
 mod arch;
 mod gateway;
 pub mod instance;
-mod peer_center;
 mod vpn_portal;
 
 pub mod common;
 pub mod connector;
+pub mod dns;
 pub mod core;
 pub mod instance_manager;
 pub mod launcher;
@@ -22,7 +22,7 @@ pub mod rpc_service;
 pub mod service_manager;
 pub mod tunnel;
 pub mod utils;
-pub mod web_client;
+pub mod trust;
 
 #[cfg(test)]
 mod tests;

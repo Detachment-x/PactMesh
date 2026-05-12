@@ -218,7 +218,7 @@ impl CredentialManageRpc for PeerManagerRpcService {
         let pm = weak_upgrade(&self.peer_manager)?;
         let global_ctx = pm.get_global_ctx();
 
-        if global_ctx.get_network_identity().network_secret.is_none() {
+        if !global_ctx.config.get_secure_mode().map(|cfg| cfg.enabled).unwrap_or(false) {
             return Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
                 "only admin nodes (with network_secret) can generate credentials"
             )));
@@ -258,7 +258,7 @@ impl CredentialManageRpc for PeerManagerRpcService {
     ) -> Result<RevokeCredentialResponse, rpc_types::error::Error> {
         let pm = weak_upgrade(&self.peer_manager)?;
         let global_ctx = pm.get_global_ctx();
-        if global_ctx.get_network_identity().network_secret.is_none() {
+        if !global_ctx.config.get_secure_mode().map(|cfg| cfg.enabled).unwrap_or(false) {
             return Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
                 "only admin nodes (with network_secret) can revoke credentials"
             )));

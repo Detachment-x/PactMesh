@@ -54,6 +54,7 @@ async fn test_peer_manager_ipv6() {
         RouteAlgoType::Ospf,
         global_ctx.clone(),
         packet_sender,
+        None,
     );
 
     // Test IPv6 address lookup for unknown address

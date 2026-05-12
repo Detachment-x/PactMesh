@@ -143,14 +143,14 @@ async fn init_three_node_ex_with_inst3<F: Fn(TomlConfigLoader) -> TomlConfigLoad
             .get_conn_manager()
             .add_connector(WgTunnelConnector::new(
                 "wg://10.1.1.2:11011".parse().unwrap(),
-                WgConfig::new_from_network_identity(
-                    &inst2.get_global_ctx().get_network_identity().network_name,
-                    &inst2
-                        .get_global_ctx()
-                        .get_network_identity()
-                        .network_secret
-                        .unwrap_or_default(),
-                ),
+                {
+                    // FIXME(§10): trust-derived key path; zero-placeholder during transition
+                    let wg_psk = String::new();
+                    WgConfig::new_from_network_identity(
+                        &inst2.get_global_ctx().get_network_identity().network_name,
+                        &wg_psk,
+                    )
+                },
             ));
     } else if proto == "ws" {
         #[cfg(feature = "websocket")]
@@ -629,10 +629,7 @@ pub async fn subnet_proxy_three_node_test(
             }
 
             if cfg.get_inst_name() == "inst2" && relay_by_public_server {
-                cfg.set_network_identity(NetworkIdentity::new(
-                    "public".to_string(),
-                    "public".to_string(),
-                ));
+                cfg.set_network_identity(NetworkIdentity::new("public".to_string()));
             }
 
             if cfg.get_inst_name() == "inst1" {
@@ -800,14 +797,14 @@ pub async fn proxy_three_node_disconnect_test(#[values("tcp", "wg")] proto: &str
             .get_conn_manager()
             .add_connector(WgTunnelConnector::new(
                 "wg://10.1.2.3:11011".parse().unwrap(),
-                WgConfig::new_from_network_identity(
-                    &inst4.get_global_ctx().get_network_identity().network_name,
-                    &inst4
-                        .get_global_ctx()
-                        .get_network_identity()
-                        .network_secret
-                        .unwrap_or_default(),
-                ),
+                {
+                    // FIXME(§10): trust-derived key path; zero-placeholder during transition
+                    let wg_psk = String::new();
+                    WgConfig::new_from_network_identity(
+                        &inst4.get_global_ctx().get_network_identity().network_name,
+                        &wg_psk,
+                    )
+                },
             ));
     } else {
         unreachable!("not support");
@@ -939,7 +936,7 @@ pub async fn foreign_network_forward_nic_data() {
 
     let center_node_config = get_inst_config("inst1", Some("net_a"), "10.144.144.1", "fd00::1/64");
     center_node_config
-        .set_network_identity(NetworkIdentity::new("center".to_string(), "".to_string()));
+        .set_network_identity(NetworkIdentity::new("center".to_string()));
     let mut center_inst = Instance::new(center_node_config);
 
     let mut inst1 = Instance::new(get_inst_config(
@@ -1200,12 +1197,12 @@ pub async fn foreign_network_functional_cluster() {
 
     let center_node_config1 = get_inst_config("inst1", Some("net_a"), "10.144.144.1", "fd00::1/64");
     center_node_config1
-        .set_network_identity(NetworkIdentity::new("center".to_string(), "".to_string()));
+        .set_network_identity(NetworkIdentity::new("center".to_string()));
     let mut center_inst1 = Instance::new(center_node_config1);
 
     let center_node_config2 = get_inst_config("inst2", Some("net_b"), "10.144.144.2", "fd00::2/64");
     center_node_config2
-        .set_network_identity(NetworkIdentity::new("center".to_string(), "".to_string()));
+        .set_network_identity(NetworkIdentity::new("center".to_string()));
     let mut center_inst2 = Instance::new(center_node_config2);
 
     let inst1_config = get_inst_config("inst1", Some("net_c"), "10.144.145.1", "fd00:2::1/64");
@@ -1277,7 +1274,7 @@ pub async fn manual_reconnector(#[values(true, false)] is_foreign: bool) {
     let center_node_config = get_inst_config("inst1", Some("net_a"), "10.144.144.1", "fd00::1/64");
     if is_foreign {
         center_node_config
-            .set_network_identity(NetworkIdentity::new("center".to_string(), "".to_string()));
+            .set_network_identity(NetworkIdentity::new("center".to_string()));
     }
     let mut center_inst = Instance::new(center_node_config);
 
@@ -1491,10 +1488,7 @@ pub async fn relay_bps_limit_test(#[values(100, 200, 400, 800)] bps_limit: u64) 
         "udp",
         |cfg| {
             if cfg.get_inst_name() == "inst2" {
-                cfg.set_network_identity(NetworkIdentity::new(
-                    "public".to_string(),
-                    "public".to_string(),
-                ));
+                cfg.set_network_identity(NetworkIdentity::new("public".to_string()));
                 let mut f = cfg.get_flags();
                 f.foreign_relay_bps_limit = bps_limit * 1024;
                 cfg.set_flags(f);

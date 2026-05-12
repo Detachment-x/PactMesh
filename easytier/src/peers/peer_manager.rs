@@ -2,6 +2,10 @@ use anyhow::Context;
 use async_trait::async_trait;
 use cidr::{Ipv4Cidr, Ipv6Cidr};
 use dashmap::DashMap;
+use pnet::packet::{
+    Packet as _, ip::IpNextHeaderProtocols, ipv4::Ipv4Packet, ipv6::Ipv6Packet, tcp::TcpPacket,
+    udp::UdpPacket,
+};
 use std::collections::BTreeSet;
 use std::{
     fmt::Debug,
@@ -50,6 +54,10 @@ use crate::{
             ForeignNetworkRouteInfoEntry, ForeignNetworkRouteInfoKey, PeerIdentityType,
             RouteForeignNetworkSummary,
         },
+    },
+    trust::{
+        AclPolicy, BorrowedRelayProof, Cidr, DeviceFingerprint, MemberCert, PacketTuple,
+        PeerMatchContext, RelayGrantTable, TrustDomainPool, decide, from_cbor,
     },
     tunnel::{
         self, Tunnel, TunnelConnector,
@@ -183,7 +191,16 @@ pub struct PeerManager {
     traffic_metrics: Arc<TrafficMetricRecorder>,
 
     peer_session_store: Arc<PeerSessionStore>,
+    trust_pool: Option<Arc<RwLock<TrustDomainPool>>>,
+    peer_trust_acl_identities: Arc<DashMap<PeerId, TrustAclPeerIdentity>>,
     is_secure_mode_enabled: bool,
+    relay_grants: Arc<RelayGrantTable>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TrustAclPeerIdentity {
+    pub(crate) fingerprint: DeviceFingerprint,
+    pub(crate) proxy_cidrs: Vec<Cidr>,
 }
 
 impl Debug for PeerManager {
@@ -234,6 +251,7 @@ impl PeerManager {
         route_algo: RouteAlgoType,
         global_ctx: ArcGlobalCtx,
         nic_channel: PacketRecvChan,
+        trust_pool: Option<Arc<RwLock<TrustDomainPool>>>,
     ) -> Self {
         let my_peer_id = rand::random();
 
@@ -244,6 +262,7 @@ impl PeerManager {
             my_peer_id,
         ));
         let peer_session_store = Arc::new(PeerSessionStore::new());
+        let relay_grants = Arc::new(global_ctx.config.get_relay_grant_table());
 
         let encryptor = if global_ctx.get_flags().enable_encryption {
             // 只有在启用加密时才使用工厂函数选择算法
@@ -305,6 +324,7 @@ impl PeerManager {
             peer_session_store.clone(),
             packet_send.clone(),
             Self::build_foreign_network_manager_accessor(&peers),
+            relay_grants.clone(),
         ));
         let foreign_network_client = Arc::new(ForeignNetworkClient::new(
             global_ctx.clone(),
@@ -445,8 +465,213 @@ impl PeerManager {
             traffic_metrics,
 
             peer_session_store,
+            trust_pool,
+            peer_trust_acl_identities: Arc::new(DashMap::new()),
             is_secure_mode_enabled,
+            relay_grants,
         }
+    }
+
+    fn device_fingerprint_from_member_cert(cert: &MemberCert) -> DeviceFingerprint {
+        use sha2::{Digest, Sha256};
+
+        DeviceFingerprint::new(Sha256::digest(cert.details.device_pk.as_bytes()).into())
+    }
+
+    fn proxy_cidrs_from_cert(cert: &MemberCert) -> Vec<Cidr> {
+        cert.details
+            .capabilities
+            .can_proxy_subnet
+            .iter()
+            .map(|cidr| Cidr::new(cidr.network(), cidr.prefix()))
+            .collect()
+    }
+
+    fn remember_trust_acl_identity(&self, peer_id: PeerId, peer_conn: &PeerConn) {
+        let Some(cert) = peer_conn.peer_member_cert() else {
+            return;
+        };
+        let identity = TrustAclPeerIdentity {
+            fingerprint: Self::device_fingerprint_from_member_cert(&cert),
+            proxy_cidrs: Self::proxy_cidrs_from_cert(&cert),
+        };
+        self.peer_trust_acl_identities.insert(peer_id, identity);
+    }
+
+    fn trust_acl_packet_tuple(packet: &ZCPacket) -> Option<PacketTuple> {
+        let payload = packet.payload();
+        let ipv4 = Ipv4Packet::new(payload)?;
+        if ipv4.get_version() == 4 {
+            let (src_port, dst_port) = match ipv4.get_next_level_protocol() {
+                IpNextHeaderProtocols::Tcp => {
+                    let tcp = TcpPacket::new(ipv4.payload())?;
+                    (tcp.get_source(), tcp.get_destination())
+                }
+                IpNextHeaderProtocols::Udp => {
+                    let udp = UdpPacket::new(ipv4.payload())?;
+                    (udp.get_source(), udp.get_destination())
+                }
+                _ => (0, 0),
+            };
+            return Some(PacketTuple {
+                src_ip: IpAddr::V4(ipv4.get_source()),
+                dst_ip: IpAddr::V4(ipv4.get_destination()),
+                proto: ipv4.get_next_level_protocol().0,
+                src_port,
+                dst_port,
+            });
+        }
+
+        if ipv4.get_version() == 6 {
+            let ipv6 = Ipv6Packet::new(payload)?;
+            let (src_port, dst_port) = match ipv6.get_next_header() {
+                IpNextHeaderProtocols::Tcp => {
+                    let tcp = TcpPacket::new(ipv6.payload())?;
+                    (tcp.get_source(), tcp.get_destination())
+                }
+                IpNextHeaderProtocols::Udp => {
+                    let udp = UdpPacket::new(ipv6.payload())?;
+                    (udp.get_source(), udp.get_destination())
+                }
+                _ => (0, 0),
+            };
+            return Some(PacketTuple {
+                src_ip: IpAddr::V6(ipv6.get_source()),
+                dst_ip: IpAddr::V6(ipv6.get_destination()),
+                proto: ipv6.get_next_header().0,
+                src_port,
+                dst_port,
+            });
+        }
+
+        None
+    }
+
+    fn proxy_cidrs_for_trust_acl(
+        identities: &DashMap<PeerId, TrustAclPeerIdentity>,
+        local: &TrustAclPeerIdentity,
+    ) -> Vec<(DeviceFingerprint, Cidr)> {
+        let mut proxy_cidrs = Vec::new();
+        proxy_cidrs.extend(
+            local
+                .proxy_cidrs
+                .iter()
+                .copied()
+                .map(|cidr| (local.fingerprint, cidr)),
+        );
+        for identity in identities.iter() {
+            proxy_cidrs.extend(
+                identity
+                    .proxy_cidrs
+                    .iter()
+                    .copied()
+                    .map(|cidr| (identity.fingerprint, cidr)),
+            );
+        }
+        proxy_cidrs
+    }
+
+    fn trust_acl_decision(
+        policy: &AclPolicy,
+        packet: &PacketTuple,
+        src: &TrustAclPeerIdentity,
+        dst: &TrustAclPeerIdentity,
+        proxy_cidrs: &[(DeviceFingerprint, Cidr)],
+    ) -> bool {
+        let src_ctx = PeerMatchContext {
+            peer_fp: &src.fingerprint,
+            tags: &policy.tags,
+            proxy_cidrs,
+        };
+        let dst_ctx = PeerMatchContext {
+            peer_fp: &dst.fingerprint,
+            tags: &policy.tags,
+            proxy_cidrs,
+        };
+        matches!(decide(policy, packet, src_ctx, dst_ctx), crate::trust::Action::Accept)
+    }
+
+    pub(crate) async fn process_packet_with_trust_acl(
+        packet: &ZCPacket,
+        is_in: bool,
+        global_ctx: &ArcGlobalCtx,
+        trust_pool: &Option<Arc<RwLock<TrustDomainPool>>>,
+        identities: &Arc<DashMap<PeerId, TrustAclPeerIdentity>>,
+    ) -> bool {
+        let peer_id = if is_in {
+            packet.get_src_peer_id()
+        } else {
+            packet.get_dst_peer_id()
+        };
+
+        Self::process_packet_with_trust_acl_for_peer(
+            packet, is_in, peer_id, global_ctx, trust_pool, identities,
+        )
+        .await
+    }
+
+    async fn process_packet_with_trust_acl_for_peer(
+        packet: &ZCPacket,
+        is_in: bool,
+        peer_id: Option<PeerId>,
+        global_ctx: &ArcGlobalCtx,
+        trust_pool: &Option<Arc<RwLock<TrustDomainPool>>>,
+        identities: &Arc<DashMap<PeerId, TrustAclPeerIdentity>>,
+    ) -> bool {
+        if packet
+            .peer_manager_header()
+            .is_none_or(|hdr| hdr.packet_type != PacketType::Data as u8)
+        {
+            return true;
+        }
+
+        let Some(trust_pool) = trust_pool else {
+            return true;
+        };
+        let Some(trust_ctx) = global_ctx.get_trust_context().await else {
+            return true;
+        };
+        let Some(tuple) = Self::trust_acl_packet_tuple(packet) else {
+            return true;
+        };
+
+        let Some(peer_id) = peer_id else {
+            return true;
+        };
+        let Some(remote) = identities.get(&peer_id).map(|entry| entry.clone()) else {
+            return true;
+        };
+        let local = TrustAclPeerIdentity {
+            fingerprint: Self::device_fingerprint_from_member_cert(&trust_ctx.member_cert),
+            proxy_cidrs: Self::proxy_cidrs_from_cert(&trust_ctx.member_cert),
+        };
+
+        let pool = trust_pool.read().await;
+        let Some(state) = pool.network_state(&trust_ctx.trust_domain_id, &trust_ctx.network_local_id) else {
+            return true;
+        };
+        if state.details.payload.acl.is_empty() {
+            return true;
+        }
+        let Ok(policy) = from_cbor::<AclPolicy>(&state.details.payload.acl) else {
+            tracing::warn!("trust ACL decode failed; fail-open for packet");
+            return true;
+        };
+
+        let proxy_cidrs = Self::proxy_cidrs_for_trust_acl(identities, &local);
+        let allowed = if is_in {
+            Self::trust_acl_decision(&policy, &tuple, &remote, &local, &proxy_cidrs)
+        } else {
+            Self::trust_acl_decision(&policy, &tuple, &local, &remote, &proxy_cidrs)
+        };
+        if !allowed {
+            tracing::debug!(?peer_id, is_in, "trust ACL dropped packet");
+        }
+        allowed
+    }
+
+    pub fn relay_grants(&self) -> Arc<RelayGrantTable> {
+        self.relay_grants.clone()
     }
 
     pub fn set_allow_loopback_tunnel(&self, allow_loopback_tunnel: bool) {
@@ -534,8 +759,6 @@ impl PeerManager {
     }
 
     async fn add_new_peer_conn(&self, peer_conn: PeerConn) -> Result<(), Error> {
-        let my_identity = self.global_ctx.get_network_identity();
-        let peer_identity = peer_conn.get_network_identity();
         let conn_info = peer_conn.get_conn_info();
         let local_secure_mode = self
             .global_ctx
@@ -552,31 +775,13 @@ impl PeerManager {
             ));
         }
 
-        // For credential nodes, network_secret_digest is either None or all-zeros
-        // (all-zeros when received over the wire via handshake).
-        // In this case, only compare network_name.
-        let my_digest_empty = my_identity
-            .network_secret_digest
-            .as_ref()
-            .is_none_or(|d| d.iter().all(|b| *b == 0));
-        let peer_digest_empty = peer_identity
-            .network_secret_digest
-            .as_ref()
-            .is_none_or(|d| d.iter().all(|b| *b == 0));
-
-        let identity_ok = if my_digest_empty || peer_digest_empty {
-            // Credential node: only check network_name
-            my_identity.network_name == peer_identity.network_name
-        } else {
-            my_identity == peer_identity
-        };
-
-        if !identity_ok {
+        if !peer_conn.matches_local_trust_domain().await {
             return Err(Error::SecretKeyError(
-                "network identity not match".to_string(),
+                "trust domain identity not match".to_string(),
             ));
         }
         let peer_id = peer_conn.get_peer_id();
+        self.remember_trust_acl_identity(peer_id, &peer_conn);
         self.peers.add_new_peer_conn(peer_conn).await?;
         self.clear_recent_traffic(peer_id);
         Ok(())
@@ -603,6 +808,7 @@ impl PeerManager {
             tunnel,
             peer_id_hint,
             self.peer_session_store.clone(),
+            self.trust_pool.clone(),
         );
         peer.set_is_hole_punched(!is_directly_connected);
         peer.do_handshake_as_client().await?;
@@ -652,6 +858,45 @@ impl PeerManager {
             .await
     }
 
+
+    pub async fn try_direct_connect_with_borrowed_proof<C>(
+        &self,
+        mut connector: C,
+        borrowed_proof: BorrowedRelayProof,
+    ) -> Result<(
+        PeerId,
+        PeerConnId,
+        Arc<crate::peers::peer_conn::PeerConnCloseNotify>,
+    ), Error>
+    where
+        C: TunnelConnector + Debug,
+    {
+        let ns = self.global_ctx.net_ns.clone();
+        let t = ns
+            .run_async(|| async move { connector.connect().await })
+            .await?;
+        let mut peer = PeerConn::new(
+            self.my_peer_id,
+            self.global_ctx.clone(),
+            t,
+            self.peer_session_store.clone(),
+            self.trust_pool.clone(),
+        );
+        peer.set_client_borrowed_proof(Some(borrowed_proof));
+        peer.do_handshake_as_client().await?;
+        let conn_id = peer.get_conn_id();
+        let peer_id = peer.get_peer_id();
+        let close_notifier = peer.get_close_notifier();
+        if peer.get_network_identity().network_name
+            == self.global_ctx.get_network_identity().network_name
+        {
+            self.add_new_peer_conn(peer).await?;
+        } else {
+            self.foreign_network_client.add_new_peer_conn(peer).await?;
+        }
+        Ok((peer_id, conn_id, close_notifier))
+    }
+
     // avoid loop back to virtual network
     fn check_remote_addr_not_from_virtual_network(
         &self,
@@ -698,16 +943,21 @@ impl PeerManager {
         tracing::info!("add tunnel as server start");
         self.check_remote_addr_not_from_virtual_network(&tunnel)?;
 
+        let trust_ctx = self
+            .global_ctx
+            .get_trust_context()
+            .await
+            .ok_or_else(|| Error::SecretKeyError("trust context not configured".to_string()))?;
+
         let mut conn = PeerConn::new(
             self.my_peer_id,
             self.global_ctx.clone(),
             tunnel,
             self.peer_session_store.clone(),
+            self.trust_pool.clone(),
         );
-        conn.do_handshake_as_server_ext(|peer, network_name:&str| {
-            if network_name
-                == self.global_ctx.get_network_identity().network_name
-            {
+        conn.do_handshake_as_server_ext(|peer, network_name: &str| {
+            if network_name == self.global_ctx.get_network_identity().network_name {
                 return Ok(());
             }
 
@@ -715,9 +965,13 @@ impl PeerManager {
                 .foreign_network_manager
                 .get_network_peer_id(network_name);
             if peer_id.is_none() {
-                peer_id = Some(*self.reserved_my_peer_id_map.entry(network_name.to_string()).or_insert_with(|| {
-                    rand::random::<PeerId>()
-                }).value());
+                peer_id = Some(
+                    *self
+                        .reserved_my_peer_id_map
+                        .entry(network_name.to_string())
+                        .or_insert_with(rand::random::<PeerId>)
+                        .value(),
+                );
             }
             peer.set_peer_id(peer_id.unwrap());
 
@@ -732,25 +986,15 @@ impl PeerManager {
         })
         .await?;
 
-        let peer_identity = conn.get_network_identity();
-        let peer_network_name = peer_identity.network_name.clone();
-        let my_identity = self.global_ctx.get_network_identity();
-        let is_local_network = peer_network_name == my_identity.network_name;
-        let trusted_foreign_credential =
-            matches!(conn.get_peer_identity_type(), PeerIdentityType::Credential)
-                && self
-                    .foreign_network_manager
-                    .is_existing_credential_pubkey_trusted(
-                        &peer_network_name,
-                        &conn.get_conn_info().noise_remote_static_pubkey,
-                    );
-        let foreign_network_allowed =
-            conn.matches_local_network_secret() || trusted_foreign_credential;
+        let peer_network_name = conn.get_network_identity().network_name.clone();
+        let is_local_network = conn.matches_local_trust_domain().await;
+        let foreign_network_allowed = conn
+            .peer_trust_domain_id()
+            .is_some_and(|tdid| tdid == trust_ctx.trust_domain_id);
 
-        if !is_local_network && self.global_ctx.get_flags().private_mode && !foreign_network_allowed
-        {
+        if !is_local_network && self.global_ctx.get_flags().private_mode && !foreign_network_allowed {
             return Err(Error::SecretKeyError(
-                "private mode is turned on, foreign network secret mismatch".to_string(),
+                "private mode is turned on, foreign trust domain mismatch".to_string(),
             ));
         }
 
@@ -884,15 +1128,12 @@ impl PeerManager {
         let compress_algo = self.data_compress_algo;
         let acl_filter = self.global_ctx.get_acl_filter().clone();
         let global_ctx = self.global_ctx.clone();
+        let trust_pool = self.trust_pool.clone();
+        let peer_trust_acl_identities = self.peer_trust_acl_identities.clone();
         let secure_mode_enabled = self.is_secure_mode_enabled;
         let stats_mgr = self.global_ctx.stats_manager().clone();
         let route = self.get_route();
-        let is_credential_node = self
-            .global_ctx
-            .get_network_identity()
-            .network_secret
-            .is_none()
-            && secure_mode_enabled;
+        let is_credential_node = secure_mode_enabled;
 
         let label_set =
             LabelSet::new().with_label_type(LabelType::NetworkName(global_ctx.get_network_name()));
@@ -1057,6 +1298,18 @@ impl PeerManager {
                     }
 
                     compress_rx_bytes_after.add(ret.buf_len() as u64);
+
+                    if !Self::process_packet_with_trust_acl(
+                        &ret,
+                        true,
+                        &global_ctx,
+                        &trust_pool,
+                        &peer_trust_acl_identities,
+                    )
+                    .await
+                    {
+                        continue;
+                    }
 
                     if !acl_filter.process_packet_with_acl(
                         &ret,
@@ -1610,6 +1863,27 @@ impl PeerManager {
             return Ok(());
         }
 
+        let mut allowed_dst_peers = Vec::new();
+        for peer_id in dst_peers {
+            if Self::process_packet_with_trust_acl_for_peer(
+                &msg,
+                false,
+                Some(peer_id),
+                &self.global_ctx,
+                &self.trust_pool,
+                &self.peer_trust_acl_identities,
+            )
+            .await
+            {
+                allowed_dst_peers.push(peer_id);
+            }
+        }
+        let dst_peers = allowed_dst_peers;
+        if dst_peers.is_empty() {
+            tracing::debug!(?ip_addr, "trust ACL dropped packet for all candidate peers");
+            return Ok(());
+        }
+
         self.self_tx_counters
             .compress_tx_bytes_before
             .add(msg.buf_len() as u64);
@@ -1810,6 +2084,25 @@ impl PeerManager {
 
     pub fn get_peer_rpc_mgr(&self) -> Arc<PeerRpcManager> {
         self.peer_rpc_mgr.clone()
+    }
+
+
+    pub fn get_trust_pool(&self) -> Option<Arc<RwLock<TrustDomainPool>>> {
+        self.trust_pool.clone()
+    }
+
+    pub fn mark_borrowed_relay_used(
+        &self,
+        target_peer_id: Option<PeerId>,
+        relay_peer_id: PeerId,
+        relay_trust_domain: crate::trust::TrustDomainId,
+    ) {
+        tracing::info!(
+            ?target_peer_id,
+            ?relay_peer_id,
+            ?relay_trust_domain,
+            "borrowed relay used"
+        );
     }
 
     pub fn get_peer_session_store(&self) -> Arc<PeerSessionStore> {
@@ -2054,6 +2347,10 @@ mod tests {
             common::{CompressionAlgoPb, NatType, PeerFeatureFlag},
             peer_rpc::SecureAuthLevel,
         },
+        trust::{
+            ACL_SCHEMA_VERSION, AclPolicy, AclRule, Action as TrustAclAction, DeviceFingerprint,
+            PortSpec, Proto as TrustAclProto, Selector, TagName, from_cbor, to_canonical_cbor,
+        },
         tunnel::{
             TunnelConnector, TunnelListener,
             common::tests::wait_for_condition,
@@ -2063,7 +2360,7 @@ mod tests {
         },
     };
 
-    use super::PeerManager;
+    use super::{PeerManager, TrustAclPeerIdentity};
 
     async fn create_lazy_peer_manager() -> Arc<PeerManager> {
         let peer_mgr = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
@@ -2086,6 +2383,100 @@ mod tests {
         LabelSet::new().with_label_type(LabelType::NetworkName(
             peer_mgr.get_global_ctx().get_network_name(),
         ))
+    }
+
+    fn fp(byte: u8) -> DeviceFingerprint {
+        DeviceFingerprint::new([byte; 32])
+    }
+
+    fn tag(name: &str) -> TagName {
+        TagName::try_from_str(name).unwrap()
+    }
+
+    fn tcp_packet(src: [u8; 4], dst: [u8; 4], dst_port: u16) -> ZCPacket {
+        let mut payload = [0u8; 40];
+        let payload_len = payload.len() as u16;
+        payload[0] = 0x45;
+        payload[2..4].copy_from_slice(&payload_len.to_be_bytes());
+        payload[8] = 64;
+        payload[9] = 6;
+        payload[12..16].copy_from_slice(&src);
+        payload[16..20].copy_from_slice(&dst);
+        payload[20..22].copy_from_slice(&55555u16.to_be_bytes());
+        payload[22..24].copy_from_slice(&dst_port.to_be_bytes());
+        let mut packet = ZCPacket::new_with_payload(&payload);
+        packet.fill_peer_manager_hdr(10, 20, PacketType::Data as u8);
+        packet
+    }
+
+    fn drop_client_to_server_ssh_policy() -> AclPolicy {
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert(tag("client"), vec![fp(1)]);
+        tags.insert(tag("server"), vec![fp(2)]);
+        AclPolicy {
+            tags,
+            rules: vec![AclRule {
+                action: TrustAclAction::Drop,
+                src: vec![Selector::Tag(tag("client"))],
+                dst: vec![Selector::Tag(tag("server"))],
+                proto: TrustAclProto::Tcp,
+                ports: Some(vec![PortSpec::Single(22)]),
+            }],
+            default_action: TrustAclAction::Accept,
+            schema_version: ACL_SCHEMA_VERSION,
+        }
+    }
+
+    #[test]
+    fn trust_acl_decision_drops_matching_rule() {
+        let policy = drop_client_to_server_ssh_policy();
+        let packet = PeerManager::trust_acl_packet_tuple(&tcp_packet([10, 0, 0, 1], [10, 0, 0, 2], 22))
+            .unwrap();
+        let client = TrustAclPeerIdentity {
+            fingerprint: fp(1),
+            proxy_cidrs: Vec::new(),
+        };
+        let server = TrustAclPeerIdentity {
+            fingerprint: fp(2),
+            proxy_cidrs: Vec::new(),
+        };
+
+        assert!(!PeerManager::trust_acl_decision(
+            &policy,
+            &packet,
+            &client,
+            &server,
+            &[],
+        ));
+    }
+
+    #[test]
+    fn trust_acl_decision_allows_non_matching_port() {
+        let policy = drop_client_to_server_ssh_policy();
+        let packet = PeerManager::trust_acl_packet_tuple(&tcp_packet([10, 0, 0, 1], [10, 0, 0, 2], 80))
+            .unwrap();
+        let client = TrustAclPeerIdentity {
+            fingerprint: fp(1),
+            proxy_cidrs: Vec::new(),
+        };
+        let server = TrustAclPeerIdentity {
+            fingerprint: fp(2),
+            proxy_cidrs: Vec::new(),
+        };
+
+        assert!(PeerManager::trust_acl_decision(
+            &policy,
+            &packet,
+            &client,
+            &server,
+            &[],
+        ));
+    }
+
+    #[test]
+    fn trust_acl_fail_open_when_policy_cbor_is_empty_or_invalid() {
+        assert!(from_cbor::<AclPolicy>(&[]).is_err());
+        assert!(!to_canonical_cbor(&drop_client_to_server_ssh_policy()).is_empty());
     }
 
     #[test]
@@ -2266,6 +2657,7 @@ mod tests {
             RouteAlgoType::None,
             get_mock_global_ctx(),
             s,
+            None,
         ));
         let dst_peer_id = peer_mgr.my_peer_id();
         let network_labels = LabelSet::new().with_label_type(LabelType::NetworkName(
@@ -2658,11 +3050,11 @@ mod tests {
         peer_mgr_a
             .get_global_ctx()
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
         peer_mgr_b
             .get_global_ctx()
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
 
         set_secure_mode_cfg(&peer_mgr_a.get_global_ctx(), true);
         set_secure_mode_cfg(&peer_mgr_b.get_global_ctx(), true);
@@ -2694,7 +3086,7 @@ mod tests {
                     conns.iter().any(|c| {
                         c.noise_local_static_pubkey.len() == 32
                             && c.noise_remote_static_pubkey.len() == 32
-                            && c.secure_auth_level == SecureAuthLevel::NetworkSecretConfirmed as i32
+                            && c.secure_auth_level == SecureAuthLevel::TrustDomainVerified as i32
                     })
                 }
             },
@@ -2722,7 +3114,7 @@ mod tests {
                     conns.iter().any(|c| {
                         c.noise_local_static_pubkey.len() == 32
                             && c.noise_remote_static_pubkey.len() == 32
-                            && c.secure_auth_level == SecureAuthLevel::NetworkSecretConfirmed as i32
+                            && c.secure_auth_level == SecureAuthLevel::TrustDomainVerified as i32
                     })
                 }
             },
@@ -2739,11 +3131,11 @@ mod tests {
         peer_mgr_client
             .get_global_ctx()
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
         peer_mgr_server
             .get_global_ctx()
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
 
         set_secure_mode_cfg(&peer_mgr_server.get_global_ctx(), true);
 
@@ -2782,11 +3174,11 @@ mod tests {
         peer_mgr_client
             .get_global_ctx()
             .config
-            .set_network_identity(NetworkIdentity::new("net1".to_string(), "sec1".to_string()));
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
         peer_mgr_server
             .get_global_ctx()
             .config
-            .set_network_identity(NetworkIdentity::new_credential("net1".to_string()));
+            .set_network_identity(NetworkIdentity::new("net1".to_string()));
 
         set_secure_mode_cfg(&peer_mgr_server.get_global_ctx(), true);
 
@@ -2826,14 +3218,12 @@ mod tests {
         peer_mgr_client
             .get_global_ctx()
             .config
-            .set_network_identity(NetworkIdentity::new("user".to_string(), "sec1".to_string()));
+            .set_network_identity(NetworkIdentity::new("user".to_string()));
         peer_mgr_server
             .get_global_ctx()
             .config
             .set_network_identity(NetworkIdentity {
                 network_name: "shared".to_string(),
-                network_secret: None,
-                network_secret_digest: None,
             });
 
         set_secure_mode_cfg(&peer_mgr_client.get_global_ctx(), true);
@@ -2860,6 +3250,7 @@ mod tests {
             crate::common::config::PeerConfig {
                 uri: server_remote_url,
                 peer_public_key: Some(server_pub_b64.clone()),
+                target_bootstrap_path: None,
             },
         ]);
 
@@ -3033,7 +3424,7 @@ mod tests {
                 data_compress_algo: CompressionAlgoPb::Zstd.into(),
                 ..Default::default()
             });
-            let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, mock_global_ctx, s));
+            let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, mock_global_ctx, s, None));
             peer_mgr.run().await.unwrap();
             peer_mgr
         };

@@ -2,17 +2,9 @@
 resolver = "2"
 members = [
     "easytier",
-    "easytier-gui/src-tauri",
     "easytier-rpc-build",
-    "easytier-web",
-    "easytier-contrib/easytier-ffi",
-    "easytier-contrib/easytier-uptime",
-    "easytier-contrib/easytier-android-jni",
 ]
-default-members = ["easytier", "easytier-web"]
-exclude = [
-    "easytier-contrib/easytier-ohrs", # it needs ohrs sdk
-]
+default-members = ["easytier"]
 
 [workspace.package]
 edition = "2024"

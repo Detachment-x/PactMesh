@@ -8,16 +8,14 @@ use crate::{
     instance_manager::NetworkInstanceManager,
     proto::{
         api::{
-            config::ConfigRpcServer,
+            config::{ConfigRpcServer, TrustJoinManageRpcServer},
             instance::{
                 AclManageRpcServer, ConnectorManageRpcServer, CredentialManageRpcServer,
                 MappedListenerManageRpcServer, PeerManageRpcServer, PortForwardManageRpcServer,
                 StatsRpcServer, TcpProxyRpcServer, VpnPortalRpcServer,
             },
             logger::LoggerRpcServer,
-            manage::WebClientServiceServer,
         },
-        peer_rpc::PeerCenterRpcServer,
         rpc_impl::{service_registry::ServiceRegistry, standalone::StandAloneServer},
         rpc_types::error::Error,
     },
@@ -26,12 +24,11 @@ use crate::{
         connector_manage::ConnectorManageRpcService, credential_manage::CredentialManageRpcService,
         instance_manage::InstanceManageRpcService, logger::LoggerRpcService,
         mapped_listener_manage::MappedListenerManageRpcService,
-        peer_center::PeerCenterManageRpcService, peer_manage::PeerManageRpcService,
-        port_forward_manage::PortForwardManageRpcService, protected_port,
-        proxy::TcpProxyRpcService, stats::StatsRpcService, vpn_portal::VpnPortalRpcService,
+        peer_manage::PeerManageRpcService, port_forward_manage::PortForwardManageRpcService,
+        protected_port, proxy::TcpProxyRpcService, stats::StatsRpcService,
+        trust_join_manage::TrustJoinManageRpcService, vpn_portal::VpnPortalRpcService,
     },
     tunnel::{TunnelListener, tcp::TcpTunnelListener},
-    web_client::{DefaultHooks, WebClientHooks},
 };
 
 pub struct ApiRpcServer<T: TunnelListener + 'static> {
@@ -100,7 +97,7 @@ impl<T: TunnelListener + 'static> Drop for ApiRpcServer<T> {
 pub fn register_api_rpc_service(
     instance_manager: &Arc<NetworkInstanceManager>,
     registry: &ServiceRegistry,
-    hooks: Option<Arc<dyn WebClientHooks>>,
+    _hooks: Option<Arc<dyn std::any::Any + Send + Sync>>,
 ) {
     registry.register(
         PeerManageRpcServer::new(PeerManageRpcService::new(instance_manager.clone())),
@@ -157,15 +154,14 @@ pub fn register_api_rpc_service(
     );
 
     registry.register(
-        WebClientServiceServer::new(InstanceManageRpcService::new(
-            instance_manager.clone(),
-            hooks.unwrap_or(Arc::new(DefaultHooks)),
-        )),
+        TrustJoinManageRpcServer::new(TrustJoinManageRpcService::new(instance_manager.clone())),
         "",
     );
 
     registry.register(
-        PeerCenterRpcServer::new(PeerCenterManageRpcService::new(instance_manager.clone())),
+        crate::proto::api::manage::WebClientServiceServer::new(InstanceManageRpcService::new(
+            instance_manager.clone(),
+        )),
         "",
     );
 

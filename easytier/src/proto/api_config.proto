@@ -82,3 +82,69 @@ service ConfigRpc {
   rpc PatchConfig(PatchConfigRequest) returns (PatchConfigResponse);
   rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
 }
+
+message SubmitJoinRequestRequest {
+  api.instance.InstanceIdentifier instance = 1;
+  bytes join_request_cbor = 2;
+  uint32 ttl = 3;
+}
+
+message SubmitJoinRequestResponse { uint32 hop_count = 1; }
+
+message FetchPendingMemberCertRequest {
+  api.instance.InstanceIdentifier instance = 1;
+  bytes trust_domain_id = 2;
+  string network_local_id = 3;
+  bytes applicant_pk = 4;
+}
+
+message FetchPendingMemberCertResponse {
+  bool found = 1;
+  bytes member_cert_cbor = 2;
+}
+
+message PendingJoinRequestSummary {
+  bytes trust_domain_id = 1;
+  string network_local_id = 2;
+  bytes applicant_pk = 3;
+  string device_label = 4;
+  string hint = 5;
+}
+
+message ApproveJoinRequestRequest {
+  api.instance.InstanceIdentifier instance = 1;
+  bytes trust_domain_id = 2;
+  string network_local_id = 3;
+  bytes applicant_pk = 4;
+}
+
+message ApproveJoinRequestResponse {
+  bytes member_cert_cbor = 1;
+}
+
+message RejectJoinRequestRequest {
+  api.instance.InstanceIdentifier instance = 1;
+  bytes trust_domain_id = 2;
+  string network_local_id = 3;
+  bytes applicant_pk = 4;
+}
+
+message RejectJoinRequestResponse {}
+
+message ListPendingJoinRequestsRequest {
+  api.instance.InstanceIdentifier instance = 1;
+  bytes trust_domain_id = 2;
+  string network_local_id = 3;
+}
+
+message ListPendingJoinRequestsResponse {
+  repeated PendingJoinRequestSummary requests = 1;
+}
+
+service TrustJoinManageRpc {
+  rpc SubmitJoinRequest(SubmitJoinRequestRequest) returns (SubmitJoinRequestResponse);
+  rpc FetchPendingMemberCert(FetchPendingMemberCertRequest) returns (FetchPendingMemberCertResponse);
+  rpc ApproveJoinRequest(ApproveJoinRequestRequest) returns (ApproveJoinRequestResponse);
+  rpc RejectJoinRequest(RejectJoinRequestRequest) returns (RejectJoinRequestResponse);
+  rpc ListPendingJoinRequests(ListPendingJoinRequestsRequest) returns (ListPendingJoinRequestsResponse);
+}

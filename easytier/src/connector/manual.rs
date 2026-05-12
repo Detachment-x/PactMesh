@@ -3,11 +3,11 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use dashmap::DashSet;
+use dashmap::{DashMap, DashSet};
 use tokio::{sync::mpsc, task::JoinSet, time::timeout};
 
 use crate::{
-    common::{PeerId, dns::socket_addrs, join_joinset_background},
+    common::{PeerId, config::PeerConfig, dns::socket_addrs, join_joinset_background},
     peers::peer_conn::PeerConnId,
     proto::{
         api::instance::{
@@ -27,6 +27,7 @@ use crate::{
         netns::NetNS,
     },
     peers::peer_manager::PeerManager,
+    trust::{BorrowedRelayProof, BorrowedRelayResolver, NetworkBootstrap},
     use_global_var,
 };
 
@@ -46,6 +47,7 @@ struct ConnectorManagerData {
     reconnecting: DashSet<url::Url>,
     peer_manager: Weak<PeerManager>,
     alive_conn_urls: Arc<DashSet<url::Url>>,
+    borrowed_failures: DashMap<url::Url, u32>,
     // user removed connector urls
     removed_conn_urls: Arc<DashSet<url::Url>>,
     net_ns: NetNS,
@@ -70,6 +72,7 @@ impl ManualConnectorManager {
                 reconnecting: DashSet::new(),
                 peer_manager: Arc::downgrade(&peer_manager),
                 alive_conn_urls: Arc::new(DashSet::new()),
+                borrowed_failures: DashMap::new(),
                 removed_conn_urls: Arc::new(DashSet::new()),
                 net_ns: global_ctx.net_ns.clone(),
                 global_ctx,
@@ -93,6 +96,11 @@ impl ManualConnectorManager {
 
     pub async fn add_connector_by_url(&self, url: url::Url) -> Result<(), Error> {
         self.data.connectors.insert(url);
+        Ok(())
+    }
+
+    pub async fn add_connector_peer_config(&self, peer: PeerConfig) -> Result<(), Error> {
+        self.data.connectors.insert(peer.uri);
         Ok(())
     }
 
@@ -204,6 +212,8 @@ impl ManualConnectorManager {
         for it in data.removed_conn_urls.iter() {
             let url = it.key();
             if data.connectors.remove(url).is_some() {
+                data.borrowed_failures.remove(url);
+                data.alive_conn_urls.remove(url);
                 tracing::warn!("connector: {}, removed", url);
                 continue;
             } else if data.reconnecting.contains(url) {
@@ -228,6 +238,9 @@ impl ManualConnectorManager {
             return ret;
         };
         for url in data.connectors.iter().map(|x| x.key().clone()) {
+            if data.alive_conn_urls.contains(&url) {
+                continue;
+            }
             if !pm.get_peer_map().is_client_url_alive(&url)
                 && !pm
                     .get_foreign_network_client()
@@ -235,6 +248,8 @@ impl ManualConnectorManager {
                     .is_client_url_alive(&url)
             {
                 ret.insert(url.clone());
+            } else {
+                data.borrowed_failures.remove(&url);
             }
         }
         ret
@@ -261,6 +276,113 @@ impl ManualConnectorManager {
         tracing::info!("reconnect succ: {} {} {}", peer_id, conn_id, dead_url);
         Ok(ReconnResult {
             dead_url,
+            peer_id,
+            conn_id,
+        })
+    }
+
+
+    fn load_target_bootstrap(path: &std::path::Path) -> Result<NetworkBootstrap, Error> {
+        let bytes = std::fs::read(path).map_err(|err| Error::AnyhowError(err.into()))?;
+        if let Ok(text) = std::str::from_utf8(&bytes)
+            && let Ok(bootstrap) = NetworkBootstrap::from_pem(text)
+        {
+            return Ok(bootstrap);
+        }
+        crate::trust::from_cbor(&bytes)
+            .map_err(|err| Error::AnyhowError(anyhow::anyhow!(err.to_string())))
+    }
+
+    fn peer_config_for_url(data: &ConnectorManagerData, dead_url: &url::Url) -> Option<PeerConfig> {
+        data.global_ctx
+            .config
+            .get_peers()
+            .into_iter()
+            .find(|peer| peer.uri == *dead_url)
+    }
+
+    fn mark_borrowed_conn_alive_until_close(
+        data: Arc<ConnectorManagerData>,
+        dead_url: url::Url,
+        close_notifier: Arc<crate::peers::peer_conn::PeerConnCloseNotify>,
+    ) {
+        data.alive_conn_urls.insert(dead_url.clone());
+        tokio::spawn(async move {
+            if let Some(mut waiter) = close_notifier.get_waiter().await {
+                let _ = waiter.recv().await;
+            }
+            data.alive_conn_urls.remove(&dead_url);
+        });
+    }
+
+    async fn try_borrowed_relay_connect(
+        data: Arc<ConnectorManagerData>,
+        dead_url: &url::Url,
+    ) -> Result<ReconnResult, Error> {
+        let Some(peer_cfg) = Self::peer_config_for_url(&data, dead_url) else {
+            return Err(Error::AnyhowError(anyhow::anyhow!(
+                "connector target not found for {}",
+                dead_url
+            )));
+        };
+        let Some(target_bootstrap_path) = peer_cfg.target_bootstrap_path else {
+            return Err(Error::AnyhowError(anyhow::anyhow!(
+                "target bootstrap path is not configured for {}",
+                dead_url
+            )));
+        };
+
+        let bootstrap = Self::load_target_bootstrap(&target_bootstrap_path)?;
+        let Some(pm) = data.peer_manager.upgrade() else {
+            return Err(Error::AnyhowError(anyhow::anyhow!(
+                "peer manager is gone, cannot reconnect"
+            )));
+        };
+        let Some(trust_pool) = pm.get_trust_pool() else {
+            return Err(Error::AnyhowError(anyhow::anyhow!(
+                "trust pool is not configured"
+            )));
+        };
+        let candidates = {
+            let pool = trust_pool.read().await;
+            BorrowedRelayResolver::candidates_for_target(&bootstrap.trust_domain_id, &pool)
+        };
+        let candidate = candidates.into_iter().next().ok_or_else(|| {
+            Error::AnyhowError(anyhow::anyhow!(
+                "no borrowed relay candidates for {}",
+                bootstrap.trust_domain_id
+            ))
+        })?;
+
+        let trust_ctx = data
+            .global_ctx
+            .get_trust_context()
+            .await
+            .ok_or_else(|| Error::AnyhowError(anyhow::anyhow!("trust context not configured")))?;
+        let borrowed_proof = BorrowedRelayProof {
+            trust_domain_id: trust_ctx.trust_domain_id,
+            member_cert: trust_ctx.member_cert.clone(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_secs(),
+        };
+
+        let connector = create_connector_by_url(
+            candidate.relay_url.as_str(),
+            &data.global_ctx.clone(),
+            IpVersion::Both,
+        )
+        .await?;
+        data.global_ctx
+            .issue_event(GlobalCtxEvent::Connecting(connector.remote_url()));
+        let (peer_id, conn_id, close_notifier) = pm
+            .try_direct_connect_with_borrowed_proof(connector, borrowed_proof)
+            .await?;
+        pm.mark_borrowed_relay_used(None, peer_id, candidate.foreign_trust_domain_id);
+        Self::mark_borrowed_conn_alive_until_close(data, dead_url.clone(), close_notifier);
+        Ok(ReconnResult {
+            dead_url: dead_url.to_string(),
             peer_id,
             conn_id,
         })
@@ -312,6 +434,14 @@ impl ManualConnectorManager {
         let mut reconn_ret = Err(Error::AnyhowError(anyhow::anyhow!(
             "cannot get ip from url"
         )));
+        let failures = data
+            .borrowed_failures
+            .entry(dead_url.clone())
+            .and_modify(|count| *count += 1)
+            .or_insert(1);
+        let should_try_borrowed = *failures >= 3;
+        drop(failures);
+
         for ip_version in ip_versions {
             let use_long_timeout = dead_url.scheme() == "http"
                 || dead_url.scheme() == "https"
@@ -353,6 +483,15 @@ impl ManualConnectorManager {
                 format!("{:?}", ip_version),
                 format!("{:?}", reconn_ret),
             ));
+        }
+
+        if should_try_borrowed {
+            match Self::try_borrowed_relay_connect(data.clone(), &dead_url).await {
+                Ok(ret) => return Ok(ret),
+                Err(err) => {
+                    reconn_ret = Err(err);
+                }
+            }
         }
 
         reconn_ret

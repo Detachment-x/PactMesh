@@ -264,16 +264,7 @@ impl RoutePeerInfo {
 
             noise_static_pubkey,
 
-            // Only admin nodes (holding network_secret) publish trusted credential pubkeys
-            trusted_credential_pubkeys: if let Some(network_secret) =
-                global_ctx.get_network_identity().network_secret
-            {
-                global_ctx
-                    .get_credential_manager()
-                    .get_trusted_pubkeys(&network_secret)
-            } else {
-                Vec::new()
-            },
+            trusted_credential_pubkeys: Vec::new(),
 
             ..Default::default()
         }
@@ -2096,8 +2087,7 @@ impl PeerRouteServiceImpl {
     }
 
     fn get_my_secret_digest(&self) -> Option<Vec<u8>> {
-        let ni = self.global_ctx.get_network_identity();
-        ni.network_secret_digest.map(|d| d.to_vec())
+        Some(vec![0u8; 32])
     }
 
     fn is_active_non_reusable_credential_peer(&self, peer_id: PeerId) -> bool {
@@ -2108,15 +2098,10 @@ impl PeerRouteServiceImpl {
 
     fn is_credential_node(&self) -> bool {
         self.global_ctx
-            .get_network_identity()
-            .network_secret
-            .is_none()
-            && self
-                .global_ctx
-                .config
-                .get_secure_mode()
-                .map(|c| c.enabled)
-                .unwrap_or(false)
+            .config
+            .get_secure_mode()
+            .map(|c| c.enabled)
+            .unwrap_or(false)
     }
 
     fn get_or_create_session(&self, dst_peer_id: PeerId) -> Arc<SyncRouteSession> {
@@ -2338,14 +2323,6 @@ impl PeerRouteServiceImpl {
             }
             let network_identity = NetworkIdentity {
                 network_name: key.network_name.clone(),
-                network_secret: None,
-                network_secret_digest: Some(
-                    entry
-                        .network_secret_digest
-                        .clone()
-                        .try_into()
-                        .unwrap_or_default(),
-                ),
             };
             self.foreign_network_owner_map
                 .entry(network_identity)
@@ -2630,11 +2607,7 @@ impl PeerRouteServiceImpl {
 
     async fn refresh_acl_groups(&self) -> bool {
         let my_peer_info_updated = self.update_my_peer_info();
-        let trust_admin_groups_without_proof = self
-            .global_ctx
-            .get_network_identity()
-            .network_secret
-            .is_none();
+        let trust_admin_groups_without_proof = true;
 
         let peer_infos: Vec<_> = self
             .synced_route_info
@@ -2667,7 +2640,7 @@ impl PeerRouteServiceImpl {
         let network_identity = self.global_ctx.get_network_identity();
         let (untrusted, global_trusted_keys) = self
             .synced_route_info
-            .verify_and_update_credential_trusts(network_identity.network_secret.as_deref());
+            .verify_and_update_credential_trusts(None);
         self.global_ctx
             .update_trusted_keys(global_trusted_keys, &network_identity.network_name);
 
@@ -2684,7 +2657,7 @@ impl PeerRouteServiceImpl {
         let (untrusted, global_trusted_keys) = self
             .synced_route_info
             .verify_and_update_credential_trusts_with_active_peers(
-                network_identity.network_secret.as_deref(),
+                None,
                 |peer_id| self.is_active_non_reusable_credential_peer(peer_id),
             );
         self.global_ctx
@@ -3442,11 +3415,7 @@ impl RouteSessionManager {
                 (peer_infos, raw_peer_infos.as_ref().unwrap())
             };
             if !pi.is_empty() {
-                let trust_admin_groups_without_proof = service_impl
-                    .global_ctx
-                    .get_network_identity()
-                    .network_secret
-                    .is_none();
+                let trust_admin_groups_without_proof = true;
                 service_impl.synced_route_info.update_peer_infos(
                     my_peer_id,
                     service_impl.my_peer_route_id,
@@ -4197,6 +4166,7 @@ mod tests {
             RouteAlgoType::None,
             get_mock_global_ctx(),
             s,
+            None,
         ));
         replace_stun_info_collector(peer_mgr.clone(), NatType::Unknown);
         peer_mgr.run().await.unwrap();
@@ -4828,10 +4798,7 @@ mod tests {
 
         let service_impl = PeerRouteServiceImpl::new(
             SELF_PEER_ID,
-            get_mock_global_ctx_with_network(Some(NetworkIdentity::new(
-                "test-net".to_string(),
-                NETWORK_SECRET.to_string(),
-            ))),
+            get_mock_global_ctx_with_network(Some(NetworkIdentity::new("test-net".to_string()))),
         );
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -5324,7 +5291,7 @@ mod tests {
         let service_impl = PeerRouteServiceImpl::new(
             1,
             get_mock_global_ctx_with_network(Some(
-                crate::common::config::NetworkIdentity::new_credential("net1".to_string()),
+                crate::common::config::NetworkIdentity::new("net1".to_string()),
             )),
         );
 
@@ -5367,7 +5334,7 @@ mod tests {
         let service_impl = PeerRouteServiceImpl::new(
             1,
             get_mock_global_ctx_with_network(Some(
-                crate::common::config::NetworkIdentity::new_credential("net1".to_string()),
+                crate::common::config::NetworkIdentity::new("net1".to_string()),
             )),
         );
         let now = std::time::SystemTime::now()

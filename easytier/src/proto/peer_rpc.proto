@@ -236,41 +236,15 @@ service TcpHolePunchRpc {
   rpc ExchangeMappedAddr(TcpHolePunchRequest) returns (TcpHolePunchResponse);
 }
 
-message DirectConnectedPeerInfo { int32 latency_ms = 1; }
-
-message PeerInfoForGlobalMap {
-  map<uint32, DirectConnectedPeerInfo> direct_peers = 1;
-}
-
-message ReportPeersRequest {
-  uint32 my_peer_id = 1;
-  PeerInfoForGlobalMap peer_infos = 2;
-}
-
-message ReportPeersResponse {}
-
-message GlobalPeerMap { map<uint32, PeerInfoForGlobalMap> map = 1; }
-
-message GetGlobalPeerMapRequest { uint64 digest = 1; }
-
-message GetGlobalPeerMapResponse {
-  map<uint32, PeerInfoForGlobalMap> global_peer_map = 1;
-  optional uint64 digest = 2;
-}
-
-service PeerCenterRpc {
-  rpc ReportPeers(ReportPeersRequest) returns (ReportPeersResponse);
-  rpc GetGlobalPeerMap(GetGlobalPeerMapRequest)
-      returns (GetGlobalPeerMapResponse);
-}
-
 message HandshakeRequest {
   uint32 magic = 1;
   uint32 my_peer_id = 2;
   uint32 version = 3;
   repeated string features = 4;
   string network_name = 5;
-  bytes network_secret_digest = 6;
+  bytes member_cert_cbor = 6;
+  bytes applicant_nonce = 7;
+  bytes applicant_signature = 8;
 }
 
 message KcpConnData {
@@ -282,7 +256,7 @@ enum SecureAuthLevel {
   None = 0;
   EncryptedUnauthenticated = 1;
   PeerVerified = 2;
-  NetworkSecretConfirmed = 3;
+  TrustDomainVerified = 3;
 }
 
 enum PeerIdentityType {
@@ -314,8 +288,9 @@ message PeerConnNoiseMsg2Pb {
   uint32 initial_epoch = 6;
   common.UUID b_conn_id = 7;
   common.UUID a_conn_id_echo = 8;
-  optional bytes secret_proof_32 = 9;
+  reserved 9;
   string server_encryption_algorithm = 10;
+  bytes member_cert_cbor = 11;
 }
 
 message RelayNoiseMsg1Pb {
@@ -338,6 +313,77 @@ message RelayNoiseMsg2Pb {
 message PeerConnNoiseMsg3Pb {
   common.UUID a_conn_id_echo = 1;
   common.UUID b_conn_id_echo = 2;
-  optional bytes secret_proof_32 = 3;
-  bytes secret_digest = 4;
+  reserved 3;
+  bytes member_cert_cbor = 4;
+  optional bytes borrowed_relay_proof = 5;
 }
+
+message ConfigResourceSelector {
+  oneof selector {
+    NetworkStateKey network_state = 1;
+    bytes trust_domain_meta_id = 2;
+    PendingCertKey pending_cert_for = 3;
+  }
+}
+
+message NetworkStateKey {
+  bytes trust_domain_id = 1;
+  string network_local_id = 2;
+}
+
+message PendingCertKey {
+  bytes trust_domain_id = 1;
+  string network_local_id = 2;
+  bytes applicant_pk = 3;
+}
+
+message QueryConfigVersionRequest { repeated ConfigResourceSelector resources = 1; }
+
+message QueryConfigVersionResponse { repeated ResourceVersion versions = 1; }
+
+message ResourceVersion {
+  ConfigResourceSelector selector = 1;
+  uint64 version = 2;
+  bytes content_digest = 3;
+}
+
+message FetchConfigRequest {
+  ConfigResourceSelector selector = 1;
+  bytes caller_member_cert_bytes = 2;
+}
+
+message FetchConfigResponse {
+  bytes payload_cbor = 1;
+  uint64 version = 2;
+}
+
+service ConfigSyncRpc {
+  rpc QueryConfigVersion(QueryConfigVersionRequest)
+      returns (QueryConfigVersionResponse);
+  rpc FetchConfig(FetchConfigRequest) returns (FetchConfigResponse);
+}
+
+message ForwardJoinRequestRequest {
+  bytes inner_cbor = 1;
+  uint32 ttl = 2;
+  repeated bytes seen_node_pks = 3;
+}
+
+message ForwardJoinRequestResponse { uint32 hop_count = 1; }
+
+service JoinForwardRpc {
+  rpc ForwardJoinRequest(ForwardJoinRequestRequest)
+      returns (ForwardJoinRequestResponse);
+}
+
+// CBOR-encoded MemberCert; verification happens after decode.
+message MemberCertEnvelope { bytes cbor = 1; }
+
+// CBOR-encoded SignedNetworkState; verification happens after decode.
+message NetworkStateEnvelope { bytes cbor = 1; }
+
+// CBOR-encoded SignedTrustDomainMeta; verification happens after decode.
+message TrustDomainMetaEnvelope { bytes cbor = 1; }
+
+// CBOR-encoded JoinRequest; verification happens after decode.
+message JoinRequestEnvelope { bytes cbor = 1; }

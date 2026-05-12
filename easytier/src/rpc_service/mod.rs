@@ -3,12 +3,12 @@ mod config;
 mod connector_manage;
 mod credential_manage;
 mod mapped_listener_manage;
-mod peer_center;
 mod peer_manage;
 mod port_forward_manage;
 pub(crate) mod protected_port;
 mod proxy;
 mod stats;
+mod trust_join_manage;
 mod vpn_portal;
 
 pub mod api;
@@ -70,13 +70,10 @@ pub trait InstanceRpcService: Sync + Send {
     ) -> &dyn crate::proto::api::config::ConfigRpc<
         Controller = crate::proto::rpc_types::controller::BaseController,
     >;
-    fn get_peer_center_service(
+    fn get_trust_join_manage_service(
         &self,
-    ) -> std::sync::Arc<
-        dyn crate::proto::peer_rpc::PeerCenterRpc<
-                Controller = crate::proto::rpc_types::controller::BaseController,
-            > + Send
-            + Sync,
+    ) -> &dyn crate::proto::api::config::TrustJoinManageRpc<
+        Controller = crate::proto::rpc_types::controller::BaseController,
     >;
     fn get_credential_manage_service(
         &self,

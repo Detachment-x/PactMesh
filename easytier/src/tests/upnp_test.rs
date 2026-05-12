@@ -1391,7 +1391,7 @@ async fn create_test_peer_manager(
     global_ctx.replace_stun_info_collector(stun_collector);
 
     let (packet_tx, _packet_rx) = create_packet_recv_chan();
-    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, global_ctx, packet_tx));
+    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, global_ctx, packet_tx, None));
     peer_mgr.run().await.unwrap();
     peer_mgr
 }

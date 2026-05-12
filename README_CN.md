@@ -1,325 +1,94 @@
-# EasyTier
+# privateNetwork
 
-[![Github release](https://img.shields.io/github/v/tag/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/releases)
-[![GitHub](https://img.shields.io/github/license/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/blob/main/LICENSE)
-[![GitHub last commit](https://img.shields.io/github/last-commit/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/commits/main)
-[![GitHub issues](https://img.shields.io/github/issues/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/issues)
-[![GitHub Core Actions](https://github.com/EasyTier/EasyTier/actions/workflows/core.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/core.yml)
-[![GitHub GUI Actions](https://github.com/EasyTier/EasyTier/actions/workflows/gui.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/gui.yml)
-[![GitHub Test Actions](https://github.com/EasyTier/EasyTier/actions/workflows/test.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/test.yml)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/EasyTier/EasyTier)
+privateNetwork 是一个基于 EasyTier 的 fork：保留 EasyTier 的去中心化数据面，并在其上增加签名信任层与签名配置层，面向私人和小团队内网穿透场景。
 
-[简体中文](/README_CN.md) | [English](/README.md)
+本仓库基于 EasyTier commit `5a1668c`（2026-04-25）。EasyTier 提供 P2P 传输、NAT 穿透、路由、隧道与 RPC 基础设施；privateNetwork 增加自治信任域、成员证书、签名网络配置、ACL、MagicDNS hosts 渲染，以及跨信任域中继借用。
 
-> ✨ 一个由 Rust 和 Tokio 驱动的简单、安全、去中心化的异地组网方案
+## 状态
 
-<p align="center">
-<img src="assets/config-page.png" width="300" alt="配置页面">
-<img src="assets/running-page.png" width="300" alt="运行页面">
-</p>
+本 fork 面向私人和小团队使用。它不是企业 IAM 产品、托管控制面或多租户 SaaS 系统。
 
-📚 **[完整文档](https://easytier.cn)** | 🖥️ **[Web 控制台](https://easytier.cn/web)** | 📝 **[下载发布版本](https://github.com/EasyTier/EasyTier/releases)** | 🧩 **[第三方工具](https://easytier.cn/guide/installation_gui.html#%E7%AC%AC%E4%B8%89%E6%96%B9%E5%9B%BE%E5%BD%A2%E7%95%8C%E9%9D%A2)** | ❤️ **[赞助](#赞助)**
+当前核心实现聚焦于：
 
-## 特性
+- 以 Ed25519 `PK_root` / `SK_root` 为根的信任域。
+- 通过不可信渠道分发但可本地验签的 `NetworkState` 与 `TrustDomainMeta`。
+- 用于设备准入、吊销、临时禁用/恢复、hostname 分配的成员证书。
+- 接入 EasyTier 握手路径和数据包路径的 trust-aware 验证与 ACL。
+- 用于离线/在线分发公开信任域信息的 bootstrap invite/import 流程。
 
-### 核心特性
+## 信任模型
 
-- 🔒 **去中心化**：节点平等且独立，无需中心化服务
-- 🚀 **易于使用**：支持通过网页、客户端和命令行多种操作方式
-- 🌍 **跨平台**：支持 Win/MacOS/Linux/FreeBSD/Android 和 X86/ARM/MIPS 架构
-- 🔐 **安全**：AES-GCM 或 WireGuard 加密，防止中间人攻击
+每个用户拥有自己的信任域。信任域由 `trust_domain_id = SHA-256(PK_root)` 标识，持有 `SK_root` 的根设备负责签发该信任域内的成员证书和网络配置。
 
-### 高级功能
+配置分发渠道不需要可信。节点在接受 `NetworkState`、`TrustDomainMeta`、成员证书或 join 相关 payload 前，会在本地验证签名。这样配置可以通过普通 EasyTier 路径、中继、文件、QR/bootstrap payload 或后续同步通道传播，但这些传播通道本身不拥有授权能力。
 
-- 🔌 **高效 NAT 穿透**：支持 UDP 和 IPv6 穿透，可在 NAT4-NAT4 网络中工作
-- 🌐 **子网代理**：节点可以共享子网供其他节点访问
-- 🔄 **智能路由**：延迟优先和自动路由选择，提供最佳网络体验
-- ⚡ **高性能**：整个链路零拷贝，支持 TCP/UDP/WSS/WG 协议
+## 跨信任域中继借用
 
-### 网络优化
+小团队信任域往往只有少量节点，且通常没有稳定的公网地址。privateNetwork 允许一个信任域显式地把自己的中继借给另一个信任域使用——既不合并两个信任域，也不共享私钥。
 
-- 📊 **UDP 丢包抗性**：KCP/QUIC 代理在高丢包环境下优化延迟和带宽
-- 🔧 **Web 管理**：通过 Web 界面轻松配置和监控
-- 🛠️ **零配置**：静态链接的可执行文件，简单部署
+该机制以 `TrustDomainMeta` 为载体：
+
+- 由 `SK_root` 签名的 `TrustDomainMeta.active_relays` 列出本信任域名下的中继节点。
+- `TrustDomainMeta.outbound_grants` 显式列出对外信任域的借用授权（含 `foreign_root_pk` + `foreign_trust_domain_id` + 能力位 + 过期时间）。
+- 借用方节点在握手时附带 `BorrowedRelayProof`（从出借方签名后的 `TrustDomainMeta` 切片构造）；中继节点用本地 resolver 验证证明，过程不涉及任何中央协调机构。
+- 能力位（`can_relay_data`、`can_assist_holepunch`）和过期时间随授权一并签名，借用容量、生命周期和范围都由出借方的根设备掌控。
+
+这让非对称拓扑变得可行：一个网络条件好的朋友可以借给你几个月的中继容量，借期签进证书内，无共享密钥，也不需要联合运维。
 
 ## 快速开始
 
-### 📥 安装
-
-选择最适合您需求的安装方式：
-
-Linux（推荐）：
-```bash
-curl -fsSL "https://github.com/EasyTier/EasyTier/blob/main/script/install.sh?raw=true" | sudo bash -s install
-```
-
-Homebrew（MacOS/Linux）：
-```bash
-brew tap brewforge/chinese
-brew install --cask easytier-gui
-```
-
-Windows（推荐，请以管理员权限运行）：
-```powershell
-irm "https://github.com/EasyTier/EasyTier/blob/main/script/install.ps1?raw=true" | iex
-```
-
-通过 cargo 安装（最新开发版本）：
-```bash
-cargo install --git https://github.com/EasyTier/EasyTier.git easytier
-```
-
-[下载预编译文件](https://github.com/EasyTier/EasyTier/releases)（推荐，支持所有平台）
-
-[通过 Docker 安装](https://easytier.cn/guide/installation.html#%E5%AE%89%E8%A3%85%E6%96%B9%E5%BC%8F)
-
-[安装 OpenWrt ipk 软件包](https://github.com/EasyTier/luci-app-easytier)
-
-附加步骤：
-
-[一键注册系统服务](https://easytier.cn/guide/network/oneclick-install-as-service.html)（系统启动时自动后台运行）
-
-### 🚀 基本用法
-
-#### 使用共享节点快速组网
-
-EasyTier 支持使用共享节点快速组网。当您没有公网 IP 时，可以使用公共共享节点。节点会自动尝试 NAT 穿透并建立 P2P 连接。当 P2P 失败时，数据将通过共享节点中继。
-
-使用共享节点时，每个进入网络的节点需要提供相同的 `--network-name` 和 `--network-secret` 参数作为网络的唯一标识符。
-
-以两个节点为例（请使用更复杂的网络名称以避免冲突）：
-
-1. 在节点 A 上运行：
+具体二进制名称和服务封装取决于你的构建/打包方式；信任层的基本流程如下：
 
 ```bash
-# 以管理员权限运行
-sudo easytier-core -d --network-name abc --network-secret abc -p tcp://<共享节点IP>:11010
+# 1. 创建信任域。根私钥会在本地加密保存。
+PNW_ROOT_PASSPHRASE='change-me-long-passphrase' \
+  easytier-cli trust create-domain --label home --out-dir ~/.config/privateNetwork/trust-domains
+
+# 2. 在该信任域下创建网络。
+PNW_ROOT_PASSPHRASE='change-me-long-passphrase' \
+  easytier-cli trust create-network <trust_domain_id> home --default-action accept
+
+# 3. 为新设备导出 invite/bootstrap。
+easytier-cli trust invite <trust_domain_id> home \
+  --seed tcp://<reachable-node>:11010 \
+  --format url
+
+# 4. 在新设备上接受 invite，并生成 join request。
+PNW_DEVICE_PASSPHRASE='change-me-device-passphrase' \
+  easytier-cli trust accept-invite '<privatenetwork://join?...>' \
+  --device-label laptop \
+  --hint 'Alice laptop'
 ```
 
-2. 在节点 B 上运行：
+如果要走在线审批流程，需要先运行启用了 trust services 的 daemon/instance，然后在 `trust accept-invite` 中使用 `--online`。不使用 `--online` 时，该命令只会准备本地设备密钥和待提交的 join request artifact，后续可再提交。
+
+## 构建与测试
+
+项目基线是 Rust 1.95。
 
 ```bash
-# 以管理员权限运行
-sudo easytier-core -d --network-name abc --network-secret abc -p tcp://<共享节点IP>:11010
+cargo build -p easytier
+cargo test --test trust
+cargo clippy -- -D warnings
 ```
 
-执行成功后，可以使用 `easytier-cli` 检查网络状态：
+部分集成测试和 e2e 测试会触发 EasyTier 隧道行为，具体运行权限取决于测试目标和操作系统网络能力。
 
-```text
-| ipv4         | hostname       | cost  | lat_ms | loss_rate | rx_bytes | tx_bytes | tunnel_proto | nat_type | id         | version         |
-| ------------ | -------------- | ----- | ------ | --------- | -------- | -------- | ------------ | -------- | ---------- | --------------- |
-| 10.126.126.1 | abc-1          | Local | *      | *         | *        | *        | udp          | FullCone | 439804259  | 2.6.2-70e69a38~ |
-| 10.126.126.2 | abc-2          | p2p   | 3.452  | 0         | 17.33 kB | 20.42 kB | udp          | FullCone | 390879727  | 2.6.2-70e69a38~ |
-|              | PublicServer_a | p2p   | 27.796 | 0.000     | 50.01 kB | 67.46 kB | tcp          | Unknown  | 3771642457 | 2.6.2-70e69a38~ |
-```
+## 设计文档
 
-您可以测试节点之间的连通性：
+- [部署指南](deploy_CN.md)（英文版 [deploy.md](deploy.md)）
+- [信任与配置模型设计](trust-and-config-design.md)
+- [ACL schema 草案](acl-schema-draft.md)
+- [第三方声明与许可证审计](THIRD_PARTY_NOTICES.md)
 
-```bash
-# 测试连通性
-ping 10.126.126.1
-ping 10.126.126.2
-```
+`THIRD_PARTY_NOTICES.md` 用于记录 EasyTier 来源、许可证声明和依赖许可证审计结果。
 
-注意：如果无法 ping 通，可能是防火墙阻止了入站流量。请关闭防火墙或添加允许规则。
+## 与 EasyTier 的关系
 
-为了提高可用性，您可以同时连接多个共享节点：
+privateNetwork 是 fork，不是对上游 EasyTier 的替代。该 fork 保留 EasyTier 的核心网络架构，把治理层从共享 `network_secret` 字符串改为显式信任域和签名配置。
 
-```bash
-# 连接多个共享节点
-sudo easytier-core -d --network-name abc --network-secret abc -p tcp://<公共节点IP>:11010 -p udp://<公共节点IP>:11010
-```
-
-#### 去中心化组网
-
-EasyTier 本质上是去中心化的，没有服务器和客户端的区分。只要一个设备能与虚拟网络中的任何节点通信，它就可以加入虚拟网络。以下是如何设置去中心化网络：
-
-1. 启动第一个节点（节点 A）：
-
-```bash
-# 启动第一个节点
-sudo easytier-core -i 10.144.144.1
-```
-
-启动后，该节点将默认监听以下端口：
-- TCP：11010
-- UDP：11010
-- WebSocket：11011
-- WebSocket SSL：11012
-- WireGuard：11013
-
-2. 连接第二个节点（节点 B）：
-
-```bash
-# 使用第一个节点的公网 IP 连接
-sudo easytier-core -i 10.144.144.2 -p udp://第一个节点的公网IP:11010
-```
-
-3. 验证连接：
-
-```bash
-# 测试连通性
-ping 10.144.144.2
-
-# 查看已连接的对等节点
-easytier-cli peer
-
-# 查看路由信息
-easytier-cli route
-
-# 查看本地节点信息
-easytier-cli node
-```
-
-更多节点要加入网络，可以使用 `-p` 参数连接到网络中的任何现有节点：
-
-```bash
-# 使用任何现有节点的公网 IP 连接
-sudo easytier-core -i 10.144.144.3 -p udp://任何现有节点的公网IP:11010
-```
-
-### 🔍 高级功能
-
-#### 子网代理
-
-假设网络拓扑如下，节点 B 想要与其他节点共享其可访问的子网 10.1.1.0/24：
-
-```mermaid
-flowchart LR
-
-subgraph 节点 A 公网 IP 22.1.1.1
-nodea[EasyTier<br/>10.144.144.1]
-end
-
-subgraph 节点 B
-nodeb[EasyTier<br/>10.144.144.2]
-end
-
-id1[[10.1.1.0/24]]
-
-nodea <--> nodeb <-.-> id1
-```
-
-要共享子网，在启动 EasyTier 时添加 `-n` 参数：
-
-```bash
-# 与其他节点共享子网 10.1.1.0/24
-sudo easytier-core -i 10.144.144.2 -n 10.1.1.0/24
-```
-
-子网代理信息将自动同步到虚拟网络中的每个节点，每个节点将自动配置相应的路由。您可以验证子网代理设置：
-
-1. 检查路由信息是否已同步（proxy_cidrs 列显示代理的子网）：
-
-```bash
-# 查看路由信息
-easytier-cli route
-```
-
-![路由信息](/assets/image-3.png)
-
-2. 测试是否可以访问代理子网中的节点：
-
-```bash
-# 测试到代理子网的连通性
-ping 10.1.1.2
-```
-
-#### WireGuard 集成
-
-EasyTier 可以作为 WireGuard 服务器，允许任何安装了 WireGuard 客户端的设备（包括 iOS 和 Android）访问 EasyTier 网络。以下是设置示例：
-
-```mermaid
-flowchart LR
-
-ios[[iPhone<br/>已安装 WireGuard]]
-
-subgraph 节点 A 公网 IP 22.1.1.1
-nodea[EasyTier<br/>10.144.144.1]
-end
-
-subgraph 节点 B
-nodeb[EasyTier<br/>10.144.144.2]
-end
-
-id1[[10.1.1.0/24]]
-
-ios <-.-> nodea <--> nodeb <-.-> id1
-```
-
-1. 启动启用 WireGuard 门户的 EasyTier：
-
-```bash
-# 在 0.0.0.0:11013 上监听，并使用 10.14.14.0/24 子网作为 WireGuard 客户端
-sudo easytier-core -i 10.144.144.1 --vpn-portal wg://0.0.0.0:11013/10.14.14.0/24
-```
-
-2. 获取 WireGuard 客户端配置：
-
-```bash
-# 获取 WireGuard 客户端配置
-easytier-cli vpn-portal
-```
-
-3. 在输出配置中：
-   - 将 `Interface.Address` 设置为 WireGuard 子网中的可用 IP
-   - 将 `Peer.Endpoint` 设置为您的 EasyTier 节点的公网 IP/域名
-   - 将修改后的配置导入到您的 WireGuard 客户端
-
-#### 自建公共共享节点
-
-您可以运行自己的公共共享节点来帮助其他节点相互发现。公共共享节点只是一个普通的 EasyTier 网络（具有相同的网络名称和密钥），其他网络可以连接到它。
-
-要运行公共共享节点：
-
-```bash
-# 公共共享节点无需指定 IPv4 地址
-sudo easytier-core --network-name mysharednode --network-secret mysharednode
-```
-
-网络设置成功后，您可以轻松配置它以在系统启动时自动启动。请参阅 [一键注册服务指南](https://easytier.cn/en/guide/network/oneclick-install-as-service.html) 了解如何将 EasyTier 注册为系统服务。
-
-## 相关项目
-
-- [ZeroTier](https://www.zerotier.com/)：用于连接设备的全球虚拟网络。
-- [TailScale](https://tailscale.com/)：旨在简化网络配置的 VPN 解决方案。
-
-### 联系我们
-
-- 💬 **[Telegram 群组](https://t.me/easytier)**
-- 👥 **QQ 群**
-  - 一群 [949700262](https://qm.qq.com/q/wFoTUChqZW)
-  - 二群 [837676408](https://qm.qq.com/q/4V33DrfgHe)
-  - 三群 [957189589](https://qm.qq.com/q/YNyTQjwlai)
+上游 EasyTier 仍然是传输与路由栈的来源。原项目地址：<https://github.com/EasyTier/EasyTier>。
 
 ## 许可证
 
-EasyTier 在 [LGPL-3.0](https://github.com/EasyTier/EasyTier/blob/main/LICENSE) 许可下发布。
-
-## 赞助
-
-本项目的 CDN 加速和安全防护由腾讯云 EdgeOne 赞助。
-
-<p align="center">
-<a href="https://edgeone.ai/?from=github" target="_blank">
-<img src="assets/edgeone.png" width="200">
-</a>
-</p>
-
-特别感谢 [浪浪云](https://langlangy.cn/?i26c5a5) 和 [雨云](https://www.rainyun.com/NjM0NzQ1_) 赞助我们的公共服务器。
-
-<p align="center">
-<a href="https://langlangy.cn/?i26c5a5" target="_blank">
-<img src="assets/langlang.png" width="200">
-</a>
-<a href="https://langlangy.cn/?i26c5a5" target="_blank">
-<img src="assets/raincloud.png" width="200">
-</a>
-</p>
-
-如果您觉得 EasyTier 有帮助，请考虑赞助我们。软件开发和维护需要大量的时间和精力，您的赞助将帮助我们更好地维护和改进 EasyTier。
-
-<p align="center">
-<img src="assets/wechat.png" width="200">
-<img src="assets/alipay.png" width="200">
-</p>
+本 fork 按 LGPL-3.0-or-later 分发，与 EasyTier 的 LGPL 许可证口径保持一致。许可证和来源细节见 `LICENSE` 与 `THIRD_PARTY_NOTICES.md`。

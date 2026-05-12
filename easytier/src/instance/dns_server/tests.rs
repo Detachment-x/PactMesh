@@ -49,7 +49,7 @@ pub async fn prepare_env_with_tld_dns_zone(
     }
 
     let (s, r) = create_packet_recv_chan();
-    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, ctx, s));
+    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, ctx, s, None));
     peer_mgr.run().await.unwrap();
     replace_stun_info_collector(peer_mgr.clone(), NatType::PortRestricted);
 
@@ -216,7 +216,7 @@ async fn test_magic_dns_update_replaces_records_for_same_client() {
     ctx.set_ipv4(Some(tun_ip));
 
     let (s, _r) = create_packet_recv_chan();
-    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, ctx, s));
+    let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, ctx, s, None));
     peer_mgr.run().await.unwrap();
     replace_stun_info_collector(peer_mgr.clone(), NatType::PortRestricted);
 
