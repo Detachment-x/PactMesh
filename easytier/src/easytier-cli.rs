@@ -5316,6 +5316,10 @@ fn handle_trust_create_domain(
             trust_domain_id,
             domain_dir.display()
         );
+        println!(
+            "Backup required: keep {} and remember the management password. Either one alone cannot recover or unlock root management authority.",
+            domain_dir.join("sk_root.age").display()
+        );
     }
     Ok(())
 }

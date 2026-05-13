@@ -41,7 +41,11 @@ fn test_create_basic_succeeds() {
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Created trust domain"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Created trust domain"));
+    assert!(stdout.contains("Backup required"));
+    assert!(stdout.contains("sk_root.age"));
+    assert!(stdout.contains("management password"));
 }
 
 #[test]
@@ -89,6 +93,7 @@ fn test_create_json_output_parseable() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(value["trust_domain_id"].as_str().unwrap().len() > 8);
     assert!(Path::new(value["path"].as_str().unwrap()).is_dir());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Backup required"));
 }
 
 #[test]

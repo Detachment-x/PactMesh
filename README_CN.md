@@ -24,6 +24,12 @@ PactMesh 当前处于 Alpha 阶段，面向私人和小团队使用。公网 VPS
 
 用户可见的“管理密码”就是本地 `sk_root.age` 的 root key passphrase。它不是账号密码、不是登录密码，也不是助记词。恢复管理权需要同时拥有 `sk_root.age` 备份和管理密码；只有其中任意一个都无法恢复或解锁根密钥。
 
+### 备份与恢复管理权
+
+创建信任域后，立即备份该信任域目录下的 `sk_root.age`，并把管理密码保存在你能长期记住或安全托管的位置。`sk_root.age` 是加密后的根私钥文件，管理密码只是解锁该文件的 passphrase；只有管理密码没有文件，无法重新生成 root key；只有 `sk_root.age` 但忘记管理密码，也无法解锁 root key。
+
+恢复或迁移管理权时，把备份的 `sk_root.age` 放回目标机器的信任域目录，并使用同一个管理密码执行 `trust create-network`、`trust approve`、`trust revoke` 等管理命令。普通 daemon 运行和数据面重连不需要管理密码，只有需要 `SK_root` 签名的管理操作才会按需解锁。
+
 配置分发渠道不需要可信。节点在接受 `NetworkState`、`TrustDomainMeta`、成员证书或 join 相关 payload 前，会在本地验证签名。这样配置可以通过普通 EasyTier 路径、中继、文件、QR/bootstrap payload 或后续同步通道传播，但这些传播通道本身不拥有授权能力。
 
 设备角色只表达治理身份，不表达具体网络功能：Root device 是能解锁本信任域 `SK_root` 的管理设备，Member device 是持有本域 `member_cert.pem` 的成员设备，External device 是被本域引用但不是本域成员的外部设备或服务资源。relay、打洞协助、子网代理属于 capability；tag 是人工分组；ACL 只负责判断数据面流量是否允许通过。
