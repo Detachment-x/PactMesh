@@ -79,6 +79,33 @@ cargo clippy -- -D warnings
 
 Some integration and e2e tests exercise EasyTier tunnel behavior and may need Linux networking capabilities depending on the selected test target.
 
+## Release Binaries
+
+Current PactMesh Alpha keeps the inherited binary names for compatibility: `easytier-core` and `easytier-cli`.
+
+Build release binaries from the workspace:
+
+```bash
+cd workspace/easytier
+cargo build --release --bin easytier-core --bin easytier-cli
+```
+
+The artifacts are written to the workspace target directory, not the crate directory:
+
+```text
+workspace/target/release/easytier-core
+workspace/target/release/easytier-cli
+```
+
+On the current Linux x86-64 build machine, the release artifacts are dynamically linked ELF x86-64 binaries. The observed sizes are about `28M` for `easytier-core` and `14M` for `easytier-cli`. These x86-64 binaries cannot run directly on ARM hosts; build on the ARM host or add a proper Rust target/toolchain and cross-linker before distributing to ARM.
+
+Copy both binaries to a test server, for example:
+
+```bash
+scp workspace/target/release/easytier-core workspace/target/release/easytier-cli user@server:/opt/pactmesh/
+ssh user@server 'chmod +x /opt/pactmesh/easytier-core /opt/pactmesh/easytier-cli'
+```
+
 ## Design Documents
 
 - [Deployment guide](deploy.md) (Chinese: [deploy_CN.md](deploy_CN.md))

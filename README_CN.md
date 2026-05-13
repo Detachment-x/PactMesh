@@ -79,6 +79,33 @@ cargo clippy -- -D warnings
 
 部分集成测试和 e2e 测试会触发 EasyTier 隧道行为，具体运行权限取决于测试目标和操作系统网络能力。
 
+## Release 二进制
+
+当前 PactMesh Alpha 为了兼容仍保留继承来的二进制名：`easytier-core` 和 `easytier-cli`。
+
+在 workspace 内构建 release 产物：
+
+```bash
+cd workspace/easytier
+cargo build --release --bin easytier-core --bin easytier-cli
+```
+
+产物写在 workspace 级 target 目录，不在 crate 目录：
+
+```text
+workspace/target/release/easytier-core
+workspace/target/release/easytier-cli
+```
+
+当前 Linux x86-64 构建机生成的是动态链接 ELF x86-64 二进制。实测大小约为：`easytier-core` 28M，`easytier-cli` 14M。x86-64 产物不能直接在 ARM 主机运行；ARM 机器要么在 ARM 主机本机构建，要么补齐 Rust target、交叉链接器和对应系统库后交叉编译。
+
+复制到测试服务器示例：
+
+```bash
+scp workspace/target/release/easytier-core workspace/target/release/easytier-cli user@server:/opt/pactmesh/
+ssh user@server 'chmod +x /opt/pactmesh/easytier-core /opt/pactmesh/easytier-cli'
+```
+
 ## 设计文档
 
 - [部署指南](deploy_CN.md)（英文版 [deploy.md](deploy.md)）
