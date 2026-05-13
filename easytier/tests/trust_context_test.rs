@@ -7,7 +7,9 @@ use age::secrecy::SecretString;
 use age::{Encryptor, scrypt};
 use easytier::common::config::TomlConfigLoader;
 use easytier::common::global_ctx::GlobalCtx;
-use easytier::common::trust_context::{LoadError, TrustDomainContext};
+use easytier::common::trust_context::{
+    LoadError, SK_SELF_RAW_FILE, TrustDomainContext, write_raw_sk_self,
+};
 use easytier::trust::{
     Capabilities, MemberCert, SignKey, TrustDomainRoot, UnsignedMemberCert, wrap_armored,
 };
@@ -130,6 +132,26 @@ fn test_load_from_dir_reads_pem_files() {
 
     assert_eq!(ctx.trust_domain_id, root.id());
     assert_eq!(ctx.network_local_id.as_str(), network_local_id);
+    assert_eq!(ctx.member_cert, cert);
+    assert_eq!(ctx.sk_self.to_bytes(), sk_self.to_bytes());
+}
+
+#[test]
+fn test_load_from_dir_reads_raw_sk_self_without_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, network_local_id, cert, sk_self) = sample_context_parts();
+    let network_dir = dir.path().join("networks").join(&network_local_id);
+    std::fs::create_dir_all(&network_dir).unwrap();
+    std::fs::write(
+        dir.path().join("pk_root.pem"),
+        wrap_armored("PNW-PK-ROOT", root.public_key().as_bytes()),
+    )
+    .unwrap();
+    std::fs::write(network_dir.join("member_cert.pem"), cert.to_pem()).unwrap();
+    write_raw_sk_self(&network_dir.join(SK_SELF_RAW_FILE), &sk_self).unwrap();
+
+    let ctx = TrustDomainContext::load_from_dir(dir.path(), &network_local_id, "").unwrap();
+
     assert_eq!(ctx.member_cert, cert);
     assert_eq!(ctx.sk_self.to_bytes(), sk_self.to_bytes());
 }

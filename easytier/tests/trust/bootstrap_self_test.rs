@@ -2,7 +2,7 @@ use std::{path::Path, process::Command};
 
 use base64::Engine as _;
 use easytier::{
-    common::trust_context::TrustDomainContext,
+    common::trust_context::{SK_SELF_RAW_FILE, TrustDomainContext},
     trust::{MemberCert, SignedNetworkState, TrustDomainRoot, unwrap_armored},
 };
 use serde_json::Value;
@@ -60,7 +60,6 @@ fn run_bootstrap_self(root: &Path, domain_id: &str, extra: &[&str]) -> std::proc
     let mut cmd = cli();
     cmd.env("XDG_CONFIG_HOME", config_home(root))
         .env("PNW_ROOT_PASSPHRASE", "long-enough-pass")
-        .env("PNW_DEVICE_PASSPHRASE", "device-passphrase")
         .arg("trust")
         .arg("bootstrap-self")
         .arg(domain_id)
@@ -70,6 +69,20 @@ fn run_bootstrap_self(root: &Path, domain_id: &str, extra: &[&str]) -> std::proc
     for arg in extra {
         cmd.arg(arg);
     }
+    cmd.output().unwrap()
+}
+
+fn run_bootstrap_self_with_device_passphrase(root: &Path, domain_id: &str) -> std::process::Output {
+    let mut cmd = cli();
+    cmd.env("XDG_CONFIG_HOME", config_home(root))
+        .env("PNW_ROOT_PASSPHRASE", "long-enough-pass")
+        .env("PNW_DEVICE_PASSPHRASE", "device-passphrase")
+        .arg("trust")
+        .arg("bootstrap-self")
+        .arg(domain_id)
+        .arg("office-net")
+        .arg("--device-label")
+        .arg("root-a");
     cmd.output().unwrap()
 }
 
@@ -116,10 +129,16 @@ fn test_bootstrap_self_writes_member_cert_and_updates_network_state() {
     assert_eq!(cert.details.device_label, "root-a");
     assert_eq!(cert.details.network_state_version_ref, 2);
     assert!(domain_dir.join("networks/office-net/device_id").is_file());
-    assert!(domain_dir.join("networks/office-net/sk_self.age").is_file());
+    assert!(
+        domain_dir
+            .join("networks/office-net")
+            .join(SK_SELF_RAW_FILE)
+            .is_file()
+    );
     assert!(
         config_home(dir.path())
-            .join("privateNetwork/devices/default/sk_self.age")
+            .join("privateNetwork/devices/default")
+            .join(SK_SELF_RAW_FILE)
             .is_file()
     );
     let root = TrustDomainRoot::load_from_file(&domain_dir.join("sk_root.age"), "long-enough-pass")
@@ -134,9 +153,33 @@ fn test_bootstrap_self_writes_member_cert_and_updates_network_state() {
         cert.fingerprint()
     );
 
+    let ctx = TrustDomainContext::load_from_dir(&domain_dir, "office-net", "").unwrap();
+    assert_eq!(ctx.member_cert.fingerprint(), cert.fingerprint());
+}
+
+#[test]
+fn test_bootstrap_self_with_device_passphrase_keeps_encrypted_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let domain_id = create_domain(dir.path());
+    create_network(dir.path(), &domain_id);
+
+    let output = run_bootstrap_self_with_device_passphrase(dir.path(), &domain_id);
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let domain_dir = trust_domains_dir(dir.path()).join(&domain_id);
+    assert!(domain_dir.join("networks/office-net/sk_self.age").is_file());
+    assert!(
+        config_home(dir.path())
+            .join("privateNetwork/devices/default/sk_self.age")
+            .is_file()
+    );
     let ctx =
         TrustDomainContext::load_from_dir(&domain_dir, "office-net", "device-passphrase").unwrap();
-    assert_eq!(ctx.member_cert.fingerprint(), cert.fingerprint());
+    assert_eq!(ctx.network_local_id.as_str(), "office-net");
 }
 
 #[test]
@@ -189,7 +232,8 @@ fn test_bootstrap_self_rejects_existing_cert_for_different_device_key() {
         String::from_utf8_lossy(&first.stderr)
     );
     let old_device_dir = config_home(dir.path()).join("privateNetwork/devices/default");
-    std::fs::remove_file(old_device_dir.join("sk_self.age")).unwrap();
+    let _ = std::fs::remove_file(old_device_dir.join("sk_self.age"));
+    let _ = std::fs::remove_file(old_device_dir.join(SK_SELF_RAW_FILE));
     std::fs::remove_file(old_device_dir.join("pk_self.pem")).unwrap();
 
     let second = run_bootstrap_self(dir.path(), &domain_id, &[]);

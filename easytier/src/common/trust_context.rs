@@ -1,5 +1,7 @@
 use std::io::Read;
 use std::iter;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use age::secrecy::SecretString;
@@ -12,6 +14,8 @@ use crate::trust::{
 };
 
 pub(crate) const PK_ROOT_PEM_LABEL: &str = "PNW-PK-ROOT";
+pub const SK_SELF_RAW_FILE: &str = "sk_self.raw";
+pub const SK_SELF_AGE_FILE: &str = "sk_self.age";
 
 #[derive(Debug, Clone)]
 pub struct TrustDomainContext {
@@ -97,9 +101,13 @@ fn load_sk_self_for_network(
     network_dir: &Path,
     password: &str,
 ) -> Result<SignKey, LoadError> {
-    let network_key = network_dir.join("sk_self.age");
+    let network_key = network_dir.join(SK_SELF_AGE_FILE);
     if network_key.exists() {
         return load_sk_self(&network_key, password);
+    }
+    let network_raw_key = network_dir.join(SK_SELF_RAW_FILE);
+    if network_raw_key.exists() {
+        return load_raw_sk_self(&network_raw_key);
     }
 
     let device_id_path = network_dir.join("device_id");
@@ -116,9 +124,18 @@ fn load_sk_self_for_network(
         &private_network_dir
             .join("devices")
             .join(device_id)
-            .join("sk_self.age"),
+            .join(SK_SELF_AGE_FILE),
         password,
     )
+    .or_else(|err| match err {
+        LoadError::Io(_) => load_raw_sk_self(
+            &private_network_dir
+                .join("devices")
+                .join(device_id)
+                .join(SK_SELF_RAW_FILE),
+        ),
+        other => Err(other),
+    })
 }
 
 fn load_sk_self(path: &Path, password: &str) -> Result<SignKey, LoadError> {
@@ -137,6 +154,21 @@ fn load_sk_self(path: &Path, password: &str) -> Result<SignKey, LoadError> {
         .as_slice()
         .try_into()
         .map_err(|_| LoadError::SkSelfDecryptFailed)?;
+    Ok(SignKey::from_bytes(bytes))
+}
+
+pub fn write_raw_sk_self(path: &Path, sk_self: &SignKey) -> Result<(), std::io::Error> {
+    std::fs::write(path, sk_self.to_bytes())?;
+    #[cfg(unix)]
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn load_raw_sk_self(path: &Path) -> Result<SignKey, LoadError> {
+    let bytes = std::fs::read(path)?;
+    let bytes: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+        LoadError::InvalidPem("sk_self.raw must contain exactly 32 bytes".to_owned())
+    })?;
     Ok(SignKey::from_bytes(bytes))
 }
 

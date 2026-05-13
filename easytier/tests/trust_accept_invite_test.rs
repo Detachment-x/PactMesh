@@ -49,8 +49,60 @@ fn run_accept(root: &Path, source: &str, passphrase: &str) -> std::process::Outp
         .unwrap()
 }
 
+fn run_accept_default_key(root: &Path, source: &str) -> std::process::Output {
+    cli()
+        .env("XDG_CONFIG_HOME", config_home(root))
+        .arg("trust")
+        .arg("accept-invite")
+        .arg(source)
+        .arg("--device-label")
+        .arg("laptop")
+        .arg("--hint")
+        .arg("desk")
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn test_accept_invite_url_succeeds_with_mock_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = TrustDomainRoot::generate();
+    let bootstrap = bootstrap(&root);
+    let url = bootstrap.to_url().unwrap();
+
+    let output = run_accept_default_key(dir.path(), url.as_str());
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let domain_dir = trust_domains_dir(dir.path()).join(root.id().to_string());
+    assert!(domain_dir.join("pk_root.pem").is_file());
+    assert!(
+        devices_dir(dir.path())
+            .join("default/sk_self.raw")
+            .is_file()
+    );
+    assert!(
+        devices_dir(dir.path())
+            .join("default/pk_self.pem")
+            .is_file()
+    );
+    assert!(domain_dir.join("networks/office-net/sk_self.raw").is_file());
+    let join_path = domain_dir.join("networks/office-net/pending_join_request.cbor.pem");
+    let armored = std::fs::read_to_string(join_path).unwrap();
+    let payload = unwrap_armored(&armored, "PNW-JOIN-REQUEST").unwrap();
+    let jr: JoinRequest = from_cbor(&payload).unwrap();
+    assert_eq!(jr.trust_domain_id, root.id());
+    assert_eq!(jr.network_local_id.as_str(), "office-net");
+    assert_eq!(jr.device_label, "laptop");
+    assert_eq!(jr.hint, "desk");
+    jr.verify_self_signature().unwrap();
+}
+
+#[test]
+fn test_accept_invite_with_device_passphrase_keeps_encrypted_key() {
     let dir = tempfile::tempdir().unwrap();
     let root = TrustDomainRoot::generate();
     let bootstrap = bootstrap(&root);
@@ -64,27 +116,12 @@ fn test_accept_invite_url_succeeds_with_mock_root() {
         String::from_utf8_lossy(&output.stderr)
     );
     let domain_dir = trust_domains_dir(dir.path()).join(root.id().to_string());
-    assert!(domain_dir.join("pk_root.pem").is_file());
     assert!(
         devices_dir(dir.path())
             .join("default/sk_self.age")
             .is_file()
     );
-    assert!(
-        devices_dir(dir.path())
-            .join("default/pk_self.pem")
-            .is_file()
-    );
     assert!(domain_dir.join("networks/office-net/sk_self.age").is_file());
-    let join_path = domain_dir.join("networks/office-net/pending_join_request.cbor.pem");
-    let armored = std::fs::read_to_string(join_path).unwrap();
-    let payload = unwrap_armored(&armored, "PNW-JOIN-REQUEST").unwrap();
-    let jr: JoinRequest = from_cbor(&payload).unwrap();
-    assert_eq!(jr.trust_domain_id, root.id());
-    assert_eq!(jr.network_local_id.as_str(), "office-net");
-    assert_eq!(jr.device_label, "laptop");
-    assert_eq!(jr.hint, "desk");
-    jr.verify_self_signature().unwrap();
 }
 
 #[test]

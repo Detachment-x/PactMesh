@@ -34,6 +34,7 @@ use easytier::{
     common::{
         constants::EASYTIER_VERSION,
         stun::{StunInfoCollector, StunInfoCollectorTrait},
+        trust_context::{SK_SELF_AGE_FILE, SK_SELF_RAW_FILE, write_raw_sk_self},
     },
     peers,
     proto::{
@@ -3950,19 +3951,24 @@ struct AcceptInviteOptions {
     poll_secs: u64,
 }
 
-fn read_device_passphrase(passphrase_file: Option<&PathBuf>) -> Result<String, Error> {
-    let passphrase = if let Some(path) = passphrase_file {
-        std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read passphrase file {}", path.display()))?
+fn read_optional_device_passphrase(
+    passphrase_file: Option<&PathBuf>,
+) -> Result<Option<String>, Error> {
+    let Some(passphrase) = (if let Some(path) = passphrase_file {
+        Some(
+            std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read passphrase file {}", path.display()))?,
+        )
     } else {
-        std::env::var("PNW_DEVICE_PASSPHRASE")
-            .context("PNW_DEVICE_PASSPHRASE is required unless --passphrase-file is provided")?
+        std::env::var("PNW_DEVICE_PASSPHRASE").ok()
+    }) else {
+        return Ok(None);
     };
     let passphrase = passphrase.trim_end_matches(['\r', '\n']).to_owned();
     if passphrase.len() < 8 {
         anyhow::bail!("device passphrase must be at least 8 characters");
     }
-    Ok(passphrase)
+    Ok(Some(passphrase))
 }
 
 fn seal_device_sign_key(sk_self: &SignKey, password: &str) -> Result<Vec<u8>, Error> {
@@ -4006,12 +4012,17 @@ fn default_private_network_dir() -> Result<PathBuf, Error> {
 }
 
 fn load_or_create_global_device_identity(
-    password: &str,
-) -> Result<(SignKey, String, PathBuf), Error> {
+    password: Option<&str>,
+) -> Result<(SignKey, String, PathBuf, &'static str), Error> {
     let device_dir = default_private_network_dir()?.join("devices/default");
-    let sk_path = device_dir.join("sk_self.age");
-    if sk_path.exists() {
-        let sk_self = load_device_sign_key(&sk_path, password)?;
+    let age_path = device_dir.join(SK_SELF_AGE_FILE);
+    if age_path.exists() {
+        let password = password.ok_or_else(|| {
+            anyhow::anyhow!(
+                "PNW_DEVICE_PASSPHRASE or --passphrase-file is required for existing sk_self.age"
+            )
+        })?;
+        let sk_self = load_device_sign_key(&age_path, password)?;
         let device_pk = sk_self.verify_key();
         let pk_path = device_dir.join("pk_self.pem");
         if pk_path.exists() {
@@ -4024,7 +4035,20 @@ fn load_or_create_global_device_identity(
             }
         }
         let device_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(device_pk.0);
-        return Ok((sk_self, device_id, device_dir));
+        return Ok((sk_self, device_id, device_dir, SK_SELF_AGE_FILE));
+    }
+    let raw_path = device_dir.join(SK_SELF_RAW_FILE);
+    if raw_path.exists() {
+        let bytes = std::fs::read(&raw_path)
+            .with_context(|| format!("failed to read {}", raw_path.display()))?;
+        let bytes: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("sk_self.raw must contain exactly 32 bytes"))?;
+        let sk_self = SignKey::from_bytes(bytes);
+        let device_pk = sk_self.verify_key();
+        let device_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(device_pk.0);
+        return Ok((sk_self, device_id, device_dir, SK_SELF_RAW_FILE));
     }
 
     std::fs::create_dir_all(&device_dir)
@@ -4032,8 +4056,15 @@ fn load_or_create_global_device_identity(
     let sk_self = SignKey::generate();
     let device_pk = sk_self.verify_key();
     let device_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(device_pk.0);
-    std::fs::write(&sk_path, seal_device_sign_key(&sk_self, password)?)
-        .with_context(|| format!("failed to write {}", sk_path.display()))?;
+    let key_file = if let Some(password) = password {
+        std::fs::write(&age_path, seal_device_sign_key(&sk_self, password)?)
+            .with_context(|| format!("failed to write {}", age_path.display()))?;
+        SK_SELF_AGE_FILE
+    } else {
+        write_raw_sk_self(&raw_path, &sk_self)
+            .with_context(|| format!("failed to write {}", raw_path.display()))?;
+        SK_SELF_RAW_FILE
+    };
     std::fs::write(
         device_dir.join("pk_self.pem"),
         wrap_armored("PNW-PK-SELF", &device_pk.0),
@@ -4044,7 +4075,17 @@ fn load_or_create_global_device_identity(
             device_dir.join("pk_self.pem").display()
         )
     })?;
-    Ok((sk_self, device_id, device_dir))
+    Ok((sk_self, device_id, device_dir, key_file))
+}
+
+fn copy_device_key_to_network(
+    device_dir: &std::path::Path,
+    network_dir: &std::path::Path,
+    key_file: &str,
+) -> Result<(), Error> {
+    std::fs::copy(device_dir.join(key_file), network_dir.join(key_file))
+        .with_context(|| format!("failed to write {}", network_dir.join(key_file).display()))?;
+    Ok(())
 }
 
 fn ensure_bootstrap_root(
@@ -4086,8 +4127,9 @@ async fn handle_trust_accept_invite(
     let domain_dir = default_trust_domains_dir()?.join(bootstrap.trust_domain_id.to_string());
     ensure_bootstrap_root(&domain_dir, &bootstrap)?;
 
-    let passphrase = read_device_passphrase(options.passphrase_file.as_ref())?;
-    let (sk_self, device_id, device_dir) = load_or_create_global_device_identity(&passphrase)?;
+    let passphrase = read_optional_device_passphrase(options.passphrase_file.as_ref())?;
+    let (sk_self, device_id, device_dir, key_file) =
+        load_or_create_global_device_identity(passphrase.as_deref())?;
 
     let network_dir = domain_dir
         .join("networks")
@@ -4102,16 +4144,7 @@ async fn handle_trust_accept_invite(
             )
         },
     )?;
-    std::fs::copy(
-        device_dir.join("sk_self.age"),
-        network_dir.join("sk_self.age"),
-    )
-    .with_context(|| {
-        format!(
-            "failed to write {}",
-            network_dir.join("sk_self.age").display()
-        )
-    })?;
+    copy_device_key_to_network(&device_dir, &network_dir, key_file)?;
     std::fs::write(
         network_dir.join("network_bootstrap.cbor.pem"),
         bootstrap.to_pem(),
@@ -4813,9 +4846,10 @@ fn handle_trust_bootstrap_self(options: BootstrapSelfOptions) -> Result<(), Erro
         anyhow::bail!("network_state trust_domain_id does not match sk_root.age");
     }
 
-    let device_passphrase = read_device_passphrase(options.device_passphrase_file.as_ref())?;
-    let (sk_self, device_id, device_dir) =
-        load_or_create_global_device_identity(&device_passphrase)?;
+    let device_passphrase =
+        read_optional_device_passphrase(options.device_passphrase_file.as_ref())?;
+    let (sk_self, device_id, device_dir, key_file) =
+        load_or_create_global_device_identity(device_passphrase.as_deref())?;
     let device_pk = sk_self.verify_key();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4875,16 +4909,7 @@ fn handle_trust_bootstrap_self(options: BootstrapSelfOptions) -> Result<(), Erro
             )
         },
     )?;
-    std::fs::copy(
-        device_dir.join("sk_self.age"),
-        network_dir.join("sk_self.age"),
-    )
-    .with_context(|| {
-        format!(
-            "failed to write {}",
-            network_dir.join("sk_self.age").display()
-        )
-    })?;
+    copy_device_key_to_network(&device_dir, &network_dir, key_file)?;
 
     let fingerprint = cert.fingerprint();
     let already_indexed = state
