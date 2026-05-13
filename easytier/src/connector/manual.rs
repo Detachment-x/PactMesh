@@ -31,6 +31,26 @@ use crate::{
     use_global_var,
 };
 
+fn peer_hint_urls_from_state(state: &crate::trust::SignedNetworkState, now: u64) -> Vec<url::Url> {
+    let mut urls = state
+        .details
+        .payload
+        .peer_hints
+        .iter()
+        .filter(|hint| hint.expires_at.is_none_or(|expires_at| expires_at > now))
+        .filter_map(|hint| match url::Url::parse(&hint.url) {
+            Ok(url) => Some(url),
+            Err(err) => {
+                tracing::warn!(source = "signed-peer-hint", url = %hint.url, ?err, "invalid peer hint URL");
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    urls.sort();
+    urls.dedup();
+    urls
+}
+
 use super::create_connector_by_url;
 
 type ConnectorMap = Arc<DashSet<url::Url>>;
@@ -386,6 +406,86 @@ impl ManualConnectorManager {
         })
     }
 
+    async fn signed_peer_hint_urls(data: Arc<ConnectorManagerData>) -> Vec<url::Url> {
+        let Some(pm) = data.peer_manager.upgrade() else {
+            tracing::warn!(source = "signed-peer-hint", "peer manager is gone");
+            return Vec::new();
+        };
+        let Some(trust_pool) = pm.get_trust_pool() else {
+            tracing::debug!(source = "signed-peer-hint", "trust pool is not configured");
+            return Vec::new();
+        };
+        let Some(trust_ctx) = data.global_ctx.get_trust_context().await else {
+            tracing::debug!(
+                source = "signed-peer-hint",
+                "trust context is not configured"
+            );
+            return Vec::new();
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_secs();
+        let pool = trust_pool.read().await;
+        let Some(state) =
+            pool.network_state(&trust_ctx.trust_domain_id, &trust_ctx.network_local_id)
+        else {
+            tracing::debug!(
+                source = "signed-peer-hint",
+                "network state is not available"
+            );
+            return Vec::new();
+        };
+
+        peer_hint_urls_from_state(state, now)
+    }
+
+    async fn try_signed_peer_hint_connect(
+        data: Arc<ConnectorManagerData>,
+        dead_url: &url::Url,
+    ) -> Result<ReconnResult, Error> {
+        let candidates = Self::signed_peer_hint_urls(data.clone()).await;
+        if candidates.is_empty() {
+            return Err(Error::AnyhowError(anyhow::anyhow!(
+                "no signed peer hints available"
+            )));
+        }
+
+        let mut last_error = None;
+        for hint_url in candidates {
+            if &hint_url == dead_url || data.removed_conn_urls.contains(&hint_url) {
+                continue;
+            }
+            tracing::info!(source = "signed-peer-hint", %dead_url, url = %hint_url, "try reconnect via signed peer hint");
+            match Self::conn_reconnect_with_ip_version(
+                data.clone(),
+                hint_url.to_string(),
+                IpVersion::Both,
+            )
+            .await
+            {
+                Ok(mut ret) => {
+                    data.connectors.insert(hint_url.clone());
+                    data.borrowed_failures.remove(dead_url);
+                    ret.dead_url = dead_url.to_string();
+                    return Ok(ret);
+                }
+                Err(err) => {
+                    data.global_ctx.issue_event(GlobalCtxEvent::ConnectError(
+                        hint_url.to_string(),
+                        "signed-peer-hint".to_owned(),
+                        format!("{:?}", err),
+                    ));
+                    last_error = Some(err);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            Error::AnyhowError(anyhow::anyhow!("no usable signed peer hints available"))
+        }))
+    }
+
     async fn conn_reconnect(
         data: Arc<ConnectorManagerData>,
         dead_url: url::Url,
@@ -483,6 +583,13 @@ impl ManualConnectorManager {
             ));
         }
 
+        match Self::try_signed_peer_hint_connect(data.clone(), &dead_url).await {
+            Ok(ret) => return Ok(ret),
+            Err(err) => {
+                tracing::debug!(source = "signed-peer-hint", %dead_url, ?err, "signed peer hint reconnect failed");
+            }
+        }
+
         if should_try_borrowed {
             match Self::try_borrowed_relay_connect(data.clone(), &dead_url).await {
                 Ok(ret) => return Ok(ret),
@@ -520,10 +627,61 @@ mod tests {
     use crate::{
         peers::tests::create_mock_peer_manager,
         set_global_var,
+        trust::{
+            NetworkLocalId, NetworkStatePayload, PeerHint, TrustDomainRoot, UnsignedNetworkState,
+        },
         tunnel::{Tunnel, TunnelError},
     };
 
     use super::*;
+
+    fn signed_state_with_hints(hints: Vec<PeerHint>) -> crate::trust::SignedNetworkState {
+        let root = TrustDomainRoot::generate();
+        UnsignedNetworkState {
+            trust_domain_id: root.id(),
+            network_local_id: NetworkLocalId::try_from_str("office-net").unwrap(),
+            version: 1,
+            payload: NetworkStatePayload {
+                member_cert_index: Vec::new(),
+                revoked_certs: Vec::new(),
+                disabled_certs: Vec::new(),
+                acl: Vec::new(),
+                routes: Vec::new(),
+                peer_hints: hints,
+            },
+        }
+        .sign(&root)
+    }
+
+    fn hint(url: &str, expires_at: Option<u64>) -> PeerHint {
+        PeerHint {
+            url: url.to_owned(),
+            label: None,
+            capabilities: Vec::new(),
+            updated_at: 1,
+            expires_at,
+        }
+    }
+
+    #[test]
+    fn test_peer_hint_urls_from_state_filters_invalid_expired_and_dedups() {
+        let state = signed_state_with_hints(vec![
+            hint("tcp://203.0.113.20:11010", Some(200)),
+            hint("not-a-url", None),
+            hint("tcp://203.0.113.10:11010", Some(200)),
+            hint("tcp://203.0.113.10:11010", Some(200)),
+            hint("tcp://203.0.113.30:11010", Some(99)),
+        ]);
+
+        let urls = peer_hint_urls_from_state(&state, 100);
+
+        assert_eq!(
+            urls.into_iter()
+                .map(|url| url.to_string())
+                .collect::<Vec<_>>(),
+            vec!["tcp://203.0.113.10:11010", "tcp://203.0.113.20:11010"]
+        );
+    }
 
     #[tokio::test]
     async fn test_reconnect_with_connecting_addr() {
