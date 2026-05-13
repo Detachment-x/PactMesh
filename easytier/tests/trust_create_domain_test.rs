@@ -99,3 +99,51 @@ fn test_create_short_passphrase_rejected() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("passphrase"));
 }
+
+#[test]
+fn test_create_passphrase_file_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let passphrase_dir = tempfile::tempdir().unwrap();
+    let passphrase_file = passphrase_dir.path().join("management-passphrase.txt");
+    std::fs::write(&passphrase_file, "long-enough-pass\n").unwrap();
+
+    let output = cli()
+        .arg("trust")
+        .arg("create-domain")
+        .arg("--label")
+        .arg("file-pass")
+        .arg("--out-dir")
+        .arg(dir.path())
+        .arg("--passphrase-file")
+        .arg(&passphrase_file)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(created_domain_dir(dir.path()).join("sk_root.age").is_file());
+}
+
+#[test]
+fn test_create_missing_passphrase_non_tty_reports_management_password() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = cli()
+        .env_remove("PNW_ROOT_PASSPHRASE")
+        .arg("trust")
+        .arg("create-domain")
+        .arg("--label")
+        .arg("missing-pass")
+        .arg("--out-dir")
+        .arg(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("management password"), "stderr={stderr}");
+    assert!(stderr.contains("TTY"), "stderr={stderr}");
+}

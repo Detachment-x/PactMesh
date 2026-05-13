@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     ffi::OsString,
     future::Future,
+    io::IsTerminal,
     io::{Read as _, Write as _},
     net::{IpAddr, SocketAddr},
     path::PathBuf,
@@ -4869,13 +4870,56 @@ async fn handle_trust_list_pending(
 }
 
 fn read_root_passphrase(passphrase_file: Option<&PathBuf>) -> Result<String, Error> {
-    let passphrase = if let Some(path) = passphrase_file {
-        std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read passphrase file {}", path.display()))?
-    } else {
-        std::env::var("PNW_ROOT_PASSPHRASE")
-            .context("PNW_ROOT_PASSPHRASE (root key passphrase/management password) is required unless --passphrase-file is provided")?
+    let passphrase = match root_passphrase_source(passphrase_file)? {
+        RootPassphraseSource::File(path) => std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read passphrase file {}", path.display()))?,
+        RootPassphraseSource::Env(value) => value,
+        RootPassphraseSource::Prompt => prompt_root_passphrase()?,
     };
+    validate_root_passphrase(passphrase)
+}
+
+enum RootPassphraseSource {
+    File(PathBuf),
+    Env(String),
+    Prompt,
+}
+
+fn root_passphrase_source(
+    passphrase_file: Option<&PathBuf>,
+) -> Result<RootPassphraseSource, Error> {
+    if let Some(path) = passphrase_file {
+        return Ok(RootPassphraseSource::File(path.clone()));
+    }
+    if let Ok(value) = std::env::var("PNW_ROOT_PASSPHRASE") {
+        return Ok(RootPassphraseSource::Env(value));
+    }
+    if std::io::stdin().is_terminal() {
+        return Ok(RootPassphraseSource::Prompt);
+    }
+    anyhow::bail!(
+        "PNW_ROOT_PASSPHRASE (root key passphrase/management password) is required unless --passphrase-file is provided; interactive prompt is only available on a TTY"
+    )
+}
+
+fn prompt_root_passphrase() -> Result<String, Error> {
+    let first = prompt_line("Management password (root key passphrase): ")?;
+    let second = prompt_line("Confirm management password: ")?;
+    if first != second {
+        anyhow::bail!("management password confirmation does not match");
+    }
+    Ok(first)
+}
+
+fn prompt_line(prompt: &str) -> Result<String, Error> {
+    eprint!("{prompt}");
+    std::io::stderr().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line)
+}
+
+fn validate_root_passphrase(passphrase: String) -> Result<String, Error> {
     let passphrase = passphrase.trim_end_matches(['\r', '\n']).to_owned();
     if passphrase.len() < 8 {
         anyhow::bail!("root key passphrase must be at least 8 characters");
