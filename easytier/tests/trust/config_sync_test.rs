@@ -28,6 +28,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use easytier::trust::config_sync_client::ConfigSyncClient;
 use easytier::trust::config_sync_service::ConfigSyncService;
+use easytier::{connector::manual::recovery_candidate_urls_for_diagnostics, trust::PeerHint};
 
 const NETWORK_NAME: &str = "config-sync-test";
 const NETWORK_LOCAL_ID: &str = "office-net";
@@ -107,6 +108,23 @@ fn sample_network_state(
         },
     }
     .sign(root)
+}
+
+fn sample_network_state_with_peer_hint(
+    root: &TrustDomainRoot,
+    cert: &MemberCert,
+    version: u64,
+    url: &str,
+) -> SignedNetworkState {
+    let mut state = sample_network_state(root, cert, version);
+    state.details.payload.peer_hints.push(PeerHint {
+        url: url.to_owned(),
+        label: Some("public-a2".to_owned()),
+        capabilities: vec!["public-reachable".to_owned()],
+        updated_at: 100,
+        expires_at: Some(2_000_000_000),
+    });
+    state.details.sign(root)
 }
 
 fn sample_trust_domain_meta(root: &TrustDomainRoot, version: u64) -> SignedTrustDomainMeta {
@@ -360,6 +378,61 @@ async fn test_pull_loop_advances_local_version() {
     let handle = client.pull_loop();
     tokio::time::sleep(Duration::from_millis(120)).await;
     handle.abort();
+
+    let guard = client_pool.read().await;
+    let updated = guard
+        .network_state(&root.id(), &cert.details.network_local_id)
+        .unwrap();
+    assert_eq!(updated.details.version, 2);
+}
+
+#[tokio::test]
+async fn test_config_sync_persists_network_state_and_connector_can_read_hint() {
+    let root = TrustDomainRoot::generate();
+    let sk_self = SignKey::generate();
+    let cert = sample_member_cert(&root, &sk_self, "device-a", 1);
+    let server_state =
+        sample_network_state_with_peer_hint(&root, &cert, 2, "tcp://203.0.113.20:11010");
+    let client_state = sample_network_state(&root, &cert, 1);
+    let server_pool = build_pool(&root, Some(server_state.clone()), None);
+    let client_pool = build_pool(&root, Some(client_state), None);
+    let service = ConfigSyncService::new(server_pool, NETWORK_NAME.to_owned());
+    let (server_mgr, client_mgr, server_id, client_id) = rpc_mgr_pair();
+    service.register(&server_mgr);
+    let dir = tempfile::tempdir().unwrap();
+
+    let client = ConfigSyncClient::new(
+        client_mgr,
+        client_id,
+        client_pool.clone(),
+        NETWORK_NAME.to_owned(),
+    )
+    .with_known_peers(vec![server_id])
+    .with_caller_member_cert(&cert)
+    .with_network_state_persist_domain_dir(dir.path().to_path_buf());
+
+    client.sync_once(false).await.unwrap();
+
+    let path = dir
+        .path()
+        .join("networks/office-net/network_state.cbor.pem");
+    let persisted = SignedNetworkState::from_pem(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(persisted, server_state);
+    let candidates = recovery_candidate_urls_for_diagnostics(
+        Some(&persisted),
+        None,
+        &root.id().to_string(),
+        NETWORK_LOCAL_ID,
+        100,
+    );
+    assert_eq!(
+        candidates
+            .signed_peer_hints
+            .into_iter()
+            .map(|url| url.to_string())
+            .collect::<Vec<_>>(),
+        vec!["tcp://203.0.113.20:11010"]
+    );
 
     let guard = client_pool.read().await;
     let updated = guard

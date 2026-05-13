@@ -35,6 +35,8 @@ mod join_forward_test;
 mod join_test;
 #[path = "trust/member_cert_test.rs"]
 mod member_cert_test;
+#[path = "trust/network_state_receiver_test.rs"]
+mod network_state_receiver_test;
 #[path = "trust/network_state_test.rs"]
 mod network_state_test;
 #[path = "trust/pool_test.rs"]

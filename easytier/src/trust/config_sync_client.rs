@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use tokio::{sync::RwLock, task::JoinHandle};
@@ -15,7 +15,7 @@ use crate::{
     },
     trust::{
         MemberCert, NetworkLocalId, SignedNetworkState, SignedTrustDomainMeta, TrustDomainId,
-        TrustDomainPool, from_cbor, to_canonical_cbor,
+        TrustDomainPool, from_cbor, receive_network_state, to_canonical_cbor,
     },
 };
 
@@ -32,6 +32,7 @@ pub struct ConfigSyncClient {
     pub network_name: String,
     known_peers: Arc<RwLock<Vec<PeerId>>>,
     caller_member_cert_bytes: Option<Vec<u8>>,
+    network_state_persist_domain_dir: Option<PathBuf>,
     tick_interval: Duration,
     full_sync_interval: Duration,
 }
@@ -50,6 +51,7 @@ impl ConfigSyncClient {
             network_name,
             known_peers: Arc::new(RwLock::new(Vec::new())),
             caller_member_cert_bytes: None,
+            network_state_persist_domain_dir: None,
             tick_interval: DEFAULT_TICK_INTERVAL,
             full_sync_interval: DEFAULT_FULL_SYNC_INTERVAL,
         }
@@ -62,6 +64,11 @@ impl ConfigSyncClient {
 
     pub fn with_caller_member_cert(mut self, cert: &MemberCert) -> Self {
         self.caller_member_cert_bytes = Some(to_canonical_cbor(cert));
+        self
+    }
+
+    pub fn with_network_state_persist_domain_dir(mut self, domain_dir: PathBuf) -> Self {
+        self.network_state_persist_domain_dir = Some(domain_dir);
         self
     }
 
@@ -236,10 +243,19 @@ impl ConfigSyncClient {
             .with_context(|| format!("fetch_config failed for peer {peer_id}"))?;
 
         match selector.selector.as_ref() {
-            Some(config_resource_selector::Selector::NetworkState(_)) => {
+            Some(config_resource_selector::Selector::NetworkState(key)) => {
                 let state: SignedNetworkState = from_cbor(&response.payload_cbor)?;
-                let mut pool = self.trust_pool.write().await;
-                let _ = pool.apply_network_state(state);
+                let trust_domain_id = parse_trust_domain_id(&key.trust_domain_id)?;
+                let network_local_id = parse_network_local_id(&key.network_local_id)?;
+                receive_network_state(
+                    &self.trust_pool,
+                    &trust_domain_id,
+                    &network_local_id,
+                    state,
+                    self.network_state_persist_domain_dir.as_deref(),
+                    format!("config-sync:{peer_id}"),
+                )
+                .await?;
             }
             Some(config_resource_selector::Selector::TrustDomainMetaId(_)) => {
                 let meta: SignedTrustDomainMeta = from_cbor(&response.payload_cbor)?;

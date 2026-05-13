@@ -29,6 +29,7 @@ pub mod lan_recovery;
 pub mod member_cert;
 pub mod network_bootstrap;
 pub mod network_state;
+pub mod network_state_receiver;
 pub mod pending_cert_queue;
 pub mod pool;
 pub mod relay_borrow;
@@ -59,6 +60,9 @@ pub use member_cert::{Capabilities, MemberCert, UnsignedMemberCert};
 pub use network_bootstrap::NetworkBootstrap;
 pub use network_state::{
     MemberCertIndexEntry, NetworkStatePayload, PeerHint, SignedNetworkState, UnsignedNetworkState,
+};
+pub use network_state_receiver::{
+    NetworkStateReceiveError, NetworkStateReceiveReport, receive_network_state,
 };
 pub use pool::TrustDomainPool;
 pub use relay_borrow::{
