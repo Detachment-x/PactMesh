@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use easytier::trust::lan_discovery::{
+    LAN_DISCOVERY_MAX_PACKET_BYTES, decode_lan_query, decode_lan_response, encode_lan_query,
+};
 use easytier::{
     connector::manual::recovery_candidate_urls_for_diagnostics,
     trust::{
@@ -7,9 +10,6 @@ use easytier::{
         TrustDomainRoot, UnsignedNetworkState, apply_lan_response, build_lan_query,
         response_for_query,
     },
-};
-use easytier::trust::lan_discovery::{
-    LAN_DISCOVERY_MAX_PACKET_BYTES, decode_lan_query, decode_lan_response, encode_lan_query,
 };
 use tokio::sync::RwLock;
 
