@@ -90,6 +90,7 @@ fn write_domain_state(
                 .collect(),
             acl: to_canonical_cbor(&acl),
             routes: Vec::new(),
+            peer_hints: Vec::new(),
         },
     }
     .sign(&root);
@@ -243,6 +244,7 @@ fn test_list_members_capability_rendering() {
             disabled_certs: Vec::new(),
             acl: to_canonical_cbor(&acl),
             routes: Vec::new(),
+            peer_hints: Vec::new(),
         },
     }
     .sign(&root);

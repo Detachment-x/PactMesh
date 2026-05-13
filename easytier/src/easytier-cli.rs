@@ -83,8 +83,8 @@ use easytier::{
     trust::{
         ACL_SCHEMA_VERSION, AclPolicy, AclRule, Action, DeviceFingerprint, HostnameLabel,
         JoinRequest, MemberCertIndexEntry, NetworkLocalId, NetworkStatePayload, PacketTuple,
-        PeerMatchContext, PortSpec, Proto, Selector as AclSelector, SignKey, SignedNetworkState,
-        TagName, TrustDomainRoot, UnsignedNetworkState, decide, from_cbor,
+        PeerHint, PeerMatchContext, PortSpec, Proto, Selector as AclSelector, SignKey,
+        SignedNetworkState, TagName, TrustDomainRoot, UnsignedNetworkState, decide, from_cbor,
         hostname::check_hostname_unique,
         network_bootstrap::{NetworkBootstrap, bootstrap_to_qr_svg},
         revocation::RevocationReason,
@@ -628,6 +628,10 @@ enum TrustSubCommand {
         #[command(subcommand)]
         command: TrustTagSubCommand,
     },
+    PeerHint {
+        #[command(subcommand)]
+        command: TrustPeerHintSubCommand,
+    },
     Acl {
         #[command(subcommand)]
         command: TrustAclSubCommand,
@@ -735,6 +739,48 @@ enum TrustTagSubCommand {
 }
 
 #[derive(Subcommand, Debug)]
+enum TrustPeerHintSubCommand {
+    List {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+    },
+    Add {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(help = "peer hint URL")]
+        url: Url,
+        #[arg(long, help = "human-readable hint label")]
+        label: Option<String>,
+        #[arg(long = "capability", action = ArgAction::Append, help = "hint capability tag")]
+        capabilities: Vec<String>,
+        #[arg(long, help = "unix timestamp when this hint expires")]
+        expires_at: Option<u64>,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+        #[arg(long, help = "file containing the root passphrase")]
+        passphrase_file: Option<PathBuf>,
+    },
+    Remove {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(help = "peer hint URL")]
+        url: Url,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+        #[arg(long, help = "file containing the root passphrase")]
+        passphrase_file: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum TrustAclSubCommand {
     Explain {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
@@ -797,7 +843,7 @@ enum BootstrapSubCommand {
         format: BootstrapFormat,
         #[arg(long, help = "write output to file instead of stdout")]
         out: Option<PathBuf>,
-        #[arg(long = "bootstrap-seed", help = "bootstrap peer URL", action = ArgAction::Append)]
+        #[arg(long = "bootstrap-seed", help = "invite peer hint URL (legacy option name)", action = ArgAction::Append)]
         bootstrap_seeds: Vec<Url>,
         #[arg(long, help = "optional trust-domain label")]
         trust_domain_label: Option<String>,
@@ -3378,6 +3424,157 @@ fn handle_trust_tag_update(
     Ok(())
 }
 
+fn normalize_peer_hint_capabilities(mut capabilities: Vec<String>) -> Vec<String> {
+    for capability in &mut capabilities {
+        *capability = capability.trim().to_ascii_lowercase();
+    }
+    capabilities.retain(|capability| !capability.is_empty());
+    capabilities.sort();
+    capabilities.dedup();
+    capabilities
+}
+
+fn handle_trust_peer_hint_list(
+    trust_domain_id: String,
+    network_local_id: String,
+    json: bool,
+) -> Result<(), Error> {
+    let (_network_dir, _pem, state) =
+        load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
+    let mut hints = state.details.payload.peer_hints;
+    hints.sort_by(|left, right| left.url.cmp(&right.url));
+    if json {
+        let rows = hints
+            .into_iter()
+            .map(|hint| {
+                serde_json::json!({
+                    "url": hint.url,
+                    "label": hint.label,
+                    "capabilities": hint.capabilities,
+                    "updated_at": hint.updated_at,
+                    "expires_at": hint.expires_at,
+                })
+            })
+            .collect::<Vec<_>>();
+        println!("{}", serde_json::to_string(&rows)?);
+    } else if hints.is_empty() {
+        println!("(no peer hints)");
+    } else {
+        println!("url\tlabel\tcapabilities\tupdated_at\texpires_at");
+        for hint in hints {
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                hint.url,
+                hint.label.unwrap_or_default(),
+                hint.capabilities.join(","),
+                hint.updated_at,
+                hint.expires_at
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+            );
+        }
+    }
+    Ok(())
+}
+
+struct PeerHintUpdateOptions {
+    trust_domain_id: String,
+    network_local_id: String,
+    url: Url,
+    label: Option<String>,
+    capabilities: Vec<String>,
+    expires_at: Option<u64>,
+    add: bool,
+    json: bool,
+    passphrase_file: Option<PathBuf>,
+}
+
+fn handle_trust_peer_hint_update(options: PeerHintUpdateOptions) -> Result<(), Error> {
+    let (network_dir, original_pem, mut state) =
+        load_network_state_for_edit(&options.trust_domain_id, &options.network_local_id)?;
+    let url = options.url.to_string();
+    let old_version = state.details.version;
+
+    let changed = if options.add {
+        let hint = PeerHint {
+            url: url.clone(),
+            label: options.label,
+            capabilities: normalize_peer_hint_capabilities(options.capabilities),
+            updated_at: now_unix_secs(),
+            expires_at: options.expires_at,
+        };
+        match state
+            .details
+            .payload
+            .peer_hints
+            .iter_mut()
+            .find(|existing| existing.url == url)
+        {
+            Some(existing) if *existing == hint => false,
+            Some(existing) => {
+                *existing = hint;
+                true
+            }
+            None => {
+                state.details.payload.peer_hints.push(hint);
+                true
+            }
+        }
+    } else {
+        let old_len = state.details.payload.peer_hints.len();
+        state
+            .details
+            .payload
+            .peer_hints
+            .retain(|existing| existing.url != url);
+        state.details.payload.peer_hints.len() != old_len
+    };
+
+    if !changed {
+        if options.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "url": url,
+                    "old_version": old_version,
+                    "new_version": old_version,
+                    "status": "unchanged",
+                })
+            );
+        } else {
+            println!("peer hint unchanged: {url}");
+        }
+        return Ok(());
+    }
+
+    state
+        .details
+        .payload
+        .peer_hints
+        .sort_by(|left, right| left.url.cmp(&right.url));
+    let root = unlock_domain_root(&options.trust_domain_id, options.passphrase_file)?;
+    let new_version = write_signed_network_state(&network_dir, &state, original_pem, &root)?;
+    let status = if options.add {
+        "peer-hint-added"
+    } else {
+        "peer-hint-removed"
+    };
+    if options.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "url": url,
+                "old_version": old_version,
+                "new_version": new_version,
+                "status": status,
+            })
+        );
+    } else {
+        println!("{status}: {url}; version {old_version} -> {new_version}");
+    }
+    Ok(())
+}
+
 struct TrustAclExplainOptions {
     trust_domain_id: String,
     network_local_id: String,
@@ -4224,7 +4421,7 @@ async fn connect_join_admission_client(
     }
 
     anyhow::bail!(
-        "failed to connect to join admission endpoint from invite bootstrap seeds{}",
+        "failed to connect to join admission endpoint from invite peer hints{}",
         last_error.map(|err| format!(": {err}")).unwrap_or_default()
     )
 }
@@ -4797,6 +4994,7 @@ fn handle_trust_create_network(
             disabled_certs: Vec::new(),
             acl: to_canonical_cbor(&acl),
             routes: Vec::new(),
+            peer_hints: Vec::new(),
         },
     }
     .sign(&root);
@@ -5814,6 +6012,50 @@ async fn main() -> Result<(), Error> {
                     json,
                     passphrase_file,
                 )?,
+            },
+            TrustSubCommand::PeerHint { command } => match command {
+                TrustPeerHintSubCommand::List {
+                    trust_domain_id,
+                    network_local_id,
+                    json,
+                } => handle_trust_peer_hint_list(trust_domain_id, network_local_id, json)?,
+                TrustPeerHintSubCommand::Add {
+                    trust_domain_id,
+                    network_local_id,
+                    url,
+                    label,
+                    capabilities,
+                    expires_at,
+                    json,
+                    passphrase_file,
+                } => handle_trust_peer_hint_update(PeerHintUpdateOptions {
+                    trust_domain_id,
+                    network_local_id,
+                    url,
+                    label,
+                    capabilities,
+                    expires_at,
+                    add: true,
+                    json,
+                    passphrase_file,
+                })?,
+                TrustPeerHintSubCommand::Remove {
+                    trust_domain_id,
+                    network_local_id,
+                    url,
+                    json,
+                    passphrase_file,
+                } => handle_trust_peer_hint_update(PeerHintUpdateOptions {
+                    trust_domain_id,
+                    network_local_id,
+                    url,
+                    label: None,
+                    capabilities: Vec::new(),
+                    expires_at: None,
+                    add: false,
+                    json,
+                    passphrase_file,
+                })?,
             },
             TrustSubCommand::Acl { command } => match command {
                 TrustAclSubCommand::Explain {

@@ -5,6 +5,7 @@
 //! `routes: RoutesPlaceholder`); they will be typed once T-035..T-041 land.
 
 use ed25519_dalek::{Signature, Verifier};
+use minicbor::{Decoder, Encoder};
 use thiserror::Error;
 
 use super::cbor::{ArmorError, from_cbor, to_canonical_cbor, unwrap_armored, wrap_armored};
@@ -28,6 +29,48 @@ pub struct MemberCertIndexEntry {
     pub expires_at: u64,
 }
 
+mod peer_hint_vec_cbor {
+    use super::*;
+
+    pub fn encode<Ctx, W: minicbor::encode::Write>(
+        value: &[PeerHint],
+        encoder: &mut Encoder<W>,
+        ctx: &mut Ctx,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        minicbor::Encode::encode(value, encoder, ctx)
+    }
+
+    pub fn decode<'b, Ctx>(
+        decoder: &mut Decoder<'b>,
+        ctx: &mut Ctx,
+    ) -> Result<Vec<PeerHint>, minicbor::decode::Error> {
+        minicbor::Decode::decode(decoder, ctx)
+    }
+
+    pub fn nil() -> Option<Vec<PeerHint>> {
+        Some(Vec::new())
+    }
+
+    pub fn is_nil(value: &[PeerHint]) -> bool {
+        value.is_empty()
+    }
+}
+
+/// Root-signed recommended connection candidate. Hints are not authorization.
+#[derive(minicbor::Encode, minicbor::Decode, Debug, Clone, PartialEq, Eq)]
+pub struct PeerHint {
+    #[n(0)]
+    pub url: String,
+    #[n(1)]
+    pub label: Option<String>,
+    #[n(2)]
+    pub capabilities: Vec<String>,
+    #[n(3)]
+    pub updated_at: u64,
+    #[n(4)]
+    pub expires_at: Option<u64>,
+}
+
 /// Opaque ACL bytes (filled by T-035 / T-036).
 pub type AclPlaceholder = Vec<u8>;
 
@@ -49,6 +92,9 @@ pub struct NetworkStatePayload {
     #[n(4)]
     #[cbor(with = "minicbor::bytes")]
     pub routes: RoutesPlaceholder,
+    #[n(5)]
+    #[cbor(with = "peer_hint_vec_cbor", has_nil)]
+    pub peer_hints: Vec<PeerHint>,
 }
 
 /// Header + payload before signing.

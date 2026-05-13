@@ -56,7 +56,7 @@ pub use join::JoinRequest;
 pub use member_cert::{Capabilities, MemberCert, UnsignedMemberCert};
 pub use network_bootstrap::NetworkBootstrap;
 pub use network_state::{
-    MemberCertIndexEntry, NetworkStatePayload, SignedNetworkState, UnsignedNetworkState,
+    MemberCertIndexEntry, NetworkStatePayload, PeerHint, SignedNetworkState, UnsignedNetworkState,
 };
 pub use pool::TrustDomainPool;
 pub use relay_borrow::{

@@ -19,6 +19,7 @@ fn sample_unsigned_network_state_for_root(
             disabled_certs: Vec::new(),
             acl: Vec::new(),
             routes: Vec::new(),
+            peer_hints: Vec::new(),
         },
     }
 }

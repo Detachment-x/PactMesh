@@ -1,13 +1,29 @@
 //! Tests for `trust::network_state` (T-041 payload, T-042 sign/verify, T-043 PEM).
 
 use easytier::trust::network_state::{
-    MemberCertIndexEntry, NetworkStatePayload, NetworkStateVerifyError, SignedNetworkState,
-    UnsignedNetworkState,
+    MemberCertIndexEntry, NetworkStatePayload, NetworkStateVerifyError, PeerHint,
+    SignedNetworkState, UnsignedNetworkState,
 };
 use easytier::trust::revocation::{DisabledCert, RevocationReason, RevokedCert};
 use easytier::trust::{
     MemberCertFingerprint, NetworkLocalId, TrustDomainRoot, from_cbor, to_canonical_cbor,
 };
+
+#[derive(minicbor::Encode)]
+struct LegacyNetworkStatePayload {
+    #[n(0)]
+    member_cert_index: Vec<MemberCertIndexEntry>,
+    #[n(1)]
+    revoked_certs: Vec<easytier::trust::RevokedCert>,
+    #[n(2)]
+    disabled_certs: Vec<easytier::trust::DisabledCert>,
+    #[n(3)]
+    #[cbor(with = "minicbor::bytes")]
+    acl: Vec<u8>,
+    #[n(4)]
+    #[cbor(with = "minicbor::bytes")]
+    routes: Vec<u8>,
+}
 
 fn fingerprint(byte: u8) -> MemberCertFingerprint {
     MemberCertFingerprint([byte; 32])
@@ -43,6 +59,17 @@ fn sample_payload() -> NetworkStatePayload {
         }],
         acl: vec![0x01, 0x02, 0x03, 0x80],
         routes: vec![0xa1, 0x00, 0x01],
+        peer_hints: Vec::new(),
+    }
+}
+
+fn sample_peer_hint() -> PeerHint {
+    PeerHint {
+        url: "tcp://203.0.113.10:11010".to_owned(),
+        label: Some("public-vps-a".to_owned()),
+        capabilities: vec!["public-reachable".to_owned(), "relay-capable".to_owned()],
+        updated_at: 1_717_000_000,
+        expires_at: Some(1_725_000_000),
     }
 }
 
@@ -73,6 +100,7 @@ fn test_payload_empty_lists_ok() {
         disabled_certs: Vec::new(),
         acl: Vec::new(),
         routes: Vec::new(),
+        peer_hints: Vec::new(),
     };
 
     let encoded = to_canonical_cbor(&payload);
@@ -92,6 +120,44 @@ fn test_network_state_payload_round_trip() {
 #[test]
 fn test_network_state_payload_empty_lists_ok() {
     test_payload_empty_lists_ok();
+}
+
+#[test]
+fn test_peer_hints_round_trip_cbor() {
+    let mut payload = sample_payload();
+    payload.peer_hints = vec![sample_peer_hint()];
+
+    let encoded = to_canonical_cbor(&payload);
+    let decoded: NetworkStatePayload = from_cbor(&encoded).unwrap();
+
+    assert_eq!(decoded.peer_hints, payload.peer_hints);
+    assert_eq!(decoded.peer_hints[0].url, "tcp://203.0.113.10:11010");
+}
+
+#[test]
+fn test_peer_hints_covered_by_signature() {
+    let root = TrustDomainRoot::generate();
+    let mut state = sample_unsigned_network_state_for_root(&root).sign(&root);
+    state.details.payload.peer_hints.push(sample_peer_hint());
+
+    assert_eq!(
+        state.verify(&root.public_key().into()),
+        Err(NetworkStateVerifyError::BadSignature)
+    );
+}
+
+#[test]
+fn test_decode_legacy_payload_without_peer_hints_yields_empty_vec() {
+    let legacy = LegacyNetworkStatePayload {
+        member_cert_index: sample_payload().member_cert_index,
+        revoked_certs: Vec::new(),
+        disabled_certs: Vec::new(),
+        acl: Vec::new(),
+        routes: Vec::new(),
+    };
+    let decoded: NetworkStatePayload = from_cbor(&to_canonical_cbor(&legacy)).unwrap();
+
+    assert!(decoded.peer_hints.is_empty());
 }
 
 #[test]

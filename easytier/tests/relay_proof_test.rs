@@ -83,6 +83,7 @@ fn sample_network_state(
             disabled_certs: Vec::new(),
             acl: Vec::new(),
             routes: Vec::new(),
+            peer_hints: Vec::new(),
         },
     }
     .sign(root)

@@ -60,6 +60,7 @@ fn signed_state_with_tags(
             disabled_certs: Vec::new(),
             acl: to_canonical_cbor(&acl),
             routes: Vec::new(),
+            peer_hints: Vec::new(),
         },
     }
     .sign(root)
