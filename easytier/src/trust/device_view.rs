@@ -7,7 +7,10 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Serialize;
 
-use super::{Capabilities, MemberCert, MemberCertFingerprint, SignedNetworkState};
+use super::{
+    AclPolicy, Capabilities, DeviceFingerprint, MemberCert, MemberCertFingerprint,
+    SignedNetworkState, from_cbor,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -94,6 +97,7 @@ pub struct DeviceView {
     pub status: DeviceStatus,
     pub capabilities: DeviceCapabilityView,
     pub hostname: String,
+    pub tags: Vec<String>,
 }
 
 pub fn encode_device_id(bytes: &[u8]) -> String {
@@ -157,6 +161,7 @@ pub fn view_for_member(
     has_root_key: bool,
     now: u64,
 ) -> DeviceView {
+    let tags = tags_for_member(&entry.fingerprint, state);
     DeviceView {
         fingerprint: entry.fingerprint.to_string(),
         device_id: cert
@@ -179,5 +184,19 @@ pub fn view_for_member(
             .and_then(|cert| cert.details.hostname.as_ref())
             .map(|hostname| hostname.as_str().to_owned())
             .unwrap_or_default(),
+        tags,
     }
+}
+
+fn tags_for_member(fingerprint: &MemberCertFingerprint, state: &SignedNetworkState) -> Vec<String> {
+    let Ok(policy) = from_cbor::<AclPolicy>(&state.details.payload.acl) else {
+        return Vec::new();
+    };
+    let member = DeviceFingerprint(fingerprint.0);
+    policy
+        .tags
+        .iter()
+        .filter(|(_, members)| members.contains(&member))
+        .map(|(tag, _)| tag.as_str().to_owned())
+        .collect()
 }

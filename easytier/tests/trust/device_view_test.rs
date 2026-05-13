@@ -1,9 +1,10 @@
 use std::{collections::BTreeMap, str::FromStr};
 
 use easytier::trust::{
-    ACL_SCHEMA_VERSION, AclPolicy, Action, Capabilities, DeviceRole, DeviceStatus,
-    MemberCertIndexEntry, NetworkLocalId, NetworkStatePayload, SignKey, TrustDomainRoot,
-    UnsignedMemberCert, UnsignedNetworkState, encode_device_id, to_canonical_cbor, view_for_member,
+    ACL_SCHEMA_VERSION, AclPolicy, Action, Capabilities, DeviceFingerprint, DeviceRole,
+    DeviceStatus, MemberCertIndexEntry, NetworkLocalId, NetworkStatePayload, SignKey, TagName,
+    TrustDomainRoot, UnsignedMemberCert, UnsignedNetworkState, encode_device_id, to_canonical_cbor,
+    view_for_member,
 };
 use ed25519_dalek::VerifyingKey;
 use pnet::ipnetwork::IpNetwork as IpNet;
@@ -34,8 +35,17 @@ fn signed_state(
     network_id: &str,
     entry: MemberCertIndexEntry,
 ) -> easytier::trust::SignedNetworkState {
+    signed_state_with_tags(root, network_id, entry, BTreeMap::new())
+}
+
+fn signed_state_with_tags(
+    root: &TrustDomainRoot,
+    network_id: &str,
+    entry: MemberCertIndexEntry,
+    tags: BTreeMap<TagName, Vec<DeviceFingerprint>>,
+) -> easytier::trust::SignedNetworkState {
     let acl = AclPolicy {
-        tags: BTreeMap::new(),
+        tags,
         rules: Vec::new(),
         default_action: Action::Accept,
         schema_version: ACL_SCHEMA_VERSION,
@@ -121,4 +131,29 @@ fn test_device_view_expired_is_status_not_role() {
 
     assert_eq!(view.role, DeviceRole::Member);
     assert_eq!(view.status, DeviceStatus::Expired);
+}
+
+#[test]
+fn test_device_view_tags_are_human_grouping_not_role_or_capability() {
+    let root = TrustDomainRoot::generate();
+    let network_id = "office-net";
+    let cert = member_cert(&root, network_id);
+    let entry = MemberCertIndexEntry {
+        fingerprint: cert.fingerprint(),
+        device_label: cert.details.device_label.clone(),
+        issued_at: cert.details.not_before,
+        expires_at: cert.details.expires_at,
+    };
+    let mut tags = BTreeMap::new();
+    tags.insert(
+        TagName::try_from_str("ops").unwrap(),
+        vec![DeviceFingerprint(cert.fingerprint().0)],
+    );
+    let state = signed_state_with_tags(&root, network_id, entry.clone(), tags);
+
+    let view = view_for_member(&entry, Some(&cert), &state, network_id, None, false, 20);
+
+    assert_eq!(view.tags, vec!["ops"]);
+    assert_eq!(view.role, DeviceRole::Member);
+    assert!(view.capabilities.relay_data);
 }

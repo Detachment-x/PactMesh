@@ -169,6 +169,21 @@ fn run_rename(
     cmd.output().unwrap()
 }
 
+fn run_tag(root: &Path, args: &[&str], json: bool) -> std::process::Output {
+    let mut cmd = cli();
+    cmd.env("XDG_CONFIG_HOME", config_home(root))
+        .env("PNW_ROOT_PASSPHRASE", "long-enough-pass")
+        .arg("trust")
+        .arg("tag");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    if json {
+        cmd.arg("--json");
+    }
+    cmd.output().unwrap()
+}
+
 fn run_list_json(root: &Path, domain_id: &str, network_id: &str) -> Value {
     let output = cli()
         .env("XDG_CONFIG_HOME", config_home(root))
@@ -348,4 +363,74 @@ fn test_rename_device_not_found() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("not found"));
+}
+
+#[test]
+fn test_tag_add_list_remove_updates_device_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let (domain_id, network_id, ids) = write_fixture(dir.path());
+
+    let add = run_tag(
+        dir.path(),
+        &["add", &domain_id, &network_id, &ids[0], "ops"],
+        true,
+    );
+    assert!(
+        add.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let add_json: Value = serde_json::from_slice(&add.stdout).unwrap();
+    assert_eq!(add_json["status"], "tag-added");
+    assert_eq!(add_json["tag"], "ops");
+
+    let show_output = run_show(dir.path(), &domain_id, &network_id, &ids[0], true);
+    assert!(
+        show_output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&show_output.stderr)
+    );
+    let shown: Value = serde_json::from_slice(&show_output.stdout).unwrap();
+    assert_eq!(shown["tags"], serde_json::json!(["ops"]));
+    assert_eq!(shown["role"], "member");
+    assert_eq!(shown["capabilities"]["relay_data"], true);
+
+    let list = run_tag(dir.path(), &["list", &domain_id, &network_id], true);
+    assert!(
+        list.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let tags: Value = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(tags.as_array().unwrap().len(), 1);
+    assert_eq!(tags[0]["tag"], "ops");
+
+    let remove = run_tag(
+        dir.path(),
+        &["remove", &domain_id, &network_id, &ids[0], "ops"],
+        true,
+    );
+    assert!(
+        remove.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&remove.stderr)
+    );
+    let shown_after = run_show(dir.path(), &domain_id, &network_id, &ids[0], true);
+    let shown_after: Value = serde_json::from_slice(&shown_after.stdout).unwrap();
+    assert_eq!(shown_after["tags"], serde_json::json!([]));
+}
+
+#[test]
+fn test_tag_invalid_name_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let (domain_id, network_id, ids) = write_fixture(dir.path());
+
+    let output = run_tag(
+        dir.path(),
+        &["add", &domain_id, &network_id, &ids[0], "bad:name"],
+        false,
+    );
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid byte"));
 }

@@ -80,9 +80,9 @@ use easytier::{
         rpc_types::controller::BaseController,
     },
     trust::{
-        ACL_SCHEMA_VERSION, AclPolicy, Action, HostnameLabel, JoinRequest, MemberCertIndexEntry,
-        NetworkLocalId, NetworkStatePayload, SignKey, SignedNetworkState, TrustDomainRoot,
-        UnsignedNetworkState, from_cbor,
+        ACL_SCHEMA_VERSION, AclPolicy, Action, DeviceFingerprint, HostnameLabel, JoinRequest,
+        MemberCertIndexEntry, NetworkLocalId, NetworkStatePayload, SignKey, SignedNetworkState,
+        TagName, TrustDomainRoot, UnsignedNetworkState, from_cbor,
         hostname::check_hostname_unique,
         network_bootstrap::{NetworkBootstrap, bootstrap_to_qr_svg},
         revocation::RevocationReason,
@@ -622,6 +622,10 @@ enum TrustSubCommand {
         #[arg(long, help = "file containing the root passphrase")]
         passphrase_file: Option<PathBuf>,
     },
+    Tag {
+        #[command(subcommand)]
+        command: TrustTagSubCommand,
+    },
     SetHostname {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -681,6 +685,46 @@ enum TrustSubCommand {
         network_local_id: Option<String>,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TrustTagSubCommand {
+    List {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+    },
+    Add {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(help = "device id or unique prefix", allow_hyphen_values = true)]
+        device_id: String,
+        #[arg(help = "tag name")]
+        tag: String,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+        #[arg(long, help = "file containing the root passphrase")]
+        passphrase_file: Option<PathBuf>,
+    },
+    Remove {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(help = "device id or unique prefix", allow_hyphen_values = true)]
+        device_id: String,
+        #[arg(help = "tag name")]
+        tag: String,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+        #[arg(long, help = "file containing the root passphrase")]
+        passphrase_file: Option<PathBuf>,
     },
 }
 
@@ -2887,7 +2931,7 @@ fn handle_trust_list_members(
         return Ok(());
     }
     println!(
-        "device_id\tfingerprint\tdevice_label\trole\tnetwork_local_id\tissued_at\texpires_at\tstatus\tcapabilities\thostname"
+        "device_id\tfingerprint\tdevice_label\trole\tnetwork_local_id\tissued_at\texpires_at\tstatus\tcapabilities\thostname\ttags"
     );
     for row in rows {
         let prefix = row.fingerprint.chars().take(8).collect::<String>();
@@ -2897,7 +2941,7 @@ fn handle_trust_list_members(
             row.device_id.chars().take(12).collect::<String>()
         };
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             device_id,
             prefix,
             row.device_label,
@@ -2907,10 +2951,49 @@ fn handle_trust_list_members(
             row.expires_at,
             row.status.as_str(),
             row.capabilities.render_compact(),
-            row.hostname
+            row.hostname,
+            row.tags.join(",")
         );
     }
     Ok(())
+}
+
+fn acl_policy_from_state(state: &easytier::trust::SignedNetworkState) -> Result<AclPolicy, Error> {
+    from_cbor(&state.details.payload.acl).context("failed to decode network_state ACL policy")
+}
+
+fn cert_fingerprint_to_device_fingerprint(
+    fingerprint: easytier::trust::MemberCertFingerprint,
+) -> DeviceFingerprint {
+    DeviceFingerprint(fingerprint.0)
+}
+
+fn member_fingerprints_for_acl(
+    state: &easytier::trust::SignedNetworkState,
+) -> Vec<DeviceFingerprint> {
+    state
+        .details
+        .payload
+        .member_cert_index
+        .iter()
+        .map(|entry| cert_fingerprint_to_device_fingerprint(entry.fingerprint))
+        .collect()
+}
+
+fn proxy_cidrs_for_acl(
+    network_dir: &std::path::Path,
+    state: &easytier::trust::SignedNetworkState,
+) -> Vec<easytier::trust::Cidr> {
+    let certs = read_member_cert_bodies(network_dir);
+    state
+        .details
+        .payload
+        .member_cert_index
+        .iter()
+        .filter_map(|entry| certs.get(&entry.fingerprint))
+        .flat_map(|cert| cert.details.capabilities.can_proxy_subnet.iter())
+        .map(|net| easytier::trust::Cidr::new(net.ip(), net.prefix()))
+        .collect()
 }
 
 fn collect_member_list_rows(
@@ -3095,6 +3178,137 @@ fn handle_trust_rename_device(
             "Renamed {} to '{}'; old cert revoked as superseded. version {} -> {}",
             old_fp.to_string().chars().take(8).collect::<String>(),
             label,
+            old_version,
+            new_version
+        );
+    }
+    Ok(())
+}
+
+fn handle_trust_tag_list(
+    trust_domain_id: String,
+    network_local_id: String,
+    json: bool,
+) -> Result<(), Error> {
+    let (_network_dir, _pem, state) =
+        load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
+    let policy = acl_policy_from_state(&state)?;
+    if json {
+        let rows = policy
+            .tags
+            .iter()
+            .map(|(tag, members)| {
+                serde_json::json!({
+                    "tag": tag.as_str(),
+                    "members": members.iter().map(|member| easytier::trust::MemberCertFingerprint(member.0).to_string()).collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+        println!("{}", serde_json::to_string(&rows)?);
+    } else if policy.tags.is_empty() {
+        println!("(no tags)");
+    } else {
+        println!("tag\tmembers");
+        for (tag, members) in policy.tags {
+            let members = members
+                .into_iter()
+                .map(|member| easytier::trust::MemberCertFingerprint(member.0).to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            println!("{}\t{}", tag.as_str(), members);
+        }
+    }
+    Ok(())
+}
+
+fn handle_trust_tag_update(
+    trust_domain_id: String,
+    network_local_id: String,
+    device_id: String,
+    tag: String,
+    add: bool,
+    json: bool,
+    passphrase_file: Option<PathBuf>,
+) -> Result<(), Error> {
+    let tag = TagName::try_from_str(&tag)?;
+    let (network_dir, original_pem, mut state) =
+        load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
+    let rows = collect_member_list_rows(&network_dir, &state, &network_local_id);
+    let row = resolve_device_view(rows, &device_id)?;
+    let member_fp = parse_member_cert_fingerprint(&row.fingerprint)?;
+    if member_status(&member_fp, &state) == "revoked" {
+        anyhow::bail!("fingerprint is revoked");
+    }
+    let member = cert_fingerprint_to_device_fingerprint(member_fp);
+    let mut policy = acl_policy_from_state(&state)?;
+    let changed = if add {
+        let members = policy.tags.entry(tag.clone()).or_default();
+        if members.contains(&member) {
+            false
+        } else {
+            members.push(member);
+            members.sort_unstable();
+            true
+        }
+    } else if let Some(members) = policy.tags.get_mut(&tag) {
+        let old_len = members.len();
+        members.retain(|existing| *existing != member);
+        let changed = members.len() != old_len;
+        if members.is_empty() {
+            policy.tags.remove(&tag);
+        }
+        changed
+    } else {
+        false
+    };
+
+    if !changed {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "device_id": row.device_id,
+                    "fingerprint": member_fp.to_string(),
+                    "tag": tag.as_str(),
+                    "old_version": state.details.version,
+                    "new_version": state.details.version,
+                    "status": "unchanged",
+                })
+            );
+        } else {
+            println!("tag unchanged: {}", tag.as_str());
+        }
+        return Ok(());
+    }
+
+    easytier::trust::validate_for_signing(
+        &policy,
+        &member_fingerprints_for_acl(&state),
+        &proxy_cidrs_for_acl(&network_dir, &state),
+    )?;
+    state.details.payload.acl = to_canonical_cbor(&policy);
+    let root = unlock_domain_root(&trust_domain_id, passphrase_file)?;
+    let old_version = state.details.version;
+    let new_version = write_signed_network_state(&network_dir, &state, original_pem, &root)?;
+    let status = if add { "tag-added" } else { "tag-removed" };
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "device_id": row.device_id,
+                "fingerprint": member_fp.to_string(),
+                "tag": tag.as_str(),
+                "old_version": old_version,
+                "new_version": new_version,
+                "status": status,
+            })
+        );
+    } else {
+        println!(
+            "{} {} for {}; version {} -> {}",
+            if add { "Added" } else { "Removed" },
+            tag.as_str(),
+            row.device_id.chars().take(12).collect::<String>(),
             old_version,
             new_version
         );
@@ -5276,6 +5490,45 @@ async fn main() -> Result<(), Error> {
                 json,
                 passphrase_file,
             )?,
+            TrustSubCommand::Tag { command } => match command {
+                TrustTagSubCommand::List {
+                    trust_domain_id,
+                    network_local_id,
+                    json,
+                } => handle_trust_tag_list(trust_domain_id, network_local_id, json)?,
+                TrustTagSubCommand::Add {
+                    trust_domain_id,
+                    network_local_id,
+                    device_id,
+                    tag,
+                    json,
+                    passphrase_file,
+                } => handle_trust_tag_update(
+                    trust_domain_id,
+                    network_local_id,
+                    device_id,
+                    tag,
+                    true,
+                    json,
+                    passphrase_file,
+                )?,
+                TrustTagSubCommand::Remove {
+                    trust_domain_id,
+                    network_local_id,
+                    device_id,
+                    tag,
+                    json,
+                    passphrase_file,
+                } => handle_trust_tag_update(
+                    trust_domain_id,
+                    network_local_id,
+                    device_id,
+                    tag,
+                    false,
+                    json,
+                    passphrase_file,
+                )?,
+            },
             TrustSubCommand::SetHostname {
                 trust_domain_id,
                 network_local_id,
