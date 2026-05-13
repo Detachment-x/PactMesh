@@ -3,8 +3,7 @@ use std::{collections::BTreeMap, str::FromStr};
 use easytier::trust::{
     ACL_SCHEMA_VERSION, AclPolicy, Action, Capabilities, DeviceRole, DeviceStatus,
     MemberCertIndexEntry, NetworkLocalId, NetworkStatePayload, SignKey, TrustDomainRoot,
-    UnsignedMemberCert, UnsignedNetworkState, encode_device_id, to_canonical_cbor,
-    view_for_member,
+    UnsignedMemberCert, UnsignedNetworkState, encode_device_id, to_canonical_cbor, view_for_member,
 };
 use ed25519_dalek::VerifyingKey;
 use pnet::ipnetwork::IpNetwork as IpNet;

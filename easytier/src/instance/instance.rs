@@ -70,9 +70,9 @@ use crate::proto::rpc_types::controller::BaseController;
 use crate::rpc_service::InstanceRpcService;
 use crate::trust::{
     MemberCert, NetworkLocalId, TrustDomainId, TrustDomainPool, TrustDomainRoot,
-    config_sync_service::ConfigSyncService, join_dedup::JoinDedup,
+    config_sync_service::ConfigSyncService, from_cbor, join_dedup::JoinDedup,
     join_forward_service::JoinForwardService, pending_cert_queue::PendingCertQueue,
-    from_cbor, to_canonical_cbor,
+    to_canonical_cbor,
 };
 use crate::tunnel::tcp::TcpTunnelListener;
 use crate::utils::weak_upgrade;
@@ -944,7 +944,8 @@ impl Instance {
                     .with_pending_cert_cache(config_sync.pending_cert_cache());
                 (pending, vec![(trust_domain_id, network_local_id)], true)
             }
-            Ok(None) => match Self::load_trust_domain_id_for_join_forward(&trust_domain.domain_dir) {
+            Ok(None) => match Self::load_trust_domain_id_for_join_forward(&trust_domain.domain_dir)
+            {
                 Ok(Some(trust_domain_id)) => (
                     PendingCertQueue::new(TrustDomainRoot::generate())
                         .with_pending_cert_cache(config_sync.pending_cert_cache()),
@@ -1841,11 +1842,9 @@ impl Instance {
                             || cert.details.device_pk.as_bytes() != &applicant_pk
                             || cert.details.device_label != jr.device_label
                         {
-                            return Err(rpc_types::error::Error::ExecutionError(
-                                anyhow::anyhow!(
-                                    "member_cert_cbor does not match pending join request"
-                                ),
-                            ));
+                            return Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                                "member_cert_cbor does not match pending join request"
+                            )));
                         }
                         pending
                             .try_approve_with_cert(&applicant_pk, cert)
@@ -1856,11 +1855,9 @@ impl Instance {
                             })?
                     } else {
                         if !service.can_sign_pending_certs {
-                            return Err(rpc_types::error::Error::ExecutionError(
-                                anyhow::anyhow!(
-                                    "root signing key is not unlocked; approve with member_cert_cbor"
-                                ),
-                            ));
+                            return Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                                "root signing key is not unlocked; approve with member_cert_cbor"
+                            )));
                         }
                         pending.try_approve(&applicant_pk).ok_or_else(|| {
                             rpc_types::error::Error::ExecutionError(anyhow::anyhow!(

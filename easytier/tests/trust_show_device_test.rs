@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, path::Path, process::Command};
 
 use easytier::trust::{
     ACL_SCHEMA_VERSION, AclPolicy, Action, Capabilities, MemberCert, MemberCertIndexEntry,
-    NetworkLocalId, NetworkStatePayload, SignKey, TrustDomainRoot, UnsignedMemberCert,
-    UnsignedNetworkState, to_canonical_cbor,
+    NetworkLocalId, NetworkStatePayload, RevocationReason, SignKey, SignedNetworkState,
+    TrustDomainRoot, UnsignedMemberCert, UnsignedNetworkState, to_canonical_cbor,
 };
 use ed25519_dalek::VerifyingKey;
 use serde_json::Value;
@@ -32,7 +32,12 @@ fn encode_device_id(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn member_cert(root: &TrustDomainRoot, network_id: &str, relay_data: bool, label: &str) -> MemberCert {
+fn member_cert(
+    root: &TrustDomainRoot,
+    network_id: &str,
+    relay_data: bool,
+    label: &str,
+) -> MemberCert {
     let sk = SignKey::generate();
     let device_pk = VerifyingKey::from_bytes(&sk.verify_key().0).unwrap();
     UnsignedMemberCert {
@@ -120,7 +125,13 @@ fn write_fixture(root_dir: &Path) -> (String, String, Vec<String>) {
     (domain_id, network_id, ids)
 }
 
-fn run_show(root: &Path, domain_id: &str, network_id: &str, device_id: &str, json: bool) -> std::process::Output {
+fn run_show(
+    root: &Path,
+    domain_id: &str,
+    network_id: &str,
+    device_id: &str,
+    json: bool,
+) -> std::process::Output {
     let mut cmd = cli();
     cmd.env("XDG_CONFIG_HOME", config_home(root))
         .arg("trust")
@@ -132,6 +143,56 @@ fn run_show(root: &Path, domain_id: &str, network_id: &str, device_id: &str, jso
         cmd.arg("--json");
     }
     cmd.output().unwrap()
+}
+
+fn run_rename(
+    root: &Path,
+    domain_id: &str,
+    network_id: &str,
+    device_id: &str,
+    label: &str,
+    json: bool,
+) -> std::process::Output {
+    let mut cmd = cli();
+    cmd.env("XDG_CONFIG_HOME", config_home(root))
+        .env("PNW_ROOT_PASSPHRASE", "long-enough-pass")
+        .arg("trust")
+        .arg("rename-device")
+        .arg(domain_id)
+        .arg(network_id)
+        .arg(device_id)
+        .arg("--label")
+        .arg(label);
+    if json {
+        cmd.arg("--json");
+    }
+    cmd.output().unwrap()
+}
+
+fn run_list_json(root: &Path, domain_id: &str, network_id: &str) -> Value {
+    let output = cli()
+        .env("XDG_CONFIG_HOME", config_home(root))
+        .arg("trust")
+        .arg("list-members")
+        .arg(domain_id)
+        .arg(network_id)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn read_state(root: &Path, domain_id: &str, network_id: &str) -> SignedNetworkState {
+    let pem = std::fs::read_to_string(
+        network_dir(root, domain_id, network_id).join("network_state.cbor.pem"),
+    )
+    .unwrap();
+    SignedNetworkState::from_pem(&pem).unwrap()
 }
 
 #[test]
@@ -191,6 +252,99 @@ fn test_show_device_not_found() {
     let (domain_id, network_id, _ids) = write_fixture(dir.path());
 
     let output = run_show(dir.path(), &domain_id, &network_id, "no-such-device", false);
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not found"));
+}
+
+#[test]
+fn test_rename_device_updates_list_and_show() {
+    let dir = tempfile::tempdir().unwrap();
+    let (domain_id, network_id, ids) = write_fixture(dir.path());
+
+    let output = run_rename(
+        dir.path(),
+        &domain_id,
+        &network_id,
+        &ids[0],
+        "alpha-new",
+        true,
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rename: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(rename["status"], "renamed");
+    assert_eq!(rename["device_label"], "alpha-new");
+    assert_ne!(rename["old_fingerprint"], rename["new_fingerprint"]);
+
+    let show_output = run_show(dir.path(), &domain_id, &network_id, &ids[0], true);
+    assert!(
+        show_output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&show_output.stderr)
+    );
+    let shown: Value = serde_json::from_slice(&show_output.stdout).unwrap();
+    assert_eq!(shown["device_id"], ids[0]);
+    assert_eq!(shown["device_label"], "alpha-new");
+
+    let listed = run_list_json(dir.path(), &domain_id, &network_id);
+    let active_rows = listed.as_array().unwrap();
+    assert_eq!(
+        active_rows
+            .iter()
+            .filter(|row| row["device_id"] == ids[0] && row["status"] == "active")
+            .count(),
+        1
+    );
+    assert!(
+        active_rows
+            .iter()
+            .any(|row| row["device_id"] == ids[0] && row["device_label"] == "alpha-new")
+    );
+    assert!(
+        active_rows
+            .iter()
+            .all(|row| row["device_id"] != ids[0] || row["device_label"] != "alpha")
+    );
+
+    let state = read_state(dir.path(), &domain_id, &network_id);
+    assert_eq!(state.details.version, 2);
+    assert!(state.details.payload.revoked_certs.iter().any(|revoked| {
+        revoked.cert_fingerprint.to_string() == rename["old_fingerprint"].as_str().unwrap()
+            && revoked.reason_code == RevocationReason::Superseded
+    }));
+}
+
+#[test]
+fn test_rename_device_ambiguous_prefix_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let (domain_id, network_id, _ids) = write_fixture(dir.path());
+
+    let output = run_rename(dir.path(), &domain_id, &network_id, "", "new-name", false);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ambiguous"));
+    assert!(stderr.contains("candidates"));
+}
+
+#[test]
+fn test_rename_device_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let (domain_id, network_id, _ids) = write_fixture(dir.path());
+
+    let output = run_rename(
+        dir.path(),
+        &domain_id,
+        &network_id,
+        "no-such-device",
+        "new-name",
+        false,
+    );
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("not found"));

@@ -606,6 +606,22 @@ enum TrustSubCommand {
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
     },
+    RenameDevice {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(help = "device id or unique prefix", allow_hyphen_values = true)]
+        device_id: String,
+        #[arg(long, help = "new human-readable device label")]
+        label: String,
+        #[arg(long, help = "audit note for superseding old cert")]
+        note: Option<String>,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+        #[arg(long, help = "file containing the root passphrase")]
+        passphrase_file: Option<PathBuf>,
+    },
     SetHostname {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -2870,7 +2886,9 @@ fn handle_trust_list_members(
         println!("(no members)");
         return Ok(());
     }
-    println!("device_id\tfingerprint\tdevice_label\trole\tnetwork_local_id\tissued_at\texpires_at\tstatus\tcapabilities\thostname");
+    println!(
+        "device_id\tfingerprint\tdevice_label\trole\tnetwork_local_id\tissued_at\texpires_at\tstatus\tcapabilities\thostname"
+    );
     for row in rows {
         let prefix = row.fingerprint.chars().take(8).collect::<String>();
         let device_id = if row.device_id == "unknown" {
@@ -2935,38 +2953,153 @@ fn handle_trust_show_device(
     let (network_dir, _pem, state) =
         load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
     let rows = collect_member_list_rows(&network_dir, &state, &network_local_id);
+    let row = resolve_device_view(rows, &device_id)?;
+    if json {
+        println!("{}", serde_json::to_string(&row)?);
+    } else {
+        println!("device_id: {}", row.device_id);
+        println!("fingerprint: {}", row.fingerprint);
+        println!("device_label: {}", row.device_label);
+        println!("role: {}", row.role.as_str());
+        println!("network_local_id: {}", row.network_local_id);
+        println!("issued_at: {}", row.issued_at);
+        println!("expires_at: {}", row.expires_at);
+        println!("status: {}", row.status.as_str());
+        println!("capabilities: {}", row.capabilities.render_compact());
+        println!("hostname: {}", row.hostname);
+    }
+    Ok(())
+}
+
+fn resolve_device_view(
+    rows: Vec<easytier::trust::DeviceView>,
+    device_id: &str,
+) -> Result<easytier::trust::DeviceView, Error> {
     let matches = rows
         .into_iter()
-        .filter(|row| row.device_id != "unknown" && row.device_id.starts_with(&device_id))
+        .filter(|row| row.device_id != "unknown" && row.device_id.starts_with(device_id))
         .collect::<Vec<_>>();
     match matches.as_slice() {
         [] => anyhow::bail!("device_id not found: {}", device_id),
-        [row] => {
-            if json {
-                println!("{}", serde_json::to_string(row)?);
-            } else {
-                println!("device_id: {}", row.device_id);
-                println!("fingerprint: {}", row.fingerprint);
-                println!("device_label: {}", row.device_label);
-                println!("role: {}", row.role.as_str());
-                println!("network_local_id: {}", row.network_local_id);
-                println!("issued_at: {}", row.issued_at);
-                println!("expires_at: {}", row.expires_at);
-                println!("status: {}", row.status.as_str());
-                println!("capabilities: {}", row.capabilities.render_compact());
-                println!("hostname: {}", row.hostname);
-            }
-            Ok(())
-        }
+        [row] => Ok(row.clone()),
         _ => {
             let candidates = matches
                 .iter()
                 .map(|row| row.device_id.chars().take(12).collect::<String>())
                 .collect::<Vec<_>>()
                 .join(", ");
-            anyhow::bail!("device_id prefix is ambiguous: {} (candidates: {})", device_id, candidates)
+            anyhow::bail!(
+                "device_id prefix is ambiguous: {} (candidates: {})",
+                device_id,
+                candidates
+            )
         }
     }
+}
+
+fn handle_trust_rename_device(
+    trust_domain_id: String,
+    network_local_id: String,
+    device_id: String,
+    label: String,
+    note: Option<String>,
+    json: bool,
+    passphrase_file: Option<PathBuf>,
+) -> Result<(), Error> {
+    if label.trim().is_empty() {
+        anyhow::bail!("device label cannot be empty");
+    }
+    let (network_dir, original_pem, mut state) =
+        load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
+    let rows = collect_member_list_rows(&network_dir, &state, &network_local_id);
+    let row = resolve_device_view(rows, &device_id)?;
+    let old_fp = parse_member_cert_fingerprint(&row.fingerprint)?;
+    if member_status(&old_fp, &state) == "revoked" {
+        anyhow::bail!("fingerprint is revoked");
+    }
+
+    let certs = read_member_cert_bodies(&network_dir);
+    let old_cert = certs
+        .get(&old_fp)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("member cert body not found; cannot rename device"))?;
+    if old_cert.details.device_label == label {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "device_id": row.device_id,
+                    "device_label": label,
+                    "fingerprint": old_fp.to_string(),
+                    "old_version": state.details.version,
+                    "new_version": state.details.version,
+                    "status": "unchanged",
+                })
+            );
+        } else {
+            println!(
+                "device label unchanged for {}",
+                old_fp.to_string().chars().take(8).collect::<String>()
+            );
+        }
+        return Ok(());
+    }
+
+    let root = unlock_domain_root(&trust_domain_id, passphrase_file)?;
+    let mut new_details = old_cert.details.clone();
+    new_details.device_label = label.clone();
+    new_details.network_state_version_ref = state.details.version.saturating_add(1);
+    let new_cert = new_details.sign(&root);
+    state
+        .details
+        .payload
+        .revoked_certs
+        .push(easytier::trust::RevokedCert {
+            cert_fingerprint: old_fp,
+            revoked_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .context("system clock before unix epoch")?
+                .as_secs(),
+            reason_code: RevocationReason::Superseded,
+            reason_note: note,
+        });
+    replace_member_index_entry(&mut state, old_fp, &new_cert);
+
+    let cert_dir = network_dir.join("member_certs");
+    std::fs::create_dir_all(&cert_dir)
+        .with_context(|| format!("failed to create {}", cert_dir.display()))?;
+    std::fs::write(
+        cert_dir.join(format!("{}.pem", new_cert.fingerprint())),
+        new_cert.to_pem(),
+    )
+    .context("failed to write renamed member cert")?;
+
+    let old_version = state.details.version;
+    let new_version = write_signed_network_state(&network_dir, &state, original_pem, &root)?;
+    let new_fp = new_cert.fingerprint();
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "device_id": row.device_id,
+                "device_label": label,
+                "old_fingerprint": old_fp.to_string(),
+                "new_fingerprint": new_fp.to_string(),
+                "old_version": old_version,
+                "new_version": new_version,
+                "status": "renamed",
+            })
+        );
+    } else {
+        println!(
+            "Renamed {} to '{}'; old cert revoked as superseded. version {} -> {}",
+            old_fp.to_string().chars().take(8).collect::<String>(),
+            label,
+            old_version,
+            new_version
+        );
+    }
+    Ok(())
 }
 
 fn read_member_cert_bodies(
@@ -5126,6 +5259,23 @@ async fn main() -> Result<(), Error> {
             } => {
                 handle_trust_show_device(trust_domain_id, network_local_id, device_id, json)?;
             }
+            TrustSubCommand::RenameDevice {
+                trust_domain_id,
+                network_local_id,
+                device_id,
+                label,
+                note,
+                json,
+                passphrase_file,
+            } => handle_trust_rename_device(
+                trust_domain_id,
+                network_local_id,
+                device_id,
+                label,
+                note,
+                json,
+                passphrase_file,
+            )?,
             TrustSubCommand::SetHostname {
                 trust_domain_id,
                 network_local_id,

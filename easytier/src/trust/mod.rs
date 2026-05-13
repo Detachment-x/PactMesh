@@ -47,8 +47,8 @@ pub use acl_validate::{validate_for_receiving, validate_for_signing};
 pub use cache::CachedMemberCert;
 pub use cbor::{from_cbor, to_canonical_cbor, unwrap_armored, wrap_armored};
 pub use device_view::{
-    DeviceCapabilityView, DeviceRole, DeviceStatus, DeviceView, encode_device_id,
-    role_for_member, status_for_member, view_for_member,
+    DeviceCapabilityView, DeviceRole, DeviceStatus, DeviceView, encode_device_id, role_for_member,
+    status_for_member, view_for_member,
 };
 pub use hostname::{HostnameError, HostnameLabel};
 pub use identity::{SignKey, TrustDomainRoot, VerifyKey};
