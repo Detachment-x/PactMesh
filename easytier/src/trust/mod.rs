@@ -25,6 +25,7 @@ pub mod identity;
 pub mod join;
 pub mod join_dedup;
 pub mod join_forward_service;
+pub mod lan_discovery;
 pub mod lan_recovery;
 pub mod member_cert;
 pub mod network_bootstrap;
@@ -55,6 +56,10 @@ pub use device_view::{
 pub use hostname::{HostnameError, HostnameLabel};
 pub use identity::{SignKey, TrustDomainRoot, VerifyKey};
 pub use join::JoinRequest;
+pub use lan_discovery::{
+    LAN_DISCOVERY_SOURCE, LanDiscoveryError, LanNetworkStateQuery, LanNetworkStateResponse,
+    apply_lan_response, build_lan_query, response_for_query,
+};
 pub use lan_recovery::{LanRecoveryError, apply_lan_recovered_network_state};
 pub use member_cert::{Capabilities, MemberCert, UnsignedMemberCert};
 pub use network_bootstrap::NetworkBootstrap;
