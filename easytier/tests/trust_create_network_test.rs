@@ -197,3 +197,54 @@ fn test_create_network_json_output() {
     assert_eq!(value["default_action"], "accept");
     assert!(Path::new(value["path"].as_str().unwrap()).is_dir());
 }
+
+#[test]
+fn test_create_network_passphrase_file_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let domain_id = create_domain(dir.path(), "long-enough-pass");
+    let passphrase_dir = tempfile::tempdir().unwrap();
+    let passphrase_file = passphrase_dir.path().join("management-passphrase.txt");
+    std::fs::write(&passphrase_file, "long-enough-pass\n").unwrap();
+
+    let output = cli()
+        .env("XDG_CONFIG_HOME", config_home(dir.path()))
+        .env_remove("PNW_ROOT_PASSPHRASE")
+        .arg("trust")
+        .arg("create-network")
+        .arg(&domain_id)
+        .arg("file-pass-net")
+        .arg("--passphrase-file")
+        .arg(&passphrase_file)
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["network_local_id"], "file-pass-net");
+}
+
+#[test]
+fn test_create_network_missing_passphrase_non_tty_reports_management_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let domain_id = create_domain(dir.path(), "long-enough-pass");
+
+    let output = cli()
+        .env("XDG_CONFIG_HOME", config_home(dir.path()))
+        .env_remove("PNW_ROOT_PASSPHRASE")
+        .arg("trust")
+        .arg("create-network")
+        .arg(&domain_id)
+        .arg("missing-pass-net")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("management password"), "stderr={stderr}");
+    assert!(stderr.contains("TTY"), "stderr={stderr}");
+}
