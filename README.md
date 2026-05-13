@@ -43,27 +43,35 @@ This makes asymmetric topologies practical: a friend with a well-connected home 
 
 ## Quick Start
 
-The exact binary name and service wrapper depend on how you build or package this fork, but the trust workflow is:
+The exact binary name and service wrapper depend on how you build or package this fork. For first-run setup, use this order: create a trust domain and set the management password, create a network, bootstrap the root device as a member, then export an invite for other devices.
 
 ```bash
-# 1. Create a trust domain. The root private key is encrypted locally with your root key passphrase.
-PNW_ROOT_PASSPHRASE='change-me-long-passphrase' \
-  easytier-cli trust create-domain --label home --out-dir ~/.config/privateNetwork/trust-domains
+# 1. Create a trust domain. Enter and confirm the management password interactively;
+#    the root private key is encrypted locally as sk_root.age.
+easytier-cli trust create-domain --label home --out-dir ~/.config/privateNetwork/trust-domains
+
+# Save the trust_domain_id printed by create-domain.
+export TRUST_DOMAIN_ID='<trust_domain_id>'
+export NETWORK_LOCAL_ID='home'
 
 # 2. Create a network inside that trust domain.
-PNW_ROOT_PASSPHRASE='change-me-long-passphrase' \
-  easytier-cli trust create-network <trust_domain_id> home --default-action accept
+easytier-cli trust create-network "$TRUST_DOMAIN_ID" "$NETWORK_LOCAL_ID" --default-action accept
 
-# 3. Export an invite/bootstrap bundle for another device.
-easytier-cli trust invite <trust_domain_id> home \
+# 3. Bootstrap the current root device as a network member.
+easytier-cli trust bootstrap-self "$TRUST_DOMAIN_ID" "$NETWORK_LOCAL_ID" --device-label root-a
+
+# 4. Export an invite/bootstrap bundle for another device.
+easytier-cli trust invite "$TRUST_DOMAIN_ID" "$NETWORK_LOCAL_ID" \
   --seed tcp://<reachable-node>:11010 \
   --format url
 
-# 4. On the new device, accept the invite and generate a join request.
+# 5. On the new device, accept the invite and generate a join request.
 easytier-cli trust accept-invite '<privatenetwork://join?...>' \
   --device-label laptop \
   --hint 'Alice laptop'
 ```
+
+Automation and non-TTY environments cannot use the interactive prompt; provide the management password through `PNW_ROOT_PASSPHRASE` or `--passphrase-file` instead. The management password is only needed by management CLI commands that sign with `SK_root`, such as `create-domain`, `create-network`, `bootstrap-self`, `approve`, and `revoke`. Do not keep it in the daemon environment.
 
 For an online approval flow, run the daemon/instance with trust services enabled and use the `--online` option on `trust accept-invite`. `--online` derives a join-admission endpoint from the invite's `tcp://<reachable-node>:11010` seed as `tcp://<reachable-node>:11011`, so public firewalls must allow `11010/TCP` and `11011/TCP`; the management RPC port `15888` should remain bound to localhost and must not be exposed to new devices or the public Internet. By default the device private key is stored as `sk_self.raw` with local file permissions, so the daemon can restart without an interactive device passphrase; if you set `PNW_DEVICE_PASSPHRASE` or use `--passphrase-file`, PactMesh stores `sk_self.age` instead and the daemon must be given `--sk-self-password-env`. Keep the root key passphrase out of the daemon environment, and let management CLI commands unlock `SK_root` only when signing approvals or config changes. Without `--online`, the command prepares local device keys and a pending join request artifact that can be submitted later.
 

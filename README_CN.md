@@ -49,27 +49,34 @@ PactMesh 当前处于 Alpha 阶段，面向私人和小团队使用。公网 VPS
 
 ## 快速开始
 
-具体二进制名称和服务封装取决于你的构建/打包方式；信任层的基本流程如下：
+具体二进制名称和服务封装取决于你的构建/打包方式。首次初始化建议按下面的向导顺序执行：先创建信任域并设置管理密码，再创建网络，给根设备自己签发成员证书，最后生成给其他设备使用的 invite。
 
 ```bash
-# 1. 创建信任域。根私钥会用你设置的管理密码在本地加密保存。
-PNW_ROOT_PASSPHRASE='change-me-long-passphrase' \
-  easytier-cli trust create-domain --label home --out-dir ~/.config/privateNetwork/trust-domains
+# 1. 创建信任域。交互式输入并确认管理密码；根私钥会加密保存为 sk_root.age。
+easytier-cli trust create-domain --label home --out-dir ~/.config/privateNetwork/trust-domains
+
+# 保存输出中的 trust_domain_id，后续命令都需要它。
+export TRUST_DOMAIN_ID='<trust_domain_id>'
+export NETWORK_LOCAL_ID='home'
 
 # 2. 在该信任域下创建网络。
-PNW_ROOT_PASSPHRASE='change-me-long-passphrase' \
-  easytier-cli trust create-network <trust_domain_id> home --default-action accept
+easytier-cli trust create-network "$TRUST_DOMAIN_ID" "$NETWORK_LOCAL_ID" --default-action accept
 
-# 3. 为新设备导出 invite/bootstrap。
-easytier-cli trust invite <trust_domain_id> home \
+# 3. 给当前根设备自己签发成员证书，否则 daemon 无法作为网络成员启动。
+easytier-cli trust bootstrap-self "$TRUST_DOMAIN_ID" "$NETWORK_LOCAL_ID" --device-label root-a
+
+# 4. 为新设备导出 invite/bootstrap。
+easytier-cli trust invite "$TRUST_DOMAIN_ID" "$NETWORK_LOCAL_ID" \
   --seed tcp://<reachable-node>:11010 \
   --format url
 
-# 4. 在新设备上接受 invite，并生成 join request。
+# 5. 在新设备上接受 invite，并生成 join request。
 easytier-cli trust accept-invite '<privatenetwork://join?...>' \
   --device-label laptop \
   --hint 'Alice laptop'
 ```
+
+自动化脚本或非 TTY 环境不能交互输入管理密码，应使用 `PNW_ROOT_PASSPHRASE` 或 `--passphrase-file`。管理密码只在 `create-domain`、`create-network`、`bootstrap-self`、`approve`、`revoke` 等需要 `SK_root` 签名的管理 CLI 命令中按需使用；正常 daemon 运行不要常驻携带管理密码。
 
 如果要走在线审批流程，需要先运行启用了 trust services 的 daemon/instance，然后在 `trust accept-invite` 中使用 `--online`。`--online` 会从 invite 中的 `tcp://<reachable-node>:11010` seed 自动推导 join-admission 准入端口 `tcp://<reachable-node>:11011`，因此公网/防火墙需要放行 `11010/TCP` 与 `11011/TCP`；管理 RPC `15888` 只应绑定本机，不应暴露给新设备或公网。设备私钥默认以 `sk_self.raw` 存储并依赖本机文件权限保护，因此 daemon 可无交互重启；如果显式设置 `PNW_DEVICE_PASSPHRASE` 或 `--passphrase-file`，PactMesh 会改用 `sk_self.age`，daemon 才需要 `--sk-self-password-env`。不要把管理密码放进 daemon 环境；审批和配置修改由管理 CLI 命令按需解锁 `SK_root` 后签名。不使用 `--online` 时，该命令只会准备本地设备密钥和待提交的 join request artifact，后续可再提交。
 
