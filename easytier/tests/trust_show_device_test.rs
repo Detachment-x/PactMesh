@@ -1,9 +1,10 @@
 use std::{collections::BTreeMap, path::Path, process::Command};
 
 use easytier::trust::{
-    ACL_SCHEMA_VERSION, AclPolicy, Action, Capabilities, MemberCert, MemberCertIndexEntry,
-    NetworkLocalId, NetworkStatePayload, RevocationReason, SignKey, SignedNetworkState,
-    TrustDomainRoot, UnsignedMemberCert, UnsignedNetworkState, to_canonical_cbor,
+    ACL_SCHEMA_VERSION, AclPolicy, AclRule, Action, Capabilities, DeviceFingerprint, MemberCert,
+    MemberCertIndexEntry, NetworkLocalId, NetworkStatePayload, PortSpec, Proto, RevocationReason,
+    Selector, SignKey, SignedNetworkState, TagName, TrustDomainRoot, UnsignedMemberCert,
+    UnsignedNetworkState, to_canonical_cbor,
 };
 use ed25519_dalek::VerifyingKey;
 use serde_json::Value;
@@ -184,6 +185,20 @@ fn run_tag(root: &Path, args: &[&str], json: bool) -> std::process::Output {
     cmd.output().unwrap()
 }
 
+fn run_trust_acl(root: &Path, args: &[&str], json: bool) -> std::process::Output {
+    let mut cmd = cli();
+    cmd.env("XDG_CONFIG_HOME", config_home(root))
+        .arg("trust")
+        .arg("acl");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    if json {
+        cmd.arg("--json");
+    }
+    cmd.output().unwrap()
+}
+
 fn run_list_json(root: &Path, domain_id: &str, network_id: &str) -> Value {
     let output = cli()
         .env("XDG_CONFIG_HOME", config_home(root))
@@ -208,6 +223,62 @@ fn read_state(root: &Path, domain_id: &str, network_id: &str) -> SignedNetworkSt
     )
     .unwrap();
     SignedNetworkState::from_pem(&pem).unwrap()
+}
+
+fn write_acl_policy(root: &Path, domain_id: &str, network_id: &str, policy: AclPolicy) {
+    let state = read_state(root, domain_id, network_id);
+    let root_key = TrustDomainRoot::load_from_file(
+        &trust_domains_dir(root).join(domain_id).join("sk_root.age"),
+        "long-enough-pass",
+    )
+    .unwrap();
+    let mut details = state.details.clone();
+    details.payload.acl = to_canonical_cbor(&policy);
+    let signed = details.sign(&root_key);
+    std::fs::write(
+        network_dir(root, domain_id, network_id).join("network_state.cbor.pem"),
+        signed.to_pem(),
+    )
+    .unwrap();
+}
+
+fn fingerprint_from_state(
+    root: &Path,
+    domain_id: &str,
+    network_id: &str,
+    idx: usize,
+) -> DeviceFingerprint {
+    DeviceFingerprint(
+        read_state(root, domain_id, network_id)
+            .details
+            .payload
+            .member_cert_index[idx]
+            .fingerprint
+            .0,
+    )
+}
+
+fn tag(name: &str) -> TagName {
+    TagName::try_from_str(name).unwrap()
+}
+
+fn explain_json(
+    root: &Path,
+    domain_id: &str,
+    network_id: &str,
+    src: &str,
+    dst: &str,
+    extra: &[&str],
+) -> Value {
+    let mut args = vec!["explain", domain_id, network_id, src, dst];
+    args.extend_from_slice(extra);
+    let output = run_trust_acl(root, &args, true);
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 #[test]
@@ -433,4 +504,154 @@ fn test_tag_invalid_name_rejected() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid byte"));
+}
+
+#[test]
+fn test_acl_explain_allows_by_device_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let (domain_id, network_id, ids) = write_fixture(dir.path());
+    let fp0 = fingerprint_from_state(dir.path(), &domain_id, &network_id, 0);
+    let fp1 = fingerprint_from_state(dir.path(), &domain_id, &network_id, 1);
+    write_acl_policy(
+        dir.path(),
+        &domain_id,
+        &network_id,
+        AclPolicy {
+            tags: BTreeMap::new(),
+            rules: vec![AclRule {
+                action: Action::Accept,
+                src: vec![Selector::Device(fp0)],
+                dst: vec![Selector::Device(fp1)],
+                proto: Proto::Tcp,
+                ports: Some(vec![PortSpec::Single(22)]),
+            }],
+            default_action: Action::Drop,
+            schema_version: ACL_SCHEMA_VERSION,
+        },
+    );
+
+    let value = explain_json(
+        dir.path(),
+        &domain_id,
+        &network_id,
+        &ids[0],
+        &ids[1],
+        &["--proto", "tcp", "--port", "22"],
+    );
+
+    assert_eq!(value["action"], "accept");
+    assert_eq!(value["matched_rule"], 0);
+    assert!(value["reason"].as_str().unwrap().contains("device:"));
+}
+
+#[test]
+fn test_acl_explain_drops_by_tag_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let (domain_id, network_id, ids) = write_fixture(dir.path());
+    let fp0 = fingerprint_from_state(dir.path(), &domain_id, &network_id, 0);
+    let fp1 = fingerprint_from_state(dir.path(), &domain_id, &network_id, 1);
+    let mut tags = BTreeMap::new();
+    tags.insert(tag("ops"), vec![fp0]);
+    tags.insert(tag("server"), vec![fp1]);
+    write_acl_policy(
+        dir.path(),
+        &domain_id,
+        &network_id,
+        AclPolicy {
+            tags,
+            rules: vec![AclRule {
+                action: Action::Drop,
+                src: vec![Selector::Tag(tag("ops"))],
+                dst: vec![Selector::Tag(tag("server"))],
+                proto: Proto::Tcp,
+                ports: Some(vec![PortSpec::Single(5432)]),
+            }],
+            default_action: Action::Accept,
+            schema_version: ACL_SCHEMA_VERSION,
+        },
+    );
+
+    let value = explain_json(
+        dir.path(),
+        &domain_id,
+        &network_id,
+        &ids[0],
+        &ids[1],
+        &["--proto", "tcp", "--port", "5432"],
+    );
+
+    assert_eq!(value["action"], "drop");
+    assert_eq!(value["matched_rule"], 0);
+    assert_eq!(value["src_tags"], serde_json::json!(["ops"]));
+    assert_eq!(value["dst_tags"], serde_json::json!(["server"]));
+    assert!(value["reason"].as_str().unwrap().contains("tag:ops"));
+}
+
+#[test]
+fn test_acl_explain_port_mismatch_falls_back_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let (domain_id, network_id, ids) = write_fixture(dir.path());
+    let fp0 = fingerprint_from_state(dir.path(), &domain_id, &network_id, 0);
+    let fp1 = fingerprint_from_state(dir.path(), &domain_id, &network_id, 1);
+    write_acl_policy(
+        dir.path(),
+        &domain_id,
+        &network_id,
+        AclPolicy {
+            tags: BTreeMap::new(),
+            rules: vec![AclRule {
+                action: Action::Accept,
+                src: vec![Selector::Device(fp0)],
+                dst: vec![Selector::Device(fp1)],
+                proto: Proto::Tcp,
+                ports: Some(vec![PortSpec::Single(22)]),
+            }],
+            default_action: Action::Drop,
+            schema_version: ACL_SCHEMA_VERSION,
+        },
+    );
+
+    let value = explain_json(
+        dir.path(),
+        &domain_id,
+        &network_id,
+        &ids[0],
+        &ids[1],
+        &["--proto", "tcp", "--port", "80"],
+    );
+
+    assert_eq!(value["action"], "drop");
+    assert!(value["matched_rule"].is_null());
+    assert_eq!(value["reason"], "default policy");
+}
+
+#[test]
+fn test_acl_explain_default_accept_human_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let (domain_id, network_id, ids) = write_fixture(dir.path());
+
+    let output = run_trust_acl(
+        dir.path(),
+        &[
+            "explain",
+            &domain_id,
+            &network_id,
+            &ids[0],
+            &ids[1],
+            "--proto",
+            "udp",
+            "--port",
+            "53",
+        ],
+        false,
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("action: accept"));
+    assert!(stdout.contains("default policy applies"));
 }

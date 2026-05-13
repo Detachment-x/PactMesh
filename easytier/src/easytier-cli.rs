@@ -80,13 +80,14 @@ use easytier::{
         rpc_types::controller::BaseController,
     },
     trust::{
-        ACL_SCHEMA_VERSION, AclPolicy, Action, DeviceFingerprint, HostnameLabel, JoinRequest,
-        MemberCertIndexEntry, NetworkLocalId, NetworkStatePayload, SignKey, SignedNetworkState,
-        TagName, TrustDomainRoot, UnsignedNetworkState, from_cbor,
+        ACL_SCHEMA_VERSION, AclPolicy, AclRule, Action, DeviceFingerprint, HostnameLabel,
+        JoinRequest, MemberCertIndexEntry, NetworkLocalId, NetworkStatePayload, PacketTuple,
+        PeerMatchContext, PortSpec, Proto, Selector as AclSelector, SignKey, SignedNetworkState,
+        TagName, TrustDomainRoot, UnsignedNetworkState, decide, from_cbor,
         hostname::check_hostname_unique,
         network_bootstrap::{NetworkBootstrap, bootstrap_to_qr_svg},
         revocation::RevocationReason,
-        to_canonical_cbor, wrap_armored,
+        selector_match, to_canonical_cbor, wrap_armored,
     },
     tunnel::{TunnelScheme, tcp::TcpTunnelConnector},
     utils::{PeerRoutePair, string::cost_to_str},
@@ -626,6 +627,10 @@ enum TrustSubCommand {
         #[command(subcommand)]
         command: TrustTagSubCommand,
     },
+    Acl {
+        #[command(subcommand)]
+        command: TrustAclSubCommand,
+    },
     SetHostname {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -725,6 +730,33 @@ enum TrustTagSubCommand {
         json: bool,
         #[arg(long, help = "file containing the root passphrase")]
         passphrase_file: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TrustAclSubCommand {
+    Explain {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(help = "source device id or unique prefix", allow_hyphen_values = true)]
+        src_device_id: String,
+        #[arg(
+            help = "destination device id or unique prefix",
+            allow_hyphen_values = true
+        )]
+        dst_device_id: String,
+        #[arg(long, default_value = "tcp", help = "protocol: tcp, udp, icmp, or any")]
+        proto: String,
+        #[arg(long, help = "destination port for tcp/udp explanations")]
+        port: Option<u16>,
+        #[arg(long, default_value = "100.64.0.1", help = "source packet IP")]
+        src_ip: IpAddr,
+        #[arg(long, default_value = "100.64.0.2", help = "destination packet IP")]
+        dst_ip: IpAddr,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
     },
 }
 
@@ -2996,6 +3028,35 @@ fn proxy_cidrs_for_acl(
         .collect()
 }
 
+fn proxy_cidr_pairs_for_acl(
+    network_dir: &std::path::Path,
+    state: &easytier::trust::SignedNetworkState,
+) -> Vec<(DeviceFingerprint, easytier::trust::Cidr)> {
+    let certs = read_member_cert_bodies(network_dir);
+    state
+        .details
+        .payload
+        .member_cert_index
+        .iter()
+        .filter_map(|entry| {
+            let cert = certs.get(&entry.fingerprint)?;
+            Some((entry.fingerprint, cert))
+        })
+        .flat_map(|(fingerprint, cert)| {
+            cert.details
+                .capabilities
+                .can_proxy_subnet
+                .iter()
+                .map(move |net| {
+                    (
+                        cert_fingerprint_to_device_fingerprint(fingerprint),
+                        easytier::trust::Cidr::new(net.ip(), net.prefix()),
+                    )
+                })
+        })
+        .collect()
+}
+
 fn collect_member_list_rows(
     network_dir: &std::path::Path,
     state: &easytier::trust::SignedNetworkState,
@@ -3314,6 +3375,206 @@ fn handle_trust_tag_update(
         );
     }
     Ok(())
+}
+
+struct TrustAclExplainOptions {
+    trust_domain_id: String,
+    network_local_id: String,
+    src_device_id: String,
+    dst_device_id: String,
+    proto: String,
+    port: Option<u16>,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    json: bool,
+}
+
+fn handle_trust_acl_explain(options: TrustAclExplainOptions) -> Result<(), Error> {
+    let (network_dir, _pem, state) =
+        load_network_state_for_edit(&options.trust_domain_id, &options.network_local_id)?;
+    let policy = acl_policy_from_state(&state)?;
+    let rows = collect_member_list_rows(&network_dir, &state, &options.network_local_id);
+    let src = resolve_device_view(rows.clone(), &options.src_device_id)?;
+    let dst = resolve_device_view(rows, &options.dst_device_id)?;
+    let src_fp =
+        cert_fingerprint_to_device_fingerprint(parse_member_cert_fingerprint(&src.fingerprint)?);
+    let dst_fp =
+        cert_fingerprint_to_device_fingerprint(parse_member_cert_fingerprint(&dst.fingerprint)?);
+    let packet = PacketTuple {
+        src_ip: options.src_ip,
+        dst_ip: options.dst_ip,
+        proto: parse_acl_proto(&options.proto)?,
+        src_port: 0,
+        dst_port: options.port.unwrap_or(0),
+    };
+    let proxy_cidrs = proxy_cidr_pairs_for_acl(&network_dir, &state);
+    let src_ctx = PeerMatchContext {
+        peer_fp: &src_fp,
+        tags: &policy.tags,
+        proxy_cidrs: &proxy_cidrs,
+    };
+    let dst_ctx = PeerMatchContext {
+        peer_fp: &dst_fp,
+        tags: &policy.tags,
+        proxy_cidrs: &proxy_cidrs,
+    };
+    let decision = decide(&policy, &packet, src_ctx, dst_ctx);
+    let explanation = first_matching_acl_rule(&policy, &packet, src_ctx, dst_ctx);
+    if options.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "action": acl_action_name(decision),
+                "matched_rule": explanation.as_ref().map(|item| item.0),
+                "reason": explanation.as_ref().map(|item| item.1.clone()).unwrap_or_else(|| "default policy".to_owned()),
+                "default_action": acl_action_name(policy.default_action),
+                "src_device_id": src.device_id,
+                "dst_device_id": dst.device_id,
+                "src_tags": src.tags,
+                "dst_tags": dst.tags,
+                "proto": options.proto,
+                "port": options.port,
+            })
+        );
+    } else {
+        println!("action: {}", acl_action_name(decision));
+        match explanation {
+            Some((idx, reason)) => {
+                println!("matched_rule: {}", idx);
+                println!("reason: {}", reason);
+            }
+            None => {
+                println!("matched_rule: default");
+                println!("reason: no ACL rule matched; default policy applies");
+            }
+        }
+        println!("src: {} tags={}", src.device_id, src.tags.join(","));
+        println!("dst: {} tags={}", dst.device_id, dst.tags.join(","));
+        println!("proto: {}", options.proto);
+        if let Some(port) = options.port {
+            println!("port: {}", port);
+        }
+    }
+    Ok(())
+}
+
+fn parse_acl_proto(value: &str) -> Result<u8, Error> {
+    match value.to_ascii_lowercase().as_str() {
+        "icmp" => Ok(1),
+        "tcp" => Ok(6),
+        "udp" => Ok(17),
+        "any" | "*" => Ok(0),
+        other => anyhow::bail!("unsupported proto '{other}', expected tcp, udp, icmp, or any"),
+    }
+}
+
+fn first_matching_acl_rule(
+    policy: &AclPolicy,
+    packet: &PacketTuple,
+    src_ctx: PeerMatchContext<'_>,
+    dst_ctx: PeerMatchContext<'_>,
+) -> Option<(usize, String)> {
+    policy.rules.iter().enumerate().find_map(|(idx, rule)| {
+        if acl_rule_matches(rule, packet, src_ctx, dst_ctx) {
+            Some((idx, render_acl_rule_reason(rule)))
+        } else {
+            None
+        }
+    })
+}
+
+fn acl_rule_matches(
+    rule: &AclRule,
+    packet: &PacketTuple,
+    src_ctx: PeerMatchContext<'_>,
+    dst_ctx: PeerMatchContext<'_>,
+) -> bool {
+    let match_src = rule.src.iter().any(|selector| {
+        selector_match(
+            selector,
+            src_ctx.peer_fp,
+            packet.src_ip,
+            src_ctx.tags,
+            src_ctx.proxy_cidrs,
+        )
+    });
+    let match_dst = rule.dst.iter().any(|selector| {
+        selector_match(
+            selector,
+            dst_ctx.peer_fp,
+            packet.dst_ip,
+            dst_ctx.tags,
+            dst_ctx.proxy_cidrs,
+        )
+    });
+    let match_proto = match rule.proto {
+        Proto::Wildcard => true,
+        Proto::Icmp => packet.proto == 1,
+        Proto::Tcp => packet.proto == 6,
+        Proto::Udp => packet.proto == 17,
+    };
+    let match_port = rule.ports.as_ref().is_none_or(|ports| {
+        ports.iter().any(|port| match port {
+            PortSpec::Single(expected) => *expected == packet.dst_port,
+            PortSpec::Range(low, high) => (*low..=*high).contains(&packet.dst_port),
+        })
+    });
+    match_src && match_dst && match_proto && match_port
+}
+
+fn render_acl_rule_reason(rule: &AclRule) -> String {
+    format!(
+        "rule action={} src={} dst={} proto={} ports={}",
+        acl_action_name(rule.action),
+        render_acl_selectors(&rule.src),
+        render_acl_selectors(&rule.dst),
+        render_acl_proto(rule.proto),
+        render_acl_ports(rule.ports.as_deref())
+    )
+}
+
+fn render_acl_selectors(selectors: &[AclSelector]) -> String {
+    selectors
+        .iter()
+        .map(render_acl_selector)
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn render_acl_selector(selector: &AclSelector) -> String {
+    match selector {
+        AclSelector::Wildcard => "*".to_owned(),
+        AclSelector::Tag(tag) => format!("tag:{}", tag.as_str()),
+        AclSelector::Device(fp) => {
+            format!("device:{}", easytier::trust::MemberCertFingerprint(fp.0))
+        }
+        AclSelector::Subnet(cidr) => format!("subnet:{}/{}", cidr.addr, cidr.prefix_len),
+        AclSelector::Hostname(hostname) => format!("hostname:{}", hostname.as_str()),
+    }
+}
+
+fn render_acl_proto(proto: Proto) -> &'static str {
+    match proto {
+        Proto::Wildcard => "*",
+        Proto::Icmp => "icmp",
+        Proto::Tcp => "tcp",
+        Proto::Udp => "udp",
+    }
+}
+
+fn render_acl_ports(ports: Option<&[PortSpec]>) -> String {
+    ports
+        .map(|ports| {
+            ports
+                .iter()
+                .map(|port| match port {
+                    PortSpec::Single(port) => port.to_string(),
+                    PortSpec::Range(low, high) => format!("{low}-{high}"),
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_else(|| "*".to_owned())
 }
 
 fn read_member_cert_bodies(
@@ -5528,6 +5789,29 @@ async fn main() -> Result<(), Error> {
                     json,
                     passphrase_file,
                 )?,
+            },
+            TrustSubCommand::Acl { command } => match command {
+                TrustAclSubCommand::Explain {
+                    trust_domain_id,
+                    network_local_id,
+                    src_device_id,
+                    dst_device_id,
+                    proto,
+                    port,
+                    src_ip,
+                    dst_ip,
+                    json,
+                } => handle_trust_acl_explain(TrustAclExplainOptions {
+                    trust_domain_id,
+                    network_local_id,
+                    src_device_id,
+                    dst_device_id,
+                    proto,
+                    port,
+                    src_ip,
+                    dst_ip,
+                    json,
+                })?,
             },
             TrustSubCommand::SetHostname {
                 trust_domain_id,
