@@ -1,10 +1,31 @@
 use std::{
     collections::BTreeSet,
+    path::PathBuf,
     sync::{Arc, Weak},
 };
 
 use dashmap::{DashMap, DashSet};
 use tokio::{sync::mpsc, task::JoinSet, time::timeout};
+
+const LOCAL_PEER_CACHE_SCHEMA_VERSION: u32 = 1;
+const LOCAL_PEER_CACHE_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+const LOCAL_PEER_CACHE_MAX_FAILURES: u32 = 3;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct LocalPeerCacheFile {
+    schema_version: u32,
+    entries: Vec<LocalPeerCacheEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct LocalPeerCacheEntry {
+    url: String,
+    peer_id: PeerId,
+    trust_domain_id: String,
+    network_local_id: String,
+    last_success: u64,
+    failures: u32,
+}
 
 use crate::{
     common::{PeerId, config::PeerConfig, dns::socket_addrs, join_joinset_background},
@@ -45,6 +66,82 @@ fn peer_hint_urls_from_state(state: &crate::trust::SignedNetworkState, now: u64)
                 None
             }
         })
+        .collect::<Vec<_>>();
+    urls.sort();
+    urls.dedup();
+    urls
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
+}
+
+fn local_peer_cache_base_dir() -> Option<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(xdg).join("privateNetwork/peer-cache"));
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join(".config/privateNetwork/peer-cache"))
+}
+
+fn local_peer_cache_path(trust_domain_id: &str, network_local_id: &str) -> Option<PathBuf> {
+    Some(
+        local_peer_cache_base_dir()?
+            .join(trust_domain_id)
+            .join(format!("{network_local_id}.json")),
+    )
+}
+
+fn read_local_peer_cache(path: &std::path::Path) -> LocalPeerCacheFile {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return LocalPeerCacheFile {
+            schema_version: LOCAL_PEER_CACHE_SCHEMA_VERSION,
+            entries: Vec::new(),
+        };
+    };
+    serde_json::from_str(&text).unwrap_or_else(|err| {
+        tracing::warn!(source = "local-peer-cache", path = %path.display(), ?err, "failed to read local peer cache");
+        LocalPeerCacheFile {
+            schema_version: LOCAL_PEER_CACHE_SCHEMA_VERSION,
+            entries: Vec::new(),
+        }
+    })
+}
+
+fn write_local_peer_cache(path: &std::path::Path, cache: &LocalPeerCacheFile) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if let Err(err) = std::fs::create_dir_all(parent) {
+        tracing::warn!(source = "local-peer-cache", path = %parent.display(), ?err, "failed to create local peer cache directory");
+        return;
+    }
+    let Ok(text) = serde_json::to_string_pretty(cache) else {
+        return;
+    };
+    if let Err(err) = std::fs::write(path, text) {
+        tracing::warn!(source = "local-peer-cache", path = %path.display(), ?err, "failed to write local peer cache");
+    }
+}
+
+fn valid_local_peer_cache_urls(
+    cache: &LocalPeerCacheFile,
+    trust_domain_id: &str,
+    network_local_id: &str,
+    now: u64,
+) -> Vec<url::Url> {
+    let mut urls = cache
+        .entries
+        .iter()
+        .filter(|entry| entry.trust_domain_id == trust_domain_id)
+        .filter(|entry| entry.network_local_id == network_local_id)
+        .filter(|entry| entry.failures < LOCAL_PEER_CACHE_MAX_FAILURES)
+        .filter(|entry| now.saturating_sub(entry.last_success) <= LOCAL_PEER_CACHE_TTL_SECS)
+        .filter_map(|entry| url::Url::parse(&entry.url).ok())
         .collect::<Vec<_>>();
     urls.sort();
     urls.dedup();
@@ -294,6 +391,9 @@ impl ManualConnectorManager {
 
         let (peer_id, conn_id) = pm.try_direct_connect(connector).await?;
         tracing::info!("reconnect succ: {} {} {}", peer_id, conn_id, dead_url);
+        if let Ok(url) = url::Url::parse(&dead_url) {
+            Self::record_local_peer_cache_success(data, &url, peer_id).await;
+        }
         Ok(ReconnResult {
             dead_url,
             peer_id,
@@ -486,6 +586,130 @@ impl ManualConnectorManager {
         }))
     }
 
+    async fn local_peer_cache_context(
+        data: &ConnectorManagerData,
+    ) -> Option<(String, String, PathBuf)> {
+        let trust_ctx = data.global_ctx.get_trust_context().await?;
+        let trust_domain_id = trust_ctx.trust_domain_id.to_string();
+        let network_local_id = trust_ctx.network_local_id.to_string();
+        let path = local_peer_cache_path(&trust_domain_id, &network_local_id)?;
+        Some((trust_domain_id, network_local_id, path))
+    }
+
+    async fn record_local_peer_cache_success(
+        data: Arc<ConnectorManagerData>,
+        url: &url::Url,
+        peer_id: PeerId,
+    ) {
+        let Some((trust_domain_id, network_local_id, path)) =
+            Self::local_peer_cache_context(&data).await
+        else {
+            return;
+        };
+        let mut cache = read_local_peer_cache(&path);
+        cache.schema_version = LOCAL_PEER_CACHE_SCHEMA_VERSION;
+        let url = url.to_string();
+        if let Some(entry) = cache.entries.iter_mut().find(|entry| {
+            entry.url == url
+                && entry.trust_domain_id == trust_domain_id
+                && entry.network_local_id == network_local_id
+        }) {
+            entry.peer_id = peer_id;
+            entry.last_success = now_unix_secs();
+            entry.failures = 0;
+        } else {
+            cache.entries.push(LocalPeerCacheEntry {
+                url,
+                peer_id,
+                trust_domain_id,
+                network_local_id,
+                last_success: now_unix_secs(),
+                failures: 0,
+            });
+        }
+        cache
+            .entries
+            .sort_by(|left, right| left.url.cmp(&right.url));
+        write_local_peer_cache(&path, &cache);
+        tracing::debug!(source = "local-peer-cache", path = %path.display(), "recorded successful peer URL");
+    }
+
+    async fn record_local_peer_cache_failure(data: Arc<ConnectorManagerData>, url: &url::Url) {
+        let Some((trust_domain_id, network_local_id, path)) =
+            Self::local_peer_cache_context(&data).await
+        else {
+            return;
+        };
+        let mut cache = read_local_peer_cache(&path);
+        let url = url.to_string();
+        if let Some(entry) = cache.entries.iter_mut().find(|entry| {
+            entry.url == url
+                && entry.trust_domain_id == trust_domain_id
+                && entry.network_local_id == network_local_id
+        }) {
+            entry.failures = entry.failures.saturating_add(1);
+            write_local_peer_cache(&path, &cache);
+            tracing::debug!(source = "local-peer-cache", path = %path.display(), "recorded failed peer URL");
+        }
+    }
+
+    async fn local_peer_cache_urls(data: Arc<ConnectorManagerData>) -> Vec<url::Url> {
+        let Some((trust_domain_id, network_local_id, path)) =
+            Self::local_peer_cache_context(&data).await
+        else {
+            return Vec::new();
+        };
+        let cache = read_local_peer_cache(&path);
+        valid_local_peer_cache_urls(&cache, &trust_domain_id, &network_local_id, now_unix_secs())
+    }
+
+    async fn try_local_peer_cache_connect(
+        data: Arc<ConnectorManagerData>,
+        dead_url: &url::Url,
+    ) -> Result<ReconnResult, Error> {
+        let candidates = Self::local_peer_cache_urls(data.clone()).await;
+        if candidates.is_empty() {
+            return Err(Error::AnyhowError(anyhow::anyhow!(
+                "no local peer cache candidates available"
+            )));
+        }
+
+        let mut last_error = None;
+        for cached_url in candidates {
+            if &cached_url == dead_url || data.removed_conn_urls.contains(&cached_url) {
+                continue;
+            }
+            tracing::info!(source = "local-peer-cache", %dead_url, url = %cached_url, "try reconnect via local peer cache");
+            match Self::conn_reconnect_with_ip_version(
+                data.clone(),
+                cached_url.to_string(),
+                IpVersion::Both,
+            )
+            .await
+            {
+                Ok(mut ret) => {
+                    data.connectors.insert(cached_url.clone());
+                    data.borrowed_failures.remove(dead_url);
+                    ret.dead_url = dead_url.to_string();
+                    return Ok(ret);
+                }
+                Err(err) => {
+                    Self::record_local_peer_cache_failure(data.clone(), &cached_url).await;
+                    data.global_ctx.issue_event(GlobalCtxEvent::ConnectError(
+                        cached_url.to_string(),
+                        "local-peer-cache".to_owned(),
+                        format!("{:?}", err),
+                    ));
+                    last_error = Some(err);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            Error::AnyhowError(anyhow::anyhow!("no usable local peer cache candidates"))
+        }))
+    }
+
     async fn conn_reconnect(
         data: Arc<ConnectorManagerData>,
         dead_url: url::Url,
@@ -590,6 +814,13 @@ impl ManualConnectorManager {
             }
         }
 
+        match Self::try_local_peer_cache_connect(data.clone(), &dead_url).await {
+            Ok(ret) => return Ok(ret),
+            Err(err) => {
+                tracing::debug!(source = "local-peer-cache", %dead_url, ?err, "local peer cache reconnect failed");
+            }
+        }
+
         if should_try_borrowed {
             match Self::try_borrowed_relay_connect(data.clone(), &dead_url).await {
                 Ok(ret) => return Ok(ret),
@@ -661,6 +892,104 @@ mod tests {
             updated_at: 1,
             expires_at,
         }
+    }
+
+    #[test]
+    fn test_valid_local_peer_cache_urls_filters_scope_ttl_and_failures() {
+        let now = LOCAL_PEER_CACHE_TTL_SECS + 1_000;
+        let cache = LocalPeerCacheFile {
+            schema_version: LOCAL_PEER_CACHE_SCHEMA_VERSION,
+            entries: vec![
+                LocalPeerCacheEntry {
+                    url: "tcp://203.0.113.20:11010".to_owned(),
+                    peer_id: 2,
+                    trust_domain_id: "td-a".to_owned(),
+                    network_local_id: "office-net".to_owned(),
+                    last_success: now - 10,
+                    failures: 0,
+                },
+                LocalPeerCacheEntry {
+                    url: "tcp://203.0.113.10:11010".to_owned(),
+                    peer_id: 1,
+                    trust_domain_id: "td-a".to_owned(),
+                    network_local_id: "office-net".to_owned(),
+                    last_success: now - 20,
+                    failures: 0,
+                },
+                LocalPeerCacheEntry {
+                    url: "tcp://203.0.113.30:11010".to_owned(),
+                    peer_id: 3,
+                    trust_domain_id: "td-b".to_owned(),
+                    network_local_id: "office-net".to_owned(),
+                    last_success: now - 10,
+                    failures: 0,
+                },
+                LocalPeerCacheEntry {
+                    url: "tcp://203.0.113.40:11010".to_owned(),
+                    peer_id: 4,
+                    trust_domain_id: "td-a".to_owned(),
+                    network_local_id: "lab-net".to_owned(),
+                    last_success: now - 10,
+                    failures: 0,
+                },
+                LocalPeerCacheEntry {
+                    url: "tcp://203.0.113.50:11010".to_owned(),
+                    peer_id: 5,
+                    trust_domain_id: "td-a".to_owned(),
+                    network_local_id: "office-net".to_owned(),
+                    last_success: now - LOCAL_PEER_CACHE_TTL_SECS - 1,
+                    failures: 0,
+                },
+                LocalPeerCacheEntry {
+                    url: "tcp://203.0.113.60:11010".to_owned(),
+                    peer_id: 6,
+                    trust_domain_id: "td-a".to_owned(),
+                    network_local_id: "office-net".to_owned(),
+                    last_success: now - 10,
+                    failures: LOCAL_PEER_CACHE_MAX_FAILURES,
+                },
+                LocalPeerCacheEntry {
+                    url: "not-a-url".to_owned(),
+                    peer_id: 7,
+                    trust_domain_id: "td-a".to_owned(),
+                    network_local_id: "office-net".to_owned(),
+                    last_success: now - 10,
+                    failures: 0,
+                },
+            ],
+        };
+
+        let urls = valid_local_peer_cache_urls(&cache, "td-a", "office-net", now);
+
+        assert_eq!(
+            urls.into_iter()
+                .map(|url| url.to_string())
+                .collect::<Vec<_>>(),
+            vec!["tcp://203.0.113.10:11010", "tcp://203.0.113.20:11010"]
+        );
+    }
+
+    #[test]
+    fn test_local_peer_cache_file_round_trip_readable_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("td-a/office-net.json");
+        let cache = LocalPeerCacheFile {
+            schema_version: LOCAL_PEER_CACHE_SCHEMA_VERSION,
+            entries: vec![LocalPeerCacheEntry {
+                url: "tcp://203.0.113.10:11010".to_owned(),
+                peer_id: 7,
+                trust_domain_id: "td-a".to_owned(),
+                network_local_id: "office-net".to_owned(),
+                last_success: 10,
+                failures: 0,
+            }],
+        };
+
+        write_local_peer_cache(&path, &cache);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("schema_version"));
+
+        assert_eq!(read_local_peer_cache(&path), cache);
     }
 
     #[test]
