@@ -460,7 +460,10 @@ enum TrustSubCommand {
         curve: String,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
-        #[arg(long, help = "file containing the root passphrase")]
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
         passphrase_file: Option<PathBuf>,
     },
     ListDomains {
@@ -480,7 +483,10 @@ enum TrustSubCommand {
         default_action: String,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
-        #[arg(long, help = "file containing the root passphrase")]
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
         passphrase_file: Option<PathBuf>,
     },
     BootstrapSelf {
@@ -492,7 +498,10 @@ enum TrustSubCommand {
         device_label: Option<String>,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
-        #[arg(long, help = "file containing the root passphrase")]
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
         passphrase_file: Option<PathBuf>,
         #[arg(long, help = "file containing the device key passphrase")]
         device_passphrase_file: Option<PathBuf>,
@@ -552,7 +561,10 @@ enum TrustSubCommand {
         reason: RevokeReasonArg,
         #[arg(long, help = "revocation note")]
         note: Option<String>,
-        #[arg(long, help = "file containing the root passphrase")]
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
         passphrase_file: Option<PathBuf>,
     },
     Disable {
@@ -568,7 +580,10 @@ enum TrustSubCommand {
         note: Option<String>,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
-        #[arg(long, help = "file containing the root passphrase")]
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
         passphrase_file: Option<PathBuf>,
     },
     Enable {
@@ -580,7 +595,10 @@ enum TrustSubCommand {
         fingerprint: String,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
-        #[arg(long, help = "file containing the root passphrase")]
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
         passphrase_file: Option<PathBuf>,
     },
     ListMembers {
@@ -621,7 +639,10 @@ enum TrustSubCommand {
         note: Option<String>,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
-        #[arg(long, help = "file containing the root passphrase")]
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
         passphrase_file: Option<PathBuf>,
     },
     Tag {
@@ -647,7 +668,10 @@ enum TrustSubCommand {
         hostname: String,
         #[arg(long, help = "audit note for superseding old cert")]
         note: Option<String>,
-        #[arg(long, help = "file containing the root passphrase")]
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
         passphrase_file: Option<PathBuf>,
     },
     UnsetHostname {
@@ -657,7 +681,10 @@ enum TrustSubCommand {
         network_local_id: String,
         #[arg(help = "member-cert fingerprint", allow_hyphen_values = true)]
         fingerprint: String,
-        #[arg(long, help = "file containing the root passphrase")]
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
         passphrase_file: Option<PathBuf>,
     },
     Approve {
@@ -673,7 +700,10 @@ enum TrustSubCommand {
         applicant_pk: String,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
-        #[arg(long, help = "file containing the root passphrase")]
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
         passphrase_file: Option<PathBuf>,
     },
     Reject {
@@ -719,7 +749,10 @@ enum TrustTagSubCommand {
         tag: String,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
-        #[arg(long, help = "file containing the root passphrase")]
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
         passphrase_file: Option<PathBuf>,
     },
     Remove {
@@ -733,7 +766,10 @@ enum TrustTagSubCommand {
         tag: String,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
-        #[arg(long, help = "file containing the root passphrase")]
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
         passphrase_file: Option<PathBuf>,
     },
 }
@@ -763,7 +799,10 @@ enum TrustPeerHintSubCommand {
         expires_at: Option<u64>,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
-        #[arg(long, help = "file containing the root passphrase")]
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
         passphrase_file: Option<PathBuf>,
     },
     Remove {
@@ -775,7 +814,10 @@ enum TrustPeerHintSubCommand {
         url: Url,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
-        #[arg(long, help = "file containing the root passphrase")]
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
         passphrase_file: Option<PathBuf>,
     },
 }
@@ -4163,7 +4205,7 @@ fn read_optional_device_passphrase(
     };
     let passphrase = passphrase.trim_end_matches(['\r', '\n']).to_owned();
     if passphrase.len() < 8 {
-        anyhow::bail!("device passphrase must be at least 8 characters");
+        anyhow::bail!("device key passphrase must be at least 8 characters");
     }
     Ok(Some(passphrase))
 }
@@ -4832,11 +4874,11 @@ fn read_root_passphrase(passphrase_file: Option<&PathBuf>) -> Result<String, Err
             .with_context(|| format!("failed to read passphrase file {}", path.display()))?
     } else {
         std::env::var("PNW_ROOT_PASSPHRASE")
-            .context("PNW_ROOT_PASSPHRASE is required unless --passphrase-file is provided")?
+            .context("PNW_ROOT_PASSPHRASE (root key passphrase/management password) is required unless --passphrase-file is provided")?
     };
     let passphrase = passphrase.trim_end_matches(['\r', '\n']).to_owned();
     if passphrase.len() < 8 {
-        anyhow::bail!("passphrase must be at least 8 characters");
+        anyhow::bail!("root key passphrase must be at least 8 characters");
     }
     Ok(passphrase)
 }

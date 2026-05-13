@@ -22,6 +22,8 @@ PactMesh 当前处于 Alpha 阶段，面向私人和小团队使用。公网 VPS
 
 每个用户拥有自己的信任域。信任域由 `trust_domain_id = SHA-256(PK_root)` 标识，持有 `SK_root` 的根设备负责签发该信任域内的成员证书和网络配置。
 
+用户可见的“管理密码”就是本地 `sk_root.age` 的 root key passphrase。它不是账号密码、不是登录密码，也不是助记词。恢复管理权需要同时拥有 `sk_root.age` 备份和管理密码；只有其中任意一个都无法恢复或解锁根密钥。
+
 配置分发渠道不需要可信。节点在接受 `NetworkState`、`TrustDomainMeta`、成员证书或 join 相关 payload 前，会在本地验证签名。这样配置可以通过普通 EasyTier 路径、中继、文件、QR/bootstrap payload 或后续同步通道传播，但这些传播通道本身不拥有授权能力。
 
 设备角色只表达治理身份，不表达具体网络功能：Root device 是能解锁本信任域 `SK_root` 的管理设备，Member device 是持有本域 `member_cert.pem` 的成员设备，External device 是被本域引用但不是本域成员的外部设备或服务资源。relay、打洞协助、子网代理属于 capability；tag 是人工分组；ACL 只负责判断数据面流量是否允许通过。
@@ -44,7 +46,7 @@ PactMesh 当前处于 Alpha 阶段，面向私人和小团队使用。公网 VPS
 具体二进制名称和服务封装取决于你的构建/打包方式；信任层的基本流程如下：
 
 ```bash
-# 1. 创建信任域。根私钥会在本地加密保存。
+# 1. 创建信任域。根私钥会用你设置的管理密码在本地加密保存。
 PNW_ROOT_PASSPHRASE='change-me-long-passphrase' \
   easytier-cli trust create-domain --label home --out-dir ~/.config/privateNetwork/trust-domains
 
@@ -63,7 +65,7 @@ easytier-cli trust accept-invite '<privatenetwork://join?...>' \
   --hint 'Alice laptop'
 ```
 
-如果要走在线审批流程，需要先运行启用了 trust services 的 daemon/instance，然后在 `trust accept-invite` 中使用 `--online`。`--online` 会从 invite 中的 `tcp://<reachable-node>:11010` seed 自动推导 join-admission 准入端口 `tcp://<reachable-node>:11011`，因此公网/防火墙需要放行 `11010/TCP` 与 `11011/TCP`；管理 RPC `15888` 只应绑定本机，不应暴露给新设备或公网。设备私钥默认以 `sk_self.raw` 存储并依赖本机文件权限保护，因此 daemon 可无交互重启；如果显式设置 `PNW_DEVICE_PASSPHRASE` 或 `--passphrase-file`，PactMesh 会改用 `sk_self.age`，daemon 才需要 `--sk-self-password-env`。不要把根密码放进 daemon 环境；审批和配置修改由管理 CLI 命令按需解锁 `SK_root` 后签名。不使用 `--online` 时，该命令只会准备本地设备密钥和待提交的 join request artifact，后续可再提交。
+如果要走在线审批流程，需要先运行启用了 trust services 的 daemon/instance，然后在 `trust accept-invite` 中使用 `--online`。`--online` 会从 invite 中的 `tcp://<reachable-node>:11010` seed 自动推导 join-admission 准入端口 `tcp://<reachable-node>:11011`，因此公网/防火墙需要放行 `11010/TCP` 与 `11011/TCP`；管理 RPC `15888` 只应绑定本机，不应暴露给新设备或公网。设备私钥默认以 `sk_self.raw` 存储并依赖本机文件权限保护，因此 daemon 可无交互重启；如果显式设置 `PNW_DEVICE_PASSPHRASE` 或 `--passphrase-file`，PactMesh 会改用 `sk_self.age`，daemon 才需要 `--sk-self-password-env`。不要把管理密码放进 daemon 环境；审批和配置修改由管理 CLI 命令按需解锁 `SK_root` 后签名。不使用 `--online` 时，该命令只会准备本地设备密钥和待提交的 join request artifact，后续可再提交。
 
 `easytier-core --daemon` 的含义是“按 daemon/instance 模式运行网络实例”；它不会自动 fork 到后台。人工测试建议使用 `nohup ... &`、`systemd`、`screen` 或 `tmux` 管理进程，并显式重定向日志。
 
