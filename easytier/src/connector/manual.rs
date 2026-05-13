@@ -148,6 +148,45 @@ fn valid_local_peer_cache_urls(
     urls
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryCandidateUrls {
+    pub signed_peer_hints: Vec<url::Url>,
+    pub local_peer_cache: Vec<url::Url>,
+}
+
+impl RecoveryCandidateUrls {
+    pub fn is_empty(&self) -> bool {
+        self.signed_peer_hints.is_empty() && self.local_peer_cache.is_empty()
+    }
+
+    pub fn empty_reason(&self) -> Option<&'static str> {
+        self.is_empty().then_some(
+            "no recovery candidates available from signed peer hints or local peer cache; discovery source exhausted",
+        )
+    }
+}
+
+pub fn recovery_candidate_urls_for_diagnostics(
+    state: Option<&crate::trust::SignedNetworkState>,
+    local_cache_path: Option<&std::path::Path>,
+    trust_domain_id: &str,
+    network_local_id: &str,
+    now: u64,
+) -> RecoveryCandidateUrls {
+    let signed_peer_hints = state
+        .map(|state| peer_hint_urls_from_state(state, now))
+        .unwrap_or_default();
+    let local_peer_cache = local_cache_path
+        .map(read_local_peer_cache)
+        .map(|cache| valid_local_peer_cache_urls(&cache, trust_domain_id, network_local_id, now))
+        .unwrap_or_default();
+
+    RecoveryCandidateUrls {
+        signed_peer_hints,
+        local_peer_cache,
+    }
+}
+
 use super::create_connector_by_url;
 
 type ConnectorMap = Arc<DashSet<url::Url>>;
