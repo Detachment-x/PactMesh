@@ -43,18 +43,14 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build PactMesh
-        env:
-          CARGO_PROFILE_RELEASE_LTO: 'false'
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
-          CARGO_PROFILE_RELEASE_STRIP: 'false'
         run: |
-          cargo build --release --target x86_64-pc-windows-msvc -p pactmesh --features mimalloc --bin pactmesh --bin pactmesh-core
+          cargo build --profile ci-artifact --target x86_64-pc-windows-msvc -p pactmesh --features mimalloc --bin pactmesh --bin pactmesh-core
 
       - name: Package artifact
         run: |
           mkdir -p artifacts/pactmesh-windows-x86_64
-          cp target/x86_64-pc-windows-msvc/release/pactmesh.exe artifacts/pactmesh-windows-x86_64/
-          cp target/x86_64-pc-windows-msvc/release/pactmesh-core.exe artifacts/pactmesh-windows-x86_64/
+          cp target/x86_64-pc-windows-msvc/ci-artifact/pactmesh.exe artifacts/pactmesh-windows-x86_64/
+          cp target/x86_64-pc-windows-msvc/ci-artifact/pactmesh-core.exe artifacts/pactmesh-windows-x86_64/
           cp pactmesh/third_party/x86_64/*.dll artifacts/pactmesh-windows-x86_64/
           cp pactmesh/third_party/x86_64/*.sys artifacts/pactmesh-windows-x86_64/
           cat > artifacts/pactmesh-windows-x86_64/README.txt <<'README'

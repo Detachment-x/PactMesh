@@ -20,3 +20,10 @@ lto = true
 codegen-units = 1
 opt-level = 3
 strip = true
+
+[profile.ci-artifact]
+inherits = "release"
+lto = false
+codegen-units = 16
+opt-level = 1
+strip = false
