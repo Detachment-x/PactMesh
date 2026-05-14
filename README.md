@@ -4,7 +4,7 @@ PactMesh is the product name for this EasyTier fork. It keeps EasyTier's decentr
 
 This repository is based on EasyTier commit `5a1668c` (2026-04-25). EasyTier provides the P2P transport, NAT traversal, routing, tunnels, and RPC substrate; PactMesh adds self-managed trust domains, member certificates, signed network configuration, ACLs, MagicDNS host rendering, and cross-trust-domain relay borrowing.
 
-The current binaries and local config path still use the inherited names (`easytier-cli`, `easytier-core`, and `~/.config/privateNetwork`). Renaming crates, binaries, or on-disk paths is intentionally deferred so the Alpha workflow can stabilize first.
+The user-facing CLI and daemon binaries are now named `pactmesh` and `pactmesh-core`. The local config path still uses `~/.config/privateNetwork` for compatibility with the existing Alpha data layout.
 
 ## Status
 
@@ -48,25 +48,25 @@ The exact binary name and service wrapper depend on how you build or package thi
 ```bash
 # 1. Create a trust domain. Enter and confirm the management password interactively;
 #    the root private key is encrypted locally as sk_root.age.
-easytier-cli trust create-domain --label home --out-dir ~/.config/privateNetwork/trust-domains
+pactmesh trust create-domain --label home --out-dir ~/.config/privateNetwork/trust-domains
 
 # Save the trust_domain_id printed by create-domain.
 export TRUST_DOMAIN_ID='<trust_domain_id>'
 export NETWORK_LOCAL_ID='home'
 
 # 2. Create a network inside that trust domain.
-easytier-cli trust create-network "$TRUST_DOMAIN_ID" "$NETWORK_LOCAL_ID" --default-action accept
+pactmesh trust create-network "$TRUST_DOMAIN_ID" "$NETWORK_LOCAL_ID" --default-action accept
 
 # 3. Bootstrap the current root device as a network member.
-easytier-cli trust bootstrap-self "$TRUST_DOMAIN_ID" "$NETWORK_LOCAL_ID" --device-label root-a
+pactmesh trust bootstrap-self "$TRUST_DOMAIN_ID" "$NETWORK_LOCAL_ID" --device-label root-a
 
 # 4. Export an invite/bootstrap bundle for another device.
-easytier-cli trust invite "$TRUST_DOMAIN_ID" "$NETWORK_LOCAL_ID" \
+pactmesh trust invite "$TRUST_DOMAIN_ID" "$NETWORK_LOCAL_ID" \
   --seed tcp://<reachable-node>:11010 \
   --format url
 
 # 5. On the new device, accept the invite and generate a join request.
-easytier-cli trust accept-invite '<privatenetwork://join?...>' \
+pactmesh trust accept-invite '<privatenetwork://join?...>' \
   --device-label laptop \
   --hint 'Alice laptop'
 ```
@@ -75,14 +75,14 @@ Automation and non-TTY environments cannot use the interactive prompt; provide t
 
 For an online approval flow, run the daemon/instance with trust services enabled and use the `--online` option on `trust accept-invite`. `--online` derives a join-admission endpoint from the invite's `tcp://<reachable-node>:11010` seed as `tcp://<reachable-node>:11011`, so public firewalls must allow `11010/TCP` and `11011/TCP`; the management RPC port `15888` should remain bound to localhost and must not be exposed to new devices or the public Internet. By default the device private key is stored as `sk_self.raw` with local file permissions, so the daemon can restart without an interactive device passphrase; if you set `PNW_DEVICE_PASSPHRASE` or use `--passphrase-file`, PactMesh stores `sk_self.age` instead and the daemon must be given `--sk-self-password-env`. Keep the root key passphrase out of the daemon environment, and let management CLI commands unlock `SK_root` only when signing approvals or config changes. Without `--online`, the command prepares local device keys and a pending join request artifact that can be submitted later.
 
-`easytier-core --daemon` means “run the network instance in daemon mode”; it does not fork itself into the background. For manual testing, run it under `nohup ... &`, `systemd`, `screen`, or `tmux`, and redirect logs explicitly.
+`pactmesh-core --daemon` means “run the network instance in daemon mode”; it does not fork itself into the background. For manual testing, run it under `nohup ... &`, `systemd`, `screen`, or `tmux`, and redirect logs explicitly.
 
 ## Build And Test
 
 Rust 1.95 is the project baseline.
 
 ```bash
-cargo build -p easytier
+cargo build -p pactmesh
 cargo test --test trust
 cargo clippy -- -D warnings
 ```
@@ -91,29 +91,29 @@ Some integration and e2e tests exercise EasyTier tunnel behavior and may need Li
 
 ## Release Binaries
 
-Current PactMesh Alpha keeps the inherited binary names for compatibility: `easytier-core` and `easytier-cli`.
+PactMesh builds two release binaries: `pactmesh-core` for the daemon and `pactmesh` for the management CLI.
 
 Build release binaries from the workspace:
 
 ```bash
-cd workspace/easytier
-cargo build --release --bin easytier-core --bin easytier-cli
+cd workspace/pactmesh
+cargo build --release --bin pactmesh-core --bin pactmesh
 ```
 
 The artifacts are written to the workspace target directory, not the crate directory:
 
 ```text
-workspace/target/release/easytier-core
-workspace/target/release/easytier-cli
+workspace/target/release/pactmesh-core
+workspace/target/release/pactmesh
 ```
 
-On the current Linux x86-64 build machine, the release artifacts are dynamically linked ELF x86-64 binaries. The observed sizes are about `28M` for `easytier-core` and `14M` for `easytier-cli`. These x86-64 binaries cannot run directly on ARM hosts; build on the ARM host or add a proper Rust target/toolchain and cross-linker before distributing to ARM.
+On the current Linux x86-64 build machine, the release artifacts are dynamically linked ELF x86-64 binaries. The observed sizes are about `28M` for `pactmesh-core` and `14M` for `pactmesh`. These x86-64 binaries cannot run directly on ARM hosts; build on the ARM host or add a proper Rust target/toolchain and cross-linker before distributing to ARM.
 
 Copy both binaries to a test server, for example:
 
 ```bash
-scp workspace/target/release/easytier-core workspace/target/release/easytier-cli user@server:/opt/pactmesh/
-ssh user@server 'chmod +x /opt/pactmesh/easytier-core /opt/pactmesh/easytier-cli'
+scp workspace/target/release/pactmesh-core workspace/target/release/pactmesh user@server:/opt/pactmesh/
+ssh user@server 'chmod +x /opt/pactmesh/pactmesh-core /opt/pactmesh/pactmesh'
 ```
 
 ## Design Documents

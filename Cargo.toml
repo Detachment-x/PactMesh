@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "easytier",
+    "pactmesh",
     "easytier-rpc-build",
 ]
-default-members = ["easytier"]
+default-members = ["pactmesh"]
 
 [workspace.package]
 edition = "2024"

@@ -5,8 +5,8 @@ set -euo pipefail
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
-CORE_BIN=${CORE_BIN:-"$REPO_ROOT/target/debug/easytier-core"}
-CLI_BIN=${CLI_BIN:-"$REPO_ROOT/target/debug/easytier-cli"}
+CORE_BIN=${CORE_BIN:-"$REPO_ROOT/target/debug/pactmesh-core"}
+CLI_BIN=${CLI_BIN:-"$REPO_ROOT/target/debug/pactmesh"}
 TMPDIR_PATH=""
 CORE_PID=""
 PYTHON_BIN=${PYTHON_BIN:-python3}
@@ -24,8 +24,8 @@ print_output() {
 }
 
 build_binaries() {
-  print_section "Building easytier-core and easytier-cli"
-  cargo build -p easytier --bin easytier-core --bin easytier-cli
+  print_section "Building pactmesh-core and pactmesh"
+  cargo build -p pactmesh --bin pactmesh-core --bin pactmesh
 }
 
 ensure_binaries() {
@@ -37,7 +37,7 @@ ensure_binaries() {
 make_tmpdir() {
   "$PYTHON_BIN" - <<'PY'
 import tempfile
-print(tempfile.mkdtemp(prefix="easytier-cli-e2e-"))
+print(tempfile.mkdtemp(prefix="pactmesh-e2e-"))
 PY
 }
 
@@ -216,11 +216,11 @@ EOF
   "$CORE_BIN" --config-dir "$TMPDIR_PATH" --rpc-portal "127.0.0.1:${rpc_port}" \
     >"$TMPDIR_PATH/core.log" 2>&1 &
   CORE_PID=$!
-  print_section "Started easytier-core"
+  print_section "Started pactmesh-core"
   printf 'pid=%s\n' "$CORE_PID"
 
   wait_for_cli "$rpc_port"
-  print_output "easytier-core startup log" "$(cat "$TMPDIR_PATH/core.log")"
+  print_output "pactmesh-core startup log" "$(cat "$TMPDIR_PATH/core.log")"
 
   local text_output
   run_cmd text_output \

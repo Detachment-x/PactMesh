@@ -1,14 +1,6 @@
 name: EasyTier OHOS
 
 on:
-  push:
-    branches: ["develop", "main", "releases/**"]
-    tags:
-      - 'v*'
-      - '!*-pre'
-  pull_request:
-    branches: ["develop", "main"]
-    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 concurrency:

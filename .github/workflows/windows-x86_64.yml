@@ -1,0 +1,70 @@
+name: Windows x86_64 Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'pactmesh/**'
+      - 'easytier-rpc-build/**'
+      - '.github/workflows/windows-x86_64.yml'
+
+concurrency:
+  group: windows-x86_64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Windows x86_64
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust 1.95
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.95
+          target: x86_64-pc-windows-msvc
+          cache: false
+          rustflags: ''
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '25.5'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build PactMesh
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc -p pactmesh --features mimalloc --bin pactmesh --bin pactmesh-core
+
+      - name: Package artifact
+        run: |
+          mkdir -p artifacts/pactmesh-windows-x86_64
+          cp target/x86_64-pc-windows-msvc/release/pactmesh.exe artifacts/pactmesh-windows-x86_64/
+          cp target/x86_64-pc-windows-msvc/release/pactmesh-core.exe artifacts/pactmesh-windows-x86_64/
+          cp pactmesh/third_party/x86_64/*.dll artifacts/pactmesh-windows-x86_64/
+          cp pactmesh/third_party/x86_64/*.sys artifacts/pactmesh-windows-x86_64/
+          cat > artifacts/pactmesh-windows-x86_64/README.txt <<'README'
+          PactMesh Windows x86_64 build artifact.
+
+          Run PowerShell or Command Prompt as Administrator for TUN/core testing.
+          Start with:
+            pactmesh.exe --help
+            pactmesh-core.exe --help
+          README
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pactmesh-windows-x86_64
+          path: artifacts/pactmesh-windows-x86_64
+          if-no-files-found: error
