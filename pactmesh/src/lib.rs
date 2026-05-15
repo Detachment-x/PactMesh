@@ -21,6 +21,7 @@ pub mod proto;
 pub mod rpc_service;
 pub mod service_manager;
 pub mod trust;
+pub mod tui;
 pub mod tunnel;
 pub mod utils;
 
