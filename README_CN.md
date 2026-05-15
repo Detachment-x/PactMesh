@@ -78,7 +78,7 @@ pactmesh trust accept-invite '<privatenetwork://join?...>' \
 
 自动化脚本或非 TTY 环境不能交互输入管理密码，应使用 `PNW_ROOT_PASSPHRASE` 或 `--passphrase-file`。管理密码只在 `create-domain`、`create-network`、`bootstrap-self`、`approve`、`revoke` 等需要 `SK_root` 签名的管理 CLI 命令中按需使用；正常 daemon 运行不要常驻携带管理密码。
 
-如果要走在线审批流程，需要先运行启用了 trust services 的 daemon/instance，然后在 `trust accept-invite` 中使用 `--online`。`--online` 会从 invite 中的 `tcp://<reachable-node>:11010` seed 自动推导 join-admission 准入端口 `tcp://<reachable-node>:11011`，因此公网/防火墙需要放行 `11010/TCP` 与 `11011/TCP`；管理 RPC `15888` 只应绑定本机，不应暴露给新设备或公网。设备私钥默认以 `sk_self.raw` 存储并依赖本机文件权限保护，因此 daemon 可无交互重启；如果显式设置 `PNW_DEVICE_PASSPHRASE` 或 `--passphrase-file`，PactMesh 会改用 `sk_self.age`，daemon 才需要 `--sk-self-password-env`。不要把管理密码放进 daemon 环境；审批和配置修改由管理 CLI 命令按需解锁 `SK_root` 后签名。不使用 `--online` 时，该命令只会准备本地设备密钥和待提交的 join request artifact，后续可再提交。
+如果要走在线审批流程，需要先运行启用了 trust services 的 daemon/instance，然后在 `trust accept-invite` 中使用 `--online`。`--online` 会从 invite 中的 `tcp://<reachable-node>:11010` seed 自动推导 join-admission 准入端口 `tcp://<reachable-node>:11011`，因此公网/防火墙需要放行 `11010/TCP` 与 `11011/TCP`；管理 RPC `15888` 只应绑定本机，不应暴露给新设备或公网。设备私钥默认以 `sk_self.raw` 存储并依赖本机文件权限保护，因此 daemon 可无交互重启；如果显式设置 `PNW_DEVICE_PASSPHRASE` 或 `--passphrase-file`，PactMesh 会改用 `sk_self.age`，daemon 会默认从 `PNW_DEVICE_PASSPHRASE` 读取密码；只有使用其他环境变量名时才需要 `--sk-self-password-env`。不要把管理密码放进 daemon 环境；审批和配置修改由管理 CLI 命令按需解锁 `SK_root` 后签名。不使用 `--online` 时，该命令只会准备本地设备密钥和待提交的 join request artifact，后续可再提交。
 
 `pactmesh-core --daemon` 的含义是“按 daemon/instance 模式运行网络实例”；它不会自动 fork 到后台。人工测试建议使用 `nohup ... &`、`systemd`、`screen` 或 `tmux` 管理进程，并显式重定向日志。
 

@@ -222,7 +222,7 @@ struct NetworkOptions {
 
     #[arg(
         long,
-        env = "ET_SK_SELF_PASSWORD_ENV",
+        env = "PNW_SK_SELF_PASSWORD_ENV",
         help = "Environment variable name for sk_self password"
     )]
     sk_self_password_env: Option<String>,
@@ -956,7 +956,7 @@ impl NetworkOptions {
                         .as_ref()
                         .map(|config| config.sk_self_password_env.clone())
                 })
-                .unwrap_or_else(|| "ET_SK_SELF_PASSWORD".to_owned());
+                .unwrap_or_else(|| "PNW_DEVICE_PASSPHRASE".to_owned());
 
             cfg.set_trust_domain(Some(TrustDomainConfig {
                 domain_dir,
