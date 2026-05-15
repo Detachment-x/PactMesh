@@ -493,6 +493,47 @@ enum LabSubCommand {
         )]
         passphrase_file: Option<PathBuf>,
     },
+    #[command(about = "explain peer route status and likely test issues")]
+    Peers {
+        #[command(subcommand)]
+        command: LabPeersSubCommand,
+    },
+    #[command(about = "disable a member interactively")]
+    Disable {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(long, help = "device id/fingerprint prefix; prompts when omitted")]
+        device: Option<String>,
+        #[arg(long, help = "RFC3339 timestamp when disable should expire")]
+        until: Option<String>,
+        #[arg(long, help = "disable note")]
+        note: Option<String>,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
+        passphrase_file: Option<PathBuf>,
+    },
+    #[command(about = "enable a disabled member interactively")]
+    Enable {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(long, help = "device id/fingerprint prefix; prompts when omitted")]
+        device: Option<String>,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
+        passphrase_file: Option<PathBuf>,
+    },
     #[command(about = "print ready-to-run commands for a test role")]
     Commands {
         #[arg(long, value_enum, help = "node role to generate commands for")]
@@ -522,6 +563,29 @@ enum LabSubCommand {
 
 #[derive(Subcommand, Debug)]
 enum LabRunSubCommand {
+    #[command(about = "print or execute a daemon command with preflight checks")]
+    Daemon {
+        #[arg(long, default_value = "joiner", value_enum, help = "node role")]
+        role: LabRole,
+        #[arg(long, default_value = "office-net", help = "network-local id")]
+        network_local_id: String,
+        #[arg(long, default_value = "11010", help = "listener port")]
+        listen_port: u16,
+        #[arg(long, default_value = "15889", help = "local RPC portal port")]
+        rpc_port: u16,
+        #[arg(long, default_value = "node", help = "instance label")]
+        label: String,
+        #[arg(
+            long,
+            help = "trust-domain id; required for root role when printing --trust-domain-dir"
+        )]
+        trust_domain_id: Option<String>,
+        #[arg(
+            long,
+            help = "execute pactmesh-core in foreground instead of only printing"
+        )]
+        exec: bool,
+    },
     #[command(about = "accept an invite, check files, and print daemon start command")]
     Joiner {
         #[arg(help = "invite URL or bootstrap PEM path")]
@@ -563,6 +627,12 @@ enum LabRunSubCommand {
         #[arg(long, help = "file containing the device key passphrase")]
         passphrase_file: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum LabPeersSubCommand {
+    #[command(about = "explain current peer routes")]
+    Explain,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Eq)]
@@ -2949,6 +3019,26 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             .await
         }
         LabSubCommand::Run { command } => match command {
+            LabRunSubCommand::Daemon {
+                role,
+                network_local_id,
+                listen_port,
+                rpc_port,
+                label,
+                trust_domain_id,
+                exec,
+            } => {
+                handle_lab_run_daemon(LabRunDaemonOptions {
+                    role,
+                    network_local_id,
+                    listen_port,
+                    rpc_port,
+                    label,
+                    trust_domain_id,
+                    exec,
+                })
+                .await
+            }
             LabRunSubCommand::Joiner {
                 invite,
                 label,
@@ -2994,6 +3084,43 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             )
             .await
         }
+        LabSubCommand::Peers { command } => match command {
+            LabPeersSubCommand::Explain => handle_lab_peers_explain(handler).await,
+        },
+        LabSubCommand::Disable {
+            trust_domain_id,
+            network_local_id,
+            device,
+            until,
+            note,
+            json,
+            passphrase_file,
+        } => handle_lab_member_toggle(
+            trust_domain_id,
+            network_local_id,
+            device,
+            true,
+            until,
+            note,
+            json,
+            passphrase_file,
+        ),
+        LabSubCommand::Enable {
+            trust_domain_id,
+            network_local_id,
+            device,
+            json,
+            passphrase_file,
+        } => handle_lab_member_toggle(
+            trust_domain_id,
+            network_local_id,
+            device,
+            false,
+            None,
+            None,
+            json,
+            passphrase_file,
+        ),
         LabSubCommand::Commands {
             role,
             network_local_id,
@@ -3028,6 +3155,16 @@ struct LabCommandOptions {
     label: String,
     invite: Option<String>,
     trust_domain_id: Option<String>,
+}
+
+struct LabRunDaemonOptions {
+    role: LabRole,
+    network_local_id: String,
+    listen_port: u16,
+    rpc_port: u16,
+    label: String,
+    trust_domain_id: Option<String>,
+    exec: bool,
 }
 
 struct LabRunJoinerOptions {
@@ -3294,6 +3431,198 @@ async fn handle_lab_run_joiner(
         trust_domain_id: None,
     });
     Ok(())
+}
+
+async fn handle_lab_run_daemon(options: LabRunDaemonOptions) -> Result<(), Error> {
+    println!("== Preflight ==");
+    handle_lab_doctor(
+        &options.network_local_id,
+        options.trust_domain_id.as_deref(),
+    )?;
+    println!();
+    println!("== Daemon command ==");
+    let command = build_lab_daemon_command(&options)?;
+    println!("{}", command.join(" "));
+    if !options.exec {
+        println!();
+        println!("Add --exec to run pactmesh-core in the foreground after preflight checks.");
+        return Ok(());
+    }
+    println!();
+    println!("Starting pactmesh-core in foreground...");
+    let status = std::process::Command::new(&command[0])
+        .args(&command[1..])
+        .status()
+        .context("failed to start pactmesh-core")?;
+    if !status.success() {
+        anyhow::bail!("pactmesh-core exited with {status}");
+    }
+    Ok(())
+}
+
+fn build_lab_daemon_command(options: &LabRunDaemonOptions) -> Result<Vec<String>, Error> {
+    let mut command = vec![
+        "./pactmesh-core".to_owned(),
+        "--network-name".to_owned(),
+        options.network_local_id.clone(),
+        "--network-local-id".to_owned(),
+        options.network_local_id.clone(),
+        "--rpc-portal".to_owned(),
+        format!("127.0.0.1:{}", options.rpc_port),
+        "--listeners".to_owned(),
+        options.listen_port.to_string(),
+        "--no-tun".to_owned(),
+        "true".to_owned(),
+        "--disable-ipv6".to_owned(),
+        "true".to_owned(),
+        "--instance-name".to_owned(),
+        options.label.clone(),
+        "--console-log-level".to_owned(),
+        "debug".to_owned(),
+        "--daemon".to_owned(),
+    ];
+    if options.role == LabRole::Root {
+        let td = options
+            .trust_domain_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--trust-domain-id is required for root role"))?;
+        let dir = default_pnw_config_dir()?.join("trust-domains").join(td);
+        command.insert(5, dir.display().to_string());
+        command.insert(5, "--trust-domain-dir".to_owned());
+    }
+    Ok(command)
+}
+
+async fn handle_lab_peers_explain(handler: &CommandHandler<'_>) -> Result<(), Error> {
+    let data = handler.fetch_peer_list_data().await?;
+    println!(
+        "Local peer: {} host={} version={}",
+        data.node_info.peer_id, data.node_info.hostname, data.node_info.version
+    );
+    if data.peer_routes.is_empty() {
+        println!(
+            "No remote peers. Check daemon startup, invite approval, firewall, and seed reachability."
+        );
+        return Ok(());
+    }
+    for pair in data.peer_routes {
+        let route = pair.route.clone().unwrap_or_default();
+        let cost = cost_to_str(route.cost);
+        let protos = pair.get_conn_protos().unwrap_or_default().join(",");
+        println!(
+            "peer={} host={} cost={} tunnel={} nat={} loss={:.1}%",
+            route.peer_id,
+            route.hostname,
+            cost,
+            if protos.is_empty() { "-" } else { &protos },
+            pair.get_udp_nat_type(),
+            pair.get_loss_rate().unwrap_or(0.0) * 100.0,
+        );
+        if cost.starts_with("relay") {
+            println!("  explanation: reachable through relay, but direct P2P is not active.");
+            println!(
+                "  check: both sides should use --listeners 11010, Windows firewall should allow UDP/TCP 11010, then inspect UDP SYN/SACK timeout logs."
+            );
+        } else if cost == "p2p" || route.cost == 1 {
+            println!("  explanation: direct peer route is active.");
+        } else if cost == "Local" {
+            println!("  explanation: this is the local node.");
+        } else {
+            println!("  explanation: non-direct route cost; inspect route and peer logs.");
+        }
+        if protos.is_empty() && !cost.starts_with("relay") {
+            println!("  note: tunnel protocol is empty; direct tunnel may not be established yet.");
+        }
+    }
+    Ok(())
+}
+
+fn handle_lab_member_toggle(
+    trust_domain_id: String,
+    network_local_id: String,
+    device: Option<String>,
+    disable: bool,
+    until: Option<String>,
+    note: Option<String>,
+    json: bool,
+    passphrase_file: Option<PathBuf>,
+) -> Result<(), Error> {
+    let (network_dir, _pem, state) =
+        load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
+    let rows = collect_member_list_rows(&network_dir, &state, &network_local_id)
+        .into_iter()
+        .filter(|row| row.status.as_str() != "revoked")
+        .collect::<Vec<_>>();
+    let selector = if let Some(device) = device {
+        device
+    } else {
+        if rows.is_empty() {
+            anyhow::bail!("no members found");
+        }
+        for (idx, row) in rows.iter().enumerate() {
+            println!(
+                "{}. {} label={} status={} fingerprint={}",
+                idx + 1,
+                shorten_id(&row.device_id),
+                row.device_label,
+                row.status.as_str(),
+                row.fingerprint.chars().take(8).collect::<String>()
+            );
+        }
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!(
+                "pass --device <device-id-or-fingerprint-prefix> in non-interactive mode"
+            );
+        }
+        let answer = prompt_required(if disable {
+            "Disable which number/device"
+        } else {
+            "Enable which number/device"
+        })?;
+        if let Ok(index) = answer.parse::<usize>() {
+            if index == 0 || index > rows.len() {
+                anyhow::bail!("selection out of range");
+            }
+            rows[index - 1].device_id.clone()
+        } else {
+            answer
+        }
+    };
+    let row = resolve_device_or_fingerprint(rows, &selector)?;
+    if disable {
+        handle_trust_disable(
+            trust_domain_id,
+            network_local_id,
+            row.fingerprint,
+            until,
+            note,
+            json,
+            passphrase_file,
+        )
+    } else {
+        handle_trust_enable(
+            trust_domain_id,
+            network_local_id,
+            row.fingerprint,
+            json,
+            passphrase_file,
+        )
+    }
+}
+
+fn resolve_device_or_fingerprint(
+    rows: Vec<pactmesh::trust::DeviceView>,
+    selector: &str,
+) -> Result<pactmesh::trust::DeviceView, Error> {
+    let matches = rows
+        .into_iter()
+        .filter(|row| row.device_id.starts_with(selector) || row.fingerprint.starts_with(selector))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => anyhow::bail!("device/fingerprint not found: {selector}"),
+        [row] => Ok(row.clone()),
+        _ => anyhow::bail!("device/fingerprint selector is ambiguous: {selector}"),
+    }
 }
 
 async fn handle_lab_approve(
