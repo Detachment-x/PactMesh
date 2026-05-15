@@ -3186,6 +3186,9 @@ fn handle_lab_wizard() -> Result<(), Error> {
     }
 
     println!("PactMesh lab wizard (MVP)");
+    println!(
+        "Tip: try 'pactmesh tui' for a full-screen interactive console (peers + joins + logs in one terminal)."
+    );
     println!("Generate ready-to-run commands for manual tests. Press Enter to accept defaults.");
     println!();
 
