@@ -463,6 +463,11 @@ enum LabSubCommand {
         #[arg(long, help = "trust-domain id; auto-detected when omitted")]
         trust_domain_id: Option<String>,
     },
+    #[command(about = "run guided test steps")]
+    Run {
+        #[command(subcommand)]
+        command: LabRunSubCommand,
+    },
     #[command(about = "approve a pending join request interactively")]
     Approve {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
@@ -503,6 +508,51 @@ enum LabSubCommand {
         invite: Option<String>,
         #[arg(long, help = "trust-domain id for root role")]
         trust_domain_id: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum LabRunSubCommand {
+    #[command(about = "accept an invite, check files, and print daemon start command")]
+    Joiner {
+        #[arg(help = "invite URL or bootstrap PEM path")]
+        invite: String,
+        #[arg(long, default_value = "node", help = "device/instance label")]
+        label: String,
+        #[arg(
+            long,
+            default_value = "office-net",
+            help = "network-local id for checks and commands"
+        )]
+        network_local_id: String,
+        #[arg(
+            long,
+            default_value = "11010",
+            help = "listener port for generated daemon command"
+        )]
+        listen_port: u16,
+        #[arg(
+            long,
+            default_value = "15889",
+            help = "local RPC portal port for generated daemon command"
+        )]
+        rpc_port: u16,
+        #[arg(
+            long,
+            default_value_t = 600,
+            help = "online approval timeout in seconds"
+        )]
+        wait_secs: u64,
+        #[arg(
+            long,
+            default_value_t = 2,
+            help = "online approval poll interval in seconds"
+        )]
+        poll_secs: u64,
+        #[arg(long, default_value = "", help = "operator-visible join hint")]
+        hint: String,
+        #[arg(long, help = "file containing the device key passphrase")]
+        passphrase_file: Option<PathBuf>,
     },
 }
 
@@ -2876,6 +2926,35 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             network_local_id,
             trust_domain_id,
         } => handle_lab_doctor(&network_local_id, trust_domain_id.as_deref()),
+        LabSubCommand::Run { command } => match command {
+            LabRunSubCommand::Joiner {
+                invite,
+                label,
+                network_local_id,
+                listen_port,
+                rpc_port,
+                wait_secs,
+                poll_secs,
+                hint,
+                passphrase_file,
+            } => {
+                handle_lab_run_joiner(
+                    handler,
+                    LabRunJoinerOptions {
+                        invite,
+                        label,
+                        network_local_id,
+                        listen_port,
+                        rpc_port,
+                        wait_secs,
+                        poll_secs,
+                        hint,
+                        passphrase_file,
+                    },
+                )
+                .await
+            }
+        },
         LabSubCommand::Approve {
             trust_domain_id,
             network_local_id,
@@ -2927,6 +3006,18 @@ struct LabCommandOptions {
     label: String,
     invite: Option<String>,
     trust_domain_id: Option<String>,
+}
+
+struct LabRunJoinerOptions {
+    invite: String,
+    label: String,
+    network_local_id: String,
+    listen_port: u16,
+    rpc_port: u16,
+    wait_secs: u64,
+    poll_secs: u64,
+    hint: String,
+    passphrase_file: Option<PathBuf>,
 }
 
 fn handle_lab_wizard() -> Result<(), Error> {
@@ -3074,6 +3165,57 @@ fn handle_lab_doctor(network_local_id: &str, trust_domain_id: Option<&str>) -> R
     println!("Useful checks:");
     println!("  pactmesh --rpc-portal 127.0.0.1:<RPC_PORT> -o json peer list");
     println!("  grep -Ei 'udp hole|tcp hole|syn|sack|stun|relay|listener|error' <log> | tail -200");
+    Ok(())
+}
+
+async fn handle_lab_run_joiner(
+    handler: &CommandHandler<'_>,
+    options: LabRunJoinerOptions,
+) -> Result<(), Error> {
+    println!("Step 1/3: accepting invite online as {}", options.label);
+    if std::env::var("PNW_DEVICE_PASSPHRASE").is_ok() && options.passphrase_file.is_none() {
+        println!(
+            "Note: PNW_DEVICE_PASSPHRASE is set; new device keys may be stored as encrypted sk_self.age."
+        );
+    }
+    handle_trust_accept_invite(
+        handler,
+        AcceptInviteOptions {
+            source: options.invite.clone(),
+            device_label: Some(options.label.clone()),
+            hint: options.hint.clone(),
+            passphrase_file: options.passphrase_file.clone(),
+            online: true,
+            wait_secs: options.wait_secs,
+            poll_secs: options.poll_secs,
+        },
+    )
+    .await?;
+
+    println!();
+    println!("Step 2/3: checking local trust files");
+    handle_lab_doctor(&options.network_local_id, None)?;
+
+    println!();
+    println!("Step 3/3: start daemon with this command");
+    print_lab_joiner_daemon_command(&LabCommandOptions {
+        role: LabRole::Joiner,
+        network_local_id: options.network_local_id,
+        listen_port: options.listen_port,
+        rpc_port: options.rpc_port,
+        test_home_name: std::env::var("PNW_TEST_HOME")
+            .ok()
+            .and_then(|path| {
+                PathBuf::from(path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| "pactmesh-test".to_owned()),
+        seed: None,
+        label: options.label,
+        invite: Some(options.invite),
+        trust_domain_id: None,
+    });
     Ok(())
 }
 
@@ -3259,6 +3401,30 @@ fn print_lab_joiner_commands(options: &LabCommandOptions) -> Result<(), Error> {
         println!("  --wait-secs 600 `");
         println!("  --poll-secs 2");
         println!();
+        print_lab_joiner_daemon_command(options);
+        println!();
+        println!(".\\pactmesh.exe --rpc-portal \"127.0.0.1:$env:RPC_PORT\" -o json peer list");
+    } else {
+        println!("INVITE_URL='{}'", invite.replace('\'', "'\\''"));
+        println!("./pactmesh trust accept-invite \"$INVITE_URL\" \\");
+        println!("  --device-label {} \\", options.label);
+        println!("  --online \\");
+        println!("  --wait-secs 600 \\");
+        println!("  --poll-secs 2");
+        println!();
+        print_lab_joiner_daemon_command(options);
+        println!();
+        println!("./pactmesh --rpc-portal \"127.0.0.1:$RPC_PORT\" -o json peer list");
+        println!(
+            "grep -Ei 'udp hole|tcp hole|syn|sack|stun|relay|listener|error' \"$PNW_TEST_HOME/{}.log\" | tail -200",
+            options.label
+        );
+    }
+    Ok(())
+}
+
+fn print_lab_joiner_daemon_command(options: &LabCommandOptions) {
+    if cfg!(target_os = "windows") {
         println!(".\\pactmesh-core.exe `");
         println!("  --network-name $env:NETWORK_LOCAL_ID `");
         println!("  --network-local-id $env:NETWORK_LOCAL_ID `");
@@ -3272,16 +3438,7 @@ fn print_lab_joiner_commands(options: &LabCommandOptions) -> Result<(), Error> {
             "  --daemon *> \"$env:PNW_TEST_HOME\\{}.log\"",
             options.label
         );
-        println!();
-        println!(".\\pactmesh.exe --rpc-portal \"127.0.0.1:$env:RPC_PORT\" -o json peer list");
     } else {
-        println!("INVITE_URL='{}'", invite.replace('\'', "'\\''"));
-        println!("./pactmesh trust accept-invite \"$INVITE_URL\" \\");
-        println!("  --device-label {} \\", options.label);
-        println!("  --online \\");
-        println!("  --wait-secs 600 \\");
-        println!("  --poll-secs 2");
-        println!();
         println!("nohup ./pactmesh-core \\");
         println!("  --network-name \"$NETWORK_LOCAL_ID\" \\");
         println!("  --network-local-id \"$NETWORK_LOCAL_ID\" \\");
@@ -3295,14 +3452,7 @@ fn print_lab_joiner_commands(options: &LabCommandOptions) -> Result<(), Error> {
             "  --daemon > \"$PNW_TEST_HOME/{}.log\" 2>&1 &",
             options.label
         );
-        println!();
-        println!("./pactmesh --rpc-portal \"127.0.0.1:$RPC_PORT\" -o json peer list");
-        println!(
-            "grep -Ei 'udp hole|tcp hole|syn|sack|stun|relay|listener|error' \"$PNW_TEST_HOME/{}.log\" | tail -200",
-            options.label
-        );
     }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
