@@ -168,6 +168,8 @@ enum SubCommand {
     Credential(CredentialArgs),
     #[command(about = "export/import trust-domain bootstrap bundles")]
     Bootstrap(BootstrapArgs),
+    #[command(about = "guided local testing and diagnostics")]
+    Lab(LabArgs),
     #[command(about = "manage privateNetwork trust domains")]
     Trust(TrustArgs),
     #[command(about = t!("core_clap.generate_completions").to_string())]
@@ -442,6 +444,56 @@ enum CredentialSubCommand {
 struct BootstrapArgs {
     #[command(subcommand)]
     sub_command: BootstrapSubCommand,
+}
+
+#[derive(Args, Debug)]
+struct LabArgs {
+    #[command(subcommand)]
+    sub_command: Option<LabSubCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+enum LabSubCommand {
+    #[command(about = "interactive command generator for manual tests")]
+    Wizard,
+    #[command(about = "check local test environment and key files")]
+    Doctor {
+        #[arg(long, default_value = "office-net", help = "network-local id")]
+        network_local_id: String,
+        #[arg(long, help = "trust-domain id; auto-detected when omitted")]
+        trust_domain_id: Option<String>,
+    },
+    #[command(about = "print ready-to-run commands for a test role")]
+    Commands {
+        #[arg(long, value_enum, help = "node role to generate commands for")]
+        role: LabRole,
+        #[arg(long, default_value = "office-net", help = "network-local id")]
+        network_local_id: String,
+        #[arg(long, default_value = "11010", help = "listener port")]
+        listen_port: u16,
+        #[arg(long, default_value = "15888", help = "local RPC portal port")]
+        rpc_port: u16,
+        #[arg(
+            long,
+            default_value = "pactmesh-test",
+            help = "PNW_TEST_HOME directory name"
+        )]
+        test_home_name: String,
+        #[arg(long, help = "public seed URL, e.g. tcp://1.2.3.4:11010")]
+        seed: Option<String>,
+        #[arg(long, default_value = "node", help = "device/instance label")]
+        label: String,
+        #[arg(long, help = "invite URL for joiner role")]
+        invite: Option<String>,
+        #[arg(long, help = "trust-domain id for root role")]
+        trust_domain_id: Option<String>,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Eq)]
+enum LabRole {
+    Root,
+    Joiner,
 }
 
 #[derive(Args, Debug)]
@@ -2764,6 +2816,295 @@ fn write_or_print_output(out: Option<&PathBuf>, content: &str) -> Result<(), Err
             .with_context(|| format!("failed to write output file {}", path.display()))?;
     } else {
         println!("{content}");
+    }
+    Ok(())
+}
+
+fn default_pnw_config_dir() -> Result<PathBuf, Error> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(xdg).join("privateNetwork"));
+    }
+    let home = std::env::var("HOME").context("HOME is required to locate privateNetwork config")?;
+    Ok(PathBuf::from(home).join(".config/privateNetwork"))
+}
+
+fn discover_lab_domain_dir(
+    trust_domain_id: Option<&str>,
+    network_local_id: &str,
+) -> Result<Option<PathBuf>, Error> {
+    let base = default_pnw_config_dir()?.join("trust-domains");
+    if let Some(td) = trust_domain_id {
+        let path = base.join(td);
+        return Ok(path.is_dir().then_some(path));
+    }
+    let Ok(entries) = std::fs::read_dir(&base) else {
+        return Ok(None);
+    };
+    let mut matches = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        let network_dir = path.join("networks").join(network_local_id);
+        if network_dir.join("member_cert.pem").is_file()
+            || network_dir.join("network_state.cbor.pem").is_file()
+        {
+            matches.push(path);
+        }
+    }
+    Ok((matches.len() == 1).then(|| matches.remove(0)))
+}
+
+fn handle_lab(args: LabArgs) -> Result<(), Error> {
+    match args.sub_command.unwrap_or(LabSubCommand::Wizard) {
+        LabSubCommand::Wizard => handle_lab_wizard(),
+        LabSubCommand::Doctor {
+            network_local_id,
+            trust_domain_id,
+        } => handle_lab_doctor(&network_local_id, trust_domain_id.as_deref()),
+        LabSubCommand::Commands {
+            role,
+            network_local_id,
+            listen_port,
+            rpc_port,
+            test_home_name,
+            seed,
+            label,
+            invite,
+            trust_domain_id,
+        } => handle_lab_commands(LabCommandOptions {
+            role,
+            network_local_id,
+            listen_port,
+            rpc_port,
+            test_home_name,
+            seed,
+            label,
+            invite,
+            trust_domain_id,
+        }),
+    }
+}
+
+struct LabCommandOptions {
+    role: LabRole,
+    network_local_id: String,
+    listen_port: u16,
+    rpc_port: u16,
+    test_home_name: String,
+    seed: Option<String>,
+    label: String,
+    invite: Option<String>,
+    trust_domain_id: Option<String>,
+}
+
+fn handle_lab_wizard() -> Result<(), Error> {
+    println!("PactMesh lab wizard (MVP)");
+    println!("This helper prints ready-to-run commands and checks local state.");
+    println!();
+    println!("Common starts:");
+    println!("  pactmesh lab doctor --network-local-id office-net");
+    println!(
+        "  pactmesh lab commands --role root --seed tcp://<A_PUBLIC_IP>:11010 --trust-domain-id <TD_ID>"
+    );
+    println!(
+        "  pactmesh lab commands --role joiner --invite '<INVITE_URL>' --label node-b --rpc-port 15889"
+    );
+    println!();
+    println!("Known issues this lab mode avoids:");
+    println!("  - empty LISTEN_PORT causing --listeners '' failures");
+    println!("  - sk_self.raw incorrectly treated like encrypted sk_self.age in old builds");
+    println!("  - accept-invite does not support --json yet");
+    println!(
+        "  - B/C direct P2P may still fall back to relay; inspect debug logs for UDP SYN/SACK timeouts"
+    );
+    Ok(())
+}
+
+fn handle_lab_doctor(network_local_id: &str, trust_domain_id: Option<&str>) -> Result<(), Error> {
+    let config_dir = default_pnw_config_dir()?;
+    println!("Config dir: {}", config_dir.display());
+    println!(
+        "XDG_CONFIG_HOME: {}",
+        std::env::var("XDG_CONFIG_HOME").unwrap_or_default()
+    );
+    println!(
+        "PNW_DEVICE_PASSPHRASE: {}",
+        if std::env::var("PNW_DEVICE_PASSPHRASE").is_ok() {
+            "set"
+        } else {
+            "unset"
+        }
+    );
+
+    let Some(domain_dir) = discover_lab_domain_dir(trust_domain_id, network_local_id)? else {
+        println!("Trust domain: not found for network_local_id={network_local_id}");
+        return Ok(());
+    };
+    let td = domain_dir
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let network_dir = domain_dir.join("networks").join(network_local_id);
+    println!("Trust domain: {td}");
+    println!("Network dir: {}", network_dir.display());
+
+    for file in [
+        "member_cert.pem",
+        "network_state.cbor.pem",
+        "network_bootstrap.cbor.pem",
+        "sk_self.raw",
+        "sk_self.age",
+    ] {
+        let path = network_dir.join(file);
+        println!(
+            "  {:28} {}",
+            file,
+            if path.is_file() { "ok" } else { "missing" }
+        );
+    }
+
+    if network_dir.join("sk_self.age").is_file() {
+        println!("Device key mode: encrypted sk_self.age; daemon needs PNW_DEVICE_PASSPHRASE.");
+    } else if network_dir.join("sk_self.raw").is_file() {
+        println!("Device key mode: raw sk_self.raw; daemon should not need PNW_DEVICE_PASSPHRASE.");
+    } else {
+        println!("Device key mode: missing; run bootstrap-self or accept-invite first.");
+    }
+
+    println!();
+    println!("Useful checks:");
+    println!("  pactmesh --rpc-portal 127.0.0.1:<RPC_PORT> -o json peer list");
+    println!("  grep -Ei 'udp hole|tcp hole|syn|sack|stun|relay|listener|error' <log> | tail -200");
+    Ok(())
+}
+
+fn handle_lab_commands(options: LabCommandOptions) -> Result<(), Error> {
+    let home_expr = if cfg!(target_os = "windows") {
+        format!("$HOME\\{}", options.test_home_name)
+    } else {
+        format!("$HOME/{}", options.test_home_name)
+    };
+    println!("# Environment");
+    if cfg!(target_os = "windows") {
+        println!("$env:PNW_TEST_HOME = \"{home_expr}\"");
+        println!("$env:XDG_CONFIG_HOME = \"$env:PNW_TEST_HOME\\xdg\"");
+        println!("$env:NETWORK_LOCAL_ID = \"{}\"", options.network_local_id);
+        println!("$env:RPC_PORT = \"{}\"", options.rpc_port);
+        println!("Remove-Item Env:\\PNW_DEVICE_PASSPHRASE -ErrorAction SilentlyContinue");
+        println!("New-Item -ItemType Directory -Force $env:PNW_TEST_HOME | Out-Null");
+    } else {
+        println!("export PNW_TEST_HOME=\"{home_expr}\"");
+        println!("export XDG_CONFIG_HOME=\"$PNW_TEST_HOME/xdg\"");
+        println!("export NETWORK_LOCAL_ID=\"{}\"", options.network_local_id);
+        println!("export RPC_PORT=\"{}\"", options.rpc_port);
+        println!("unset PNW_DEVICE_PASSPHRASE");
+        println!("mkdir -p \"$PNW_TEST_HOME\"");
+    }
+    println!();
+
+    match options.role {
+        LabRole::Root => print_lab_root_commands(&options),
+        LabRole::Joiner => print_lab_joiner_commands(&options),
+    }
+}
+
+fn print_lab_root_commands(options: &LabCommandOptions) -> Result<(), Error> {
+    let Some(seed) = &options.seed else {
+        anyhow::bail!("--seed is required for --role root");
+    };
+    let td = options
+        .trust_domain_id
+        .as_deref()
+        .unwrap_or("<TRUST_DOMAIN_ID>");
+    if cfg!(target_os = "windows") {
+        println!("# Root commands are usually run on the public Linux VPS.");
+    }
+    println!("# Create domain/network when needed, then bootstrap root.");
+    println!("./pactmesh trust create-domain --label root-a --json");
+    println!(
+        "./pactmesh trust create-network \"{td}\" \"{}\" --default-action accept --json",
+        options.network_local_id
+    );
+    println!(
+        "./pactmesh trust bootstrap-self \"{td}\" \"{}\" --device-label {} --json",
+        options.network_local_id, options.label
+    );
+    println!(
+        "./pactmesh trust invite \"{td}\" \"{}\" --seed \"{seed}\" --format url",
+        options.network_local_id
+    );
+    println!();
+    println!("# Start root daemon with TCP+UDP listeners.");
+    println!("nohup ./pactmesh-core \\");
+    println!("  --network-name \"$NETWORK_LOCAL_ID\" \\");
+    println!("  --trust-domain-dir \"$XDG_CONFIG_HOME/privateNetwork/trust-domains/{td}\" \\");
+    println!("  --network-local-id \"$NETWORK_LOCAL_ID\" \\");
+    println!("  --rpc-portal \"127.0.0.1:$RPC_PORT\" \\");
+    println!("  --listeners \"{}\" \\", options.listen_port);
+    println!("  --no-tun true \\");
+    println!("  --disable-ipv6 true \\");
+    println!("  --instance-name {} \\", options.label);
+    println!("  --console-log-level info \\");
+    println!(
+        "  --daemon > \"$PNW_TEST_HOME/{}.log\" 2>&1 &",
+        options.label
+    );
+    Ok(())
+}
+
+fn print_lab_joiner_commands(options: &LabCommandOptions) -> Result<(), Error> {
+    let Some(invite) = &options.invite else {
+        anyhow::bail!("--invite is required for --role joiner");
+    };
+    if cfg!(target_os = "windows") {
+        println!("$INVITE_URL = '{}'", invite.replace('\'', "''"));
+        println!(".\\pactmesh.exe trust accept-invite $INVITE_URL `");
+        println!("  --device-label {} `", options.label);
+        println!("  --online `");
+        println!("  --wait-secs 600 `");
+        println!("  --poll-secs 2");
+        println!();
+        println!(".\\pactmesh-core.exe `");
+        println!("  --network-name $env:NETWORK_LOCAL_ID `");
+        println!("  --network-local-id $env:NETWORK_LOCAL_ID `");
+        println!("  --rpc-portal \"127.0.0.1:$env:RPC_PORT\" `");
+        println!("  --listeners \"{}\" `", options.listen_port);
+        println!("  --no-tun true `");
+        println!("  --disable-ipv6 true `");
+        println!("  --instance-name {} `", options.label);
+        println!("  --console-log-level debug `");
+        println!(
+            "  --daemon *> \"$env:PNW_TEST_HOME\\{}.log\"",
+            options.label
+        );
+        println!();
+        println!(".\\pactmesh.exe --rpc-portal \"127.0.0.1:$env:RPC_PORT\" -o json peer list");
+    } else {
+        println!("INVITE_URL='{}'", invite.replace('\'', "'\\''"));
+        println!("./pactmesh trust accept-invite \"$INVITE_URL\" \\");
+        println!("  --device-label {} \\", options.label);
+        println!("  --online \\");
+        println!("  --wait-secs 600 \\");
+        println!("  --poll-secs 2");
+        println!();
+        println!("nohup ./pactmesh-core \\");
+        println!("  --network-name \"$NETWORK_LOCAL_ID\" \\");
+        println!("  --network-local-id \"$NETWORK_LOCAL_ID\" \\");
+        println!("  --rpc-portal \"127.0.0.1:$RPC_PORT\" \\");
+        println!("  --listeners \"{}\" \\", options.listen_port);
+        println!("  --no-tun true \\");
+        println!("  --disable-ipv6 true \\");
+        println!("  --instance-name {} \\", options.label);
+        println!("  --console-log-level debug \\");
+        println!(
+            "  --daemon > \"$PNW_TEST_HOME/{}.log\" 2>&1 &",
+            options.label
+        );
+        println!();
+        println!("./pactmesh --rpc-portal \"127.0.0.1:$RPC_PORT\" -o json peer list");
+        println!(
+            "grep -Ei 'udp hole|tcp hole|syn|sack|stun|relay|listener|error' \"$PNW_TEST_HOME/{}.log\" | tail -200",
+            options.label
+        );
     }
     Ok(())
 }
@@ -5903,6 +6244,9 @@ async fn main() -> Result<(), Error> {
                 handle_bootstrap_import(domain_dir, source)?;
             }
         },
+        SubCommand::Lab(lab_args) => {
+            handle_lab(lab_args)?;
+        }
         SubCommand::Trust(trust_args) => match trust_args.sub_command {
             TrustSubCommand::CreateDomain {
                 label,
