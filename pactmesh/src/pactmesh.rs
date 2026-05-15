@@ -2897,26 +2897,93 @@ struct LabCommandOptions {
 }
 
 fn handle_lab_wizard() -> Result<(), Error> {
+    if !std::io::stdin().is_terminal() {
+        println!("PactMesh lab wizard needs an interactive terminal.");
+        println!("Use 'pactmesh lab commands --help' for automation-friendly command generation.");
+        return Ok(());
+    }
+
     println!("PactMesh lab wizard (MVP)");
-    println!("This helper prints ready-to-run commands and checks local state.");
+    println!("Generate ready-to-run commands for manual tests. Press Enter to accept defaults.");
     println!();
-    println!("Common starts:");
-    println!("  pactmesh lab doctor --network-local-id office-net");
-    println!(
-        "  pactmesh lab commands --role root --seed tcp://<A_PUBLIC_IP>:11010 --trust-domain-id <TD_ID>"
-    );
-    println!(
-        "  pactmesh lab commands --role joiner --invite '<INVITE_URL>' --label node-b --rpc-port 15889"
-    );
+
+    let role_input = prompt_with_default("Role: root or joiner", "joiner")?;
+    let role = match role_input.trim().to_ascii_lowercase().as_str() {
+        "root" | "r" | "a" => LabRole::Root,
+        "joiner" | "j" | "b" | "c" => LabRole::Joiner,
+        other => anyhow::bail!("unknown lab role '{other}', expected root or joiner"),
+    };
+    let network_local_id = prompt_with_default("Network local id", "office-net")?;
+    let listen_port = prompt_with_default("Listener port", "11010")?
+        .parse::<u16>()
+        .context("listener port must be a number")?;
+    let default_rpc = if role == LabRole::Root {
+        "15888"
+    } else {
+        "15889"
+    };
+    let rpc_port = prompt_with_default("Local RPC port", default_rpc)?
+        .parse::<u16>()
+        .context("RPC port must be a number")?;
+    let test_home_name = prompt_with_default("Test directory name", "pactmesh-test")?;
+    let label_default = if role == LabRole::Root {
+        "root-a"
+    } else {
+        "node-b"
+    };
+    let label = prompt_with_default("Device/instance label", label_default)?;
+
+    let (seed, invite, trust_domain_id) = match role {
+        LabRole::Root => {
+            let seed = prompt_required("Public seed URL, e.g. tcp://1.2.3.4:11010")?;
+            let trust_domain_id =
+                prompt_with_default("Trust domain id if already created", "<TRUST_DOMAIN_ID>")?;
+            (Some(seed), None, Some(trust_domain_id))
+        }
+        LabRole::Joiner => {
+            let invite = prompt_required("Invite URL")?;
+            (None, Some(invite), None)
+        }
+    };
+
     println!();
-    println!("Known issues this lab mode avoids:");
-    println!("  - empty LISTEN_PORT causing --listeners '' failures");
-    println!("  - sk_self.raw incorrectly treated like encrypted sk_self.age in old builds");
-    println!("  - accept-invite does not support --json yet");
-    println!(
-        "  - B/C direct P2P may still fall back to relay; inspect debug logs for UDP SYN/SACK timeouts"
-    );
-    Ok(())
+    println!("# Generated commands");
+    handle_lab_commands(LabCommandOptions {
+        role,
+        network_local_id,
+        listen_port,
+        rpc_port,
+        test_home_name,
+        seed,
+        label,
+        invite,
+        trust_domain_id,
+    })
+}
+
+fn prompt_with_default(prompt: &str, default: &str) -> Result<String, Error> {
+    print!("{prompt} [{default}]: ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        Ok(default.to_owned())
+    } else {
+        Ok(trimmed.to_owned())
+    }
+}
+
+fn prompt_required(prompt: &str) -> Result<String, Error> {
+    print!("{prompt}: ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("{prompt} is required");
+    }
+    Ok(trimmed.to_owned())
 }
 
 fn handle_lab_doctor(network_local_id: &str, trust_domain_id: Option<&str>) -> Result<(), Error> {
