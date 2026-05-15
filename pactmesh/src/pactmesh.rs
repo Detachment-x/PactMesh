@@ -463,6 +463,22 @@ enum LabSubCommand {
         #[arg(long, help = "trust-domain id; auto-detected when omitted")]
         trust_domain_id: Option<String>,
     },
+    #[command(about = "approve a pending join request interactively")]
+    Approve {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(long, help = "approve this pending device id prefix without prompting")]
+        device: Option<String>,
+        #[arg(long, help = "emit machine-readable JSON from approve")]
+        json: bool,
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
+        passphrase_file: Option<PathBuf>,
+    },
     #[command(about = "print ready-to-run commands for a test role")]
     Commands {
         #[arg(long, value_enum, help = "node role to generate commands for")]
@@ -2853,13 +2869,30 @@ fn discover_lab_domain_dir(
     Ok((matches.len() == 1).then(|| matches.remove(0)))
 }
 
-fn handle_lab(args: LabArgs) -> Result<(), Error> {
+async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), Error> {
     match args.sub_command.unwrap_or(LabSubCommand::Wizard) {
         LabSubCommand::Wizard => handle_lab_wizard(),
         LabSubCommand::Doctor {
             network_local_id,
             trust_domain_id,
         } => handle_lab_doctor(&network_local_id, trust_domain_id.as_deref()),
+        LabSubCommand::Approve {
+            trust_domain_id,
+            network_local_id,
+            device,
+            json,
+            passphrase_file,
+        } => {
+            handle_lab_approve(
+                handler,
+                trust_domain_id,
+                network_local_id,
+                device,
+                json,
+                passphrase_file,
+            )
+            .await
+        }
         LabSubCommand::Commands {
             role,
             network_local_id,
@@ -3042,6 +3075,102 @@ fn handle_lab_doctor(network_local_id: &str, trust_domain_id: Option<&str>) -> R
     println!("  pactmesh --rpc-portal 127.0.0.1:<RPC_PORT> -o json peer list");
     println!("  grep -Ei 'udp hole|tcp hole|syn|sack|stun|relay|listener|error' <log> | tail -200");
     Ok(())
+}
+
+async fn handle_lab_approve(
+    handler: &CommandHandler<'_>,
+    trust_domain_id: String,
+    network_local_id: String,
+    device: Option<String>,
+    json: bool,
+    passphrase_file: Option<PathBuf>,
+) -> Result<(), Error> {
+    let td_id_bytes = parse_url_safe_b64_32(&trust_domain_id, "trust_domain_id")?;
+    let client = handler.get_trust_join_manage_client().await?;
+    let response = client
+        .list_pending_join_requests(
+            BaseController::default(),
+            ListPendingJoinRequestsRequest {
+                instance: Some(handler.instance_selector.clone()),
+                trust_domain_id: td_id_bytes.to_vec(),
+                network_local_id: network_local_id.clone(),
+            },
+        )
+        .await
+        .context("daemon refused to list pending join requests")?;
+
+    let requests = response.requests;
+    if requests.is_empty() {
+        println!("No pending join requests for {trust_domain_id}/{network_local_id}.");
+        return Ok(());
+    }
+
+    println!("Pending join requests:");
+    for (idx, request) in requests.iter().enumerate() {
+        let device_id = encode_device_id(&request.applicant_pk);
+        println!(
+            "  {}. {} label={} hint={}",
+            idx + 1,
+            shorten_id(&device_id),
+            request.device_label,
+            if request.hint.is_empty() {
+                "-"
+            } else {
+                &request.hint
+            }
+        );
+    }
+
+    let selected = if let Some(selector) = device {
+        selector
+    } else if requests.len() == 1 {
+        let device_id = encode_device_id(&requests[0].applicant_pk);
+        let answer = prompt_with_default(
+            &format!(
+                "Approve {} label={}? yes/no",
+                shorten_id(&device_id),
+                requests[0].device_label
+            ),
+            "yes",
+        )?;
+        if !matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes") {
+            println!("Approval cancelled.");
+            return Ok(());
+        }
+        device_id
+    } else {
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!("multiple pending requests; pass --device <device-id-prefix>");
+        }
+        let answer = prompt_required("Approve which number or device id prefix")?;
+        if let Ok(index) = answer.parse::<usize>() {
+            if index == 0 || index > requests.len() {
+                anyhow::bail!("selection out of range");
+            }
+            encode_device_id(&requests[index - 1].applicant_pk)
+        } else {
+            answer
+        }
+    };
+
+    println!("Approving {selected} ...");
+    handle_trust_approve(
+        handler,
+        trust_domain_id,
+        network_local_id,
+        selected,
+        json,
+        passphrase_file,
+    )
+    .await
+}
+
+fn shorten_id(id: &str) -> String {
+    if id.len() <= 16 {
+        id.to_owned()
+    } else {
+        format!("{}...{}", &id[..10], &id[id.len() - 6..])
+    }
 }
 
 fn handle_lab_commands(options: LabCommandOptions) -> Result<(), Error> {
@@ -6312,7 +6441,7 @@ async fn main() -> Result<(), Error> {
             }
         },
         SubCommand::Lab(lab_args) => {
-            handle_lab(lab_args)?;
+            handle_lab(&handler, lab_args).await?;
         }
         SubCommand::Trust(trust_args) => match trust_args.sub_command {
             TrustSubCommand::CreateDomain {
