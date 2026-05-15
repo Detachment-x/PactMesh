@@ -173,6 +173,8 @@ enum SubCommand {
     Lab(LabArgs),
     #[command(about = "manage privateNetwork trust domains")]
     Trust(TrustArgs),
+    #[command(about = "interactive ratatui console (Node + Peers v0)")]
+    Tui,
     #[command(about = t!("core_clap.generate_completions").to_string())]
     GenAutocomplete { shell: ShellType },
 }
@@ -1805,6 +1807,10 @@ impl<'a> CommandHandler<'a> {
             Box::pin(async move { handler.apply_connector_modify(&url, action).await })
         })
         .await
+    }
+
+    async fn run_tui(&self) -> Result<(), Error> {
+        pactmesh::tui::run(self.client.clone(), self.instance_selector.clone()).await
     }
 
     async fn handle_peer_list(&self) -> Result<(), Error> {
@@ -7309,6 +7315,8 @@ async fn main() -> Result<(), Error> {
                     .await?;
             }
         },
+        SubCommand::Tui => handler.run_tui().await?,
+
         SubCommand::GenAutocomplete { shell } => {
             let mut cmd = Cli::command();
             if let Some(shell) = shell.to_shell() {
