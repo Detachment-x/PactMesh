@@ -58,7 +58,8 @@ fn discover_trust_domain_dir(network_local_id: &str) -> anyhow::Result<PathBuf> 
         }
         let network_dir = path.join("networks").join(network_local_id);
         if network_dir.join("member_cert.pem").is_file()
-            && network_dir.join("sk_self.age").is_file()
+            && (network_dir.join("sk_self.age").is_file()
+                || network_dir.join("sk_self.raw").is_file())
             && network_dir.join("network_state.cbor.pem").is_file()
         {
             matches.push(path);

@@ -12,7 +12,7 @@ use crate::{
         },
         constants::PACTMESH_VERSION,
         global_ctx::{EventBusSubscriber, GlobalCtxEvent},
-        trust_context::TrustDomainContext,
+        trust_context::{SK_SELF_AGE_FILE, TrustDomainContext},
     },
     instance::instance::Instance,
     proto::api::instance::list_peer_route_pair,
@@ -80,12 +80,11 @@ pub async fn inject_trust_domain_context_from_config(
         );
     }
 
-    let password = std::env::var(&trust_domain.sk_self_password_env).with_context(|| {
-        format!(
-            "failed to read sk_self password from env var {}",
-            trust_domain.sk_self_password_env
-        )
-    })?;
+    let password = read_sk_self_password_if_needed(
+        &trust_domain.domain_dir,
+        &trust_domain.network_local_id,
+        &trust_domain.sk_self_password_env,
+    )?;
 
     let ctx = TrustDomainContext::load_from_dir(
         trust_domain.domain_dir.as_path(),
@@ -159,12 +158,11 @@ pub async fn inject_trust_pool_from_config(
         return Ok(None);
     };
 
-    let password = std::env::var(&trust_domain.sk_self_password_env).with_context(|| {
-        format!(
-            "failed to read sk_self password from env var {}",
-            trust_domain.sk_self_password_env
-        )
-    })?;
+    let password = read_sk_self_password_if_needed(
+        &trust_domain.domain_dir,
+        &trust_domain.network_local_id,
+        &trust_domain.sk_self_password_env,
+    )?;
 
     let trust_ctx = TrustDomainContext::load_from_dir(
         trust_domain.domain_dir.as_path(),
@@ -244,6 +242,19 @@ pub async fn inject_trust_pool_from_config(
         Arc::new(tokio::sync::RwLock::new(pool)),
         Arc::new(trust_ctx),
     )))
+}
+
+fn read_sk_self_password_if_needed(
+    domain_dir: &std::path::Path,
+    network_local_id: &str,
+    env_name: &str,
+) -> Result<String, anyhow::Error> {
+    let network_dir = domain_dir.join("networks").join(network_local_id);
+    if !network_dir.join(SK_SELF_AGE_FILE).is_file() {
+        return Ok(String::new());
+    }
+    std::env::var(env_name)
+        .with_context(|| format!("failed to read sk_self password from env var {env_name}"))
 }
 
 pub struct EasyTierLauncher {
