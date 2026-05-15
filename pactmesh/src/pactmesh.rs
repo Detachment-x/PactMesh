@@ -463,6 +463,15 @@ enum LabSubCommand {
         #[arg(long, help = "trust-domain id; auto-detected when omitted")]
         trust_domain_id: Option<String>,
     },
+    #[command(about = "summarize local files, daemon RPC, peers, and recent logs")]
+    Status {
+        #[arg(long, default_value = "office-net", help = "network-local id")]
+        network_local_id: String,
+        #[arg(long, help = "trust-domain id; auto-detected when omitted")]
+        trust_domain_id: Option<String>,
+        #[arg(long, help = "daemon log file to scan")]
+        log: Option<PathBuf>,
+    },
     #[command(about = "run guided test steps")]
     Run {
         #[command(subcommand)]
@@ -2926,6 +2935,19 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             network_local_id,
             trust_domain_id,
         } => handle_lab_doctor(&network_local_id, trust_domain_id.as_deref()),
+        LabSubCommand::Status {
+            network_local_id,
+            trust_domain_id,
+            log,
+        } => {
+            handle_lab_status(
+                handler,
+                &network_local_id,
+                trust_domain_id.as_deref(),
+                log.as_ref(),
+            )
+            .await
+        }
         LabSubCommand::Run { command } => match command {
             LabRunSubCommand::Joiner {
                 invite,
@@ -3165,6 +3187,61 @@ fn handle_lab_doctor(network_local_id: &str, trust_domain_id: Option<&str>) -> R
     println!("Useful checks:");
     println!("  pactmesh --rpc-portal 127.0.0.1:<RPC_PORT> -o json peer list");
     println!("  grep -Ei 'udp hole|tcp hole|syn|sack|stun|relay|listener|error' <log> | tail -200");
+    Ok(())
+}
+
+async fn handle_lab_status(
+    handler: &CommandHandler<'_>,
+    network_local_id: &str,
+    trust_domain_id: Option<&str>,
+    log: Option<&PathBuf>,
+) -> Result<(), Error> {
+    println!("== Local trust files ==");
+    handle_lab_doctor(network_local_id, trust_domain_id)?;
+
+    println!();
+    println!("== Daemon node ==");
+    if let Err(err) = handler.handle_node(None).await {
+        println!("daemon RPC unavailable: {err:#}");
+    }
+
+    println!();
+    println!("== Peers ==");
+    if let Err(err) = handler.handle_peer_list().await {
+        println!("peer list unavailable: {err:#}");
+    }
+
+    if let Some(log_path) = log {
+        println!();
+        println!("== Recent diagnostic log lines ==");
+        print_lab_log_summary(log_path)?;
+    }
+    Ok(())
+}
+
+fn print_lab_log_summary(path: &PathBuf) -> Result<(), Error> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read log file {}", path.display()))?;
+    let keywords = [
+        "udp hole", "tcp hole", "syn", "sack", "stun", "relay", "listener", "error", "failed",
+        "timeout",
+    ];
+    let mut matches = text
+        .lines()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            keywords.iter().any(|keyword| lower.contains(keyword))
+        })
+        .collect::<Vec<_>>();
+    let keep_from = matches.len().saturating_sub(80);
+    matches.drain(..keep_from);
+    if matches.is_empty() {
+        println!("No diagnostic lines matched in {}", path.display());
+    } else {
+        for line in matches {
+            println!("{line}");
+        }
+    }
     Ok(())
 }
 
