@@ -9,6 +9,7 @@ use crate::{
             TomlConfigLoader, TrustDomainConfig, VpnPortalConfig, load_config_from_file,
             process_secure_mode_cfg,
         },
+        config_dir::pnw_trust_domains_dir,
         constants::PACTMESH_VERSION,
         log,
     },
@@ -37,16 +38,8 @@ use crate::tunnel::IpScheme;
 
 const NETWORK_BOOTSTRAP_FILE_NAME: &str = "network_bootstrap.cbor.pem";
 
-fn default_trust_domains_dir() -> anyhow::Result<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(xdg).join("privateNetwork/trust-domains"));
-    }
-    let home = std::env::var("HOME").context("HOME is required to locate trust domains")?;
-    Ok(PathBuf::from(home).join(".config/privateNetwork/trust-domains"))
-}
-
 fn discover_trust_domain_dir(network_local_id: &str) -> anyhow::Result<PathBuf> {
-    let base = default_trust_domains_dir()?;
+    let base = pnw_trust_domains_dir()?;
     let mut matches = Vec::new();
     let entries = std::fs::read_dir(&base)
         .with_context(|| format!("failed to read trust domains directory {}", base.display()))?;

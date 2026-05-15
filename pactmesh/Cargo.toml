@@ -29,6 +29,7 @@ path = "src/lib.rs"
 
 [dependencies]
 git-version = "0.3.9"
+directories = "5"
 
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = [

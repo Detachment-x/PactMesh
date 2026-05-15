@@ -35,6 +35,7 @@ use pactmesh::{
     common::{
         constants::PACTMESH_VERSION,
         stun::{StunInfoCollector, StunInfoCollectorTrait},
+        config_dir::{pnw_config_dir, pnw_trust_domains_dir},
         trust_context::{SK_SELF_AGE_FILE, SK_SELF_RAW_FILE, write_raw_sk_self},
     },
     peers,
@@ -2965,19 +2966,11 @@ fn write_or_print_output(out: Option<&PathBuf>, content: &str) -> Result<(), Err
     Ok(())
 }
 
-fn default_pnw_config_dir() -> Result<PathBuf, Error> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(xdg).join("privateNetwork"));
-    }
-    let home = std::env::var("HOME").context("HOME is required to locate privateNetwork config")?;
-    Ok(PathBuf::from(home).join(".config/privateNetwork"))
-}
-
 fn discover_lab_domain_dir(
     trust_domain_id: Option<&str>,
     network_local_id: &str,
 ) -> Result<Option<PathBuf>, Error> {
-    let base = default_pnw_config_dir()?.join("trust-domains");
+    let base = pnw_config_dir()?.join("trust-domains");
     if let Some(td) = trust_domain_id {
         let path = base.join(td);
         return Ok(path.is_dir().then_some(path));
@@ -3270,7 +3263,7 @@ fn prompt_required(prompt: &str) -> Result<String, Error> {
 }
 
 fn handle_lab_doctor(network_local_id: &str, trust_domain_id: Option<&str>) -> Result<(), Error> {
-    let config_dir = default_pnw_config_dir()?;
+    let config_dir = pnw_config_dir()?;
     println!("Config dir: {}", config_dir.display());
     println!(
         "XDG_CONFIG_HOME: {}",
@@ -3486,7 +3479,7 @@ fn build_lab_daemon_command(options: &LabRunDaemonOptions) -> Result<Vec<String>
             .trust_domain_id
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("--trust-domain-id is required for root role"))?;
-        let dir = default_pnw_config_dir()?.join("trust-domains").join(td);
+        let dir = pnw_config_dir()?.join("trust-domains").join(td);
         command.insert(5, dir.display().to_string());
         command.insert(5, "--trust-domain-dir".to_owned());
     }
@@ -3917,7 +3910,7 @@ fn handle_trust_invite(
         anyhow::bail!("at least one --seed is required");
     }
 
-    let domain_dir = default_trust_domains_dir()?.join(&trust_domain_id);
+    let domain_dir = pnw_trust_domains_dir()?.join(&trust_domain_id);
     if !domain_dir.is_dir() {
         anyhow::bail!("trust domain not found: {trust_domain_id}");
     }
@@ -3993,7 +3986,7 @@ fn handle_trust_revoke(
     note: Option<String>,
     passphrase_file: Option<PathBuf>,
 ) -> Result<(), Error> {
-    let domain_dir = default_trust_domains_dir()?.join(&trust_domain_id);
+    let domain_dir = pnw_trust_domains_dir()?.join(&trust_domain_id);
     if !domain_dir.is_dir() {
         anyhow::bail!("trust domain not found: {trust_domain_id}");
     }
@@ -5115,7 +5108,7 @@ fn load_network_state_for_edit(
     trust_domain_id: &str,
     network_local_id: &str,
 ) -> Result<(PathBuf, String, pactmesh::trust::SignedNetworkState), Error> {
-    let domain_dir = default_trust_domains_dir()?.join(trust_domain_id);
+    let domain_dir = pnw_trust_domains_dir()?.join(trust_domain_id);
     if !domain_dir.is_dir() {
         anyhow::bail!("trust domain not found: {trust_domain_id}");
     }
@@ -5132,7 +5125,7 @@ fn unlock_domain_root(
     trust_domain_id: &str,
     passphrase_file: Option<PathBuf>,
 ) -> Result<TrustDomainRoot, Error> {
-    let domain_dir = default_trust_domains_dir()?.join(trust_domain_id);
+    let domain_dir = pnw_trust_domains_dir()?.join(trust_domain_id);
     let passphrase = read_root_passphrase(passphrase_file.as_ref())?;
     let root = TrustDomainRoot::load_from_file(&domain_dir.join("sk_root.age"), &passphrase)
         .with_context(|| {
@@ -5336,18 +5329,10 @@ fn load_device_sign_key(path: &std::path::Path, password: &str) -> Result<SignKe
     Ok(SignKey::from_bytes(bytes))
 }
 
-fn default_private_network_dir() -> Result<PathBuf, Error> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(xdg).join("privateNetwork"));
-    }
-    let home = std::env::var("HOME").context("HOME is required when --out-dir is not provided")?;
-    Ok(PathBuf::from(home).join(".config/privateNetwork"))
-}
-
 fn load_or_create_global_device_identity(
     password: Option<&str>,
 ) -> Result<(SignKey, String, PathBuf, &'static str), Error> {
-    let device_dir = default_private_network_dir()?.join("devices/default");
+    let device_dir = pnw_config_dir()?.join("devices/default");
     let age_path = device_dir.join(SK_SELF_AGE_FILE);
     if age_path.exists() {
         let password = password.ok_or_else(|| {
@@ -5457,7 +5442,7 @@ async fn handle_trust_accept_invite(
 ) -> Result<(), Error> {
     let bootstrap = parse_bootstrap_source(&options.source)?;
     bootstrap.verify_self_consistency()?;
-    let domain_dir = default_trust_domains_dir()?.join(bootstrap.trust_domain_id.to_string());
+    let domain_dir = pnw_trust_domains_dir()?.join(bootstrap.trust_domain_id.to_string());
     ensure_bootstrap_root(&domain_dir, &bootstrap)?;
 
     let passphrase = read_optional_device_passphrase(options.passphrase_file.as_ref())?;
@@ -6020,14 +6005,6 @@ fn validate_root_passphrase(passphrase: String) -> Result<String, Error> {
     Ok(passphrase)
 }
 
-fn default_trust_domains_dir() -> Result<PathBuf, Error> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(xdg).join("privateNetwork/trust-domains"));
-    }
-    let home = std::env::var("HOME").context("HOME is required when --out-dir is not provided")?;
-    Ok(PathBuf::from(home).join(".config/privateNetwork/trust-domains"))
-}
-
 #[derive(Debug, serde::Serialize)]
 struct TrustDomainListRow {
     trust_domain_id: String,
@@ -6088,7 +6065,7 @@ fn list_trust_domains(base_dir: &std::path::Path) -> Result<Vec<TrustDomainListR
 }
 
 fn handle_trust_list_domains(json: bool) -> Result<(), Error> {
-    let rows = list_trust_domains(&default_trust_domains_dir()?)?;
+    let rows = list_trust_domains(&pnw_trust_domains_dir()?)?;
     if json {
         println!("{}", serde_json::to_string(&rows)?);
         return Ok(());
@@ -6130,7 +6107,7 @@ fn handle_trust_create_network(
     json: bool,
     passphrase_file: Option<PathBuf>,
 ) -> Result<(), Error> {
-    let domain_dir = default_trust_domains_dir()?.join(&trust_domain_id);
+    let domain_dir = pnw_trust_domains_dir()?.join(&trust_domain_id);
     if !domain_dir.is_dir() {
         anyhow::bail!("trust domain not found: {trust_domain_id}");
     }
@@ -6353,7 +6330,7 @@ fn handle_trust_create_domain(
     let passphrase = read_root_passphrase(passphrase_file.as_ref())?;
     let root = TrustDomainRoot::generate();
     let trust_domain_id = root.id();
-    let base_dir = out_dir.map(Ok).unwrap_or_else(default_trust_domains_dir)?;
+    let base_dir = out_dir.map(Ok).unwrap_or_else(pnw_trust_domains_dir)?;
     let domain_dir = base_dir.join(trust_domain_id.to_string());
     if domain_dir.exists() {
         anyhow::bail!(
