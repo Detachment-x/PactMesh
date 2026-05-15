@@ -85,6 +85,7 @@ enum InputMode {
         reason: String,
     },
     Help(&'static str),
+    Detail(String),
 }
 
 enum PendingAction {
@@ -415,7 +416,7 @@ async fn event_loop(
                 }
                 _ => ui.mode = InputMode::RejectReason { row, reason },
             },
-            InputMode::Help(_) => {} // 任意键关闭
+            InputMode::Help(_) | InputMode::Detail(_) => {} // 任意键关闭
         }
     }
     Ok(())
@@ -466,6 +467,13 @@ fn handle_normal_key(
             let cur = ui.cur_table_state().selected().unwrap_or(0);
             ui.cur_table_state().select(Some(cur.saturating_sub(1)));
         }
+        KeyCode::Enter => {
+            if let Some(text) = build_detail(ui, snap) {
+                ui.mode = InputMode::Detail(text);
+            } else {
+                ui.flash_info("nothing to expand here");
+            }
+        }
         KeyCode::Char('a') if cur_tab == Tab::Joins => {
             if let Some(row) = selected_join(ui, snap) {
                 ui.mode = InputMode::Passphrase {
@@ -494,6 +502,20 @@ fn handle_normal_key(
 fn selected_join(ui: &mut UiState, snap: &state::Snapshot) -> Option<JoinRow> {
     let idx = ui.cur_table_state().selected()?;
     snap.pending_joins.get(idx).cloned()
+}
+
+fn build_detail(ui: &mut UiState, snap: &state::Snapshot) -> Option<String> {
+    let cur_tab = TABS[ui.tab_index];
+    let idx = ui.cur_table_state().selected()?;
+    match cur_tab {
+        Tab::Peers => snap
+            .peers
+            .get(idx)
+            .map(|p| panels::detail::peer_detail(p, &snap.stun)),
+        Tab::Connectors => snap.connectors.get(idx).map(panels::detail::connector_detail),
+        Tab::Joins => snap.pending_joins.get(idx).map(panels::detail::join_detail),
+        _ => None,
+    }
 }
 
 fn dispatch_cmd(
@@ -708,7 +730,8 @@ fn draw(frame: &mut ratatui::Frame<'_>, snap: &state::Snapshot, ui: &UiState) {
     match &ui.mode {
         InputMode::Passphrase { buf, action } => draw_passphrase_modal(frame, buf, action),
         InputMode::RejectReason { row, reason } => draw_reject_modal(frame, row, reason),
-        InputMode::Help(text) => draw_help_modal(frame, text),
+        InputMode::Help(text) => draw_text_modal(frame, " Help — any key to close ", text, 70, 60),
+        InputMode::Detail(text) => draw_text_modal(frame, " Detail — any key to close ", text, 75, 70),
         _ => {}
     }
 }
@@ -853,13 +876,19 @@ fn draw_reject_modal(frame: &mut ratatui::Frame<'_>, row: &JoinRow, reason: &str
     );
 }
 
-fn draw_help_modal(frame: &mut ratatui::Frame<'_>, text: &str) {
-    let area = centered_rect(70, 60, frame.area());
+fn draw_text_modal(
+    frame: &mut ratatui::Frame<'_>,
+    title: &str,
+    text: &str,
+    pct_x: u16,
+    pct_y: u16,
+) {
+    let area = centered_rect(pct_x, pct_y, frame.area());
     frame.render_widget(Clear, area);
     let body: Vec<Line> = text.lines().map(|l| Line::from(l.to_string())).collect();
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Help — any key to close ")
+        .title(title.to_string())
         .title_alignment(Alignment::Center)
         .style(Style::default().bg(Color::Black));
     frame.render_widget(
