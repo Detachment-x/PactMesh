@@ -20,12 +20,7 @@ fn ipv4_str(pair: &PeerRoutePair) -> String {
         .unwrap_or_else(|| "-".into())
 }
 
-pub fn render(
-    frame: &mut Frame<'_>,
-    snap: &Snapshot,
-    area: Rect,
-    table_state: &mut TableState,
-) {
+pub fn render(frame: &mut Frame<'_>, snap: &Snapshot, area: Rect, table_state: &mut TableState) {
     let header = Row::new(vec![
         Cell::from("Hostname"),
         Cell::from("IPv4"),
@@ -46,7 +41,9 @@ pub fn render(
                 .filter(|h| !h.is_empty())
                 .unwrap_or_else(|| "-".into());
             let ipv4 = ipv4_str(pair);
-            let cost = route.map(|r| r.cost.to_string()).unwrap_or_else(|| "-".into());
+            let cost = route
+                .map(|r| r.cost.to_string())
+                .unwrap_or_else(|| "-".into());
             let pt = path_type(pair);
             let path = pt.to_string();
             let latency = route

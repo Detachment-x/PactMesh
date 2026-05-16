@@ -76,14 +76,8 @@ enum InputMode {
     Normal,
     Command(String),
     Filter(String),
-    Passphrase {
-        buf: String,
-        action: PendingAction,
-    },
-    RejectReason {
-        row: JoinRow,
-        reason: String,
-    },
+    Passphrase { buf: String, action: PendingAction },
+    RejectReason { row: JoinRow, reason: String },
     Help(&'static str),
     Detail(String),
 }
@@ -100,7 +94,11 @@ enum FlashKind {
 }
 
 enum ActionResult {
-    ApproveOk { short_fp: String, label: String, version: u64 },
+    ApproveOk {
+        short_fp: String,
+        label: String,
+        version: u64,
+    },
     ApproveErr(String),
     RejectOk(String),
     RejectErr(String),
@@ -365,7 +363,13 @@ async fn event_loop(
                     ui.flash_info("approve cancelled");
                 }
                 KeyCode::Enter => {
-                    spawn_action(action, std::mem::take(&mut buf), client.clone(), instance.clone(), action_tx.clone());
+                    spawn_action(
+                        action,
+                        std::mem::take(&mut buf),
+                        client.clone(),
+                        instance.clone(),
+                        action_tx.clone(),
+                    );
                     ui.flash_info("approving…");
                 }
                 KeyCode::Backspace => {
@@ -402,7 +406,9 @@ async fn event_loop(
                         };
                         let _ = tx.send(match r {
                             Ok(()) => ActionResult::RejectOk(label_with_reason),
-                            Err(e) => ActionResult::RejectErr(format!("{label_with_reason}: {e:#}")),
+                            Err(e) => {
+                                ActionResult::RejectErr(format!("{label_with_reason}: {e:#}"))
+                            }
                         });
                     });
                 }
@@ -512,7 +518,10 @@ fn build_detail(ui: &mut UiState, snap: &state::Snapshot) -> Option<String> {
             .peers
             .get(idx)
             .map(|p| panels::detail::peer_detail(p, &snap.stun)),
-        Tab::Connectors => snap.connectors.get(idx).map(panels::detail::connector_detail),
+        Tab::Connectors => snap
+            .connectors
+            .get(idx)
+            .map(panels::detail::connector_detail),
         Tab::Joins => snap.pending_joins.get(idx).map(panels::detail::join_detail),
         _ => None,
     }
@@ -569,9 +578,7 @@ fn dispatch_cmd(
             ui.flash_info("not in TUI v0 — use: pactmesh trust revoke <td> <net> <fp>");
         }
         Cmd::Reconnect(_) | Cmd::RestartConnector(_) => {
-            ui.flash_info(
-                "no daemon RPC for reconnect — try :!systemctl restart pactmesh-core",
-            );
+            ui.flash_info("no daemon RPC for reconnect — try :!systemctl restart pactmesh-core");
         }
         Cmd::ExportBundle(_) => {
             ui.flash_info(
@@ -731,7 +738,9 @@ fn draw(frame: &mut ratatui::Frame<'_>, snap: &state::Snapshot, ui: &UiState) {
         InputMode::Passphrase { buf, action } => draw_passphrase_modal(frame, buf, action),
         InputMode::RejectReason { row, reason } => draw_reject_modal(frame, row, reason),
         InputMode::Help(text) => draw_text_modal(frame, " Help — any key to close ", text, 70, 60),
-        InputMode::Detail(text) => draw_text_modal(frame, " Detail — any key to close ", text, 75, 70),
+        InputMode::Detail(text) => {
+            draw_text_modal(frame, " Detail — any key to close ", text, 75, 70)
+        }
         _ => {}
     }
 }
@@ -769,10 +778,7 @@ fn status_line<'a>(snap: &'a state::Snapshot, ui: &'a UiState) -> Line<'a> {
     }
     if let Some(err) = snap.last_error.as_ref() {
         return Line::from(vec![
-            Span::styled(
-                format!(" ERROR: {err} "),
-                Style::default().fg(Color::Red),
-            ),
+            Span::styled(format!(" ERROR: {err} "), Style::default().fg(Color::Red)),
             Span::raw(" | r refresh | q quit "),
         ]);
     }
@@ -786,11 +792,7 @@ fn status_line<'a>(snap: &'a state::Snapshot, ui: &'a UiState) -> Line<'a> {
     ))
 }
 
-fn draw_passphrase_modal(
-    frame: &mut ratatui::Frame<'_>,
-    buf: &str,
-    action: &PendingAction,
-) {
+fn draw_passphrase_modal(frame: &mut ratatui::Frame<'_>, buf: &str, action: &PendingAction) {
     let area = centered_rect(60, 30, frame.area());
     frame.render_widget(Clear, area);
     let title = match action {
@@ -852,9 +854,7 @@ fn draw_reject_modal(frame: &mut ratatui::Frame<'_>, row: &JoinRow, reason: &str
             row.network_local_id
         )),
         Line::from(""),
-        Line::from(Span::raw(
-            "Reason (optional, local flash only — not sent):",
-        )),
+        Line::from(Span::raw("Reason (optional, local flash only — not sent):")),
         Line::from(vec![
             Span::styled(reason.to_string(), Style::default().fg(Color::Yellow)),
             Span::styled("█", Style::default().fg(Color::Yellow)),

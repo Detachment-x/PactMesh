@@ -33,9 +33,9 @@ use url::Url;
 
 use pactmesh::{
     common::{
+        config_dir::{pnw_config_dir, pnw_trust_domains_dir},
         constants::PACTMESH_VERSION,
         stun::{StunInfoCollector, StunInfoCollectorTrait},
-        config_dir::{pnw_config_dir, pnw_trust_domains_dir},
         trust_context::{SK_SELF_AGE_FILE, SK_SELF_RAW_FILE, write_raw_sk_self},
     },
     peers,

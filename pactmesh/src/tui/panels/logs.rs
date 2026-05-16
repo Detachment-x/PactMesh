@@ -159,7 +159,9 @@ pub fn render(frame: &mut Frame<'_>, view: LogsView<'_>, area: Rect) {
         )));
     }
     let visible_count = visible_lines.len();
-    let path_label = view.path_hint.unwrap_or("(no log file — :set-log-file <path>)");
+    let path_label = view
+        .path_hint
+        .unwrap_or("(no log file — :set-log-file <path>)");
     let title = format!(
         " Logs ({visible_count}/{total})  l={}  g={}  /={}  src={path_label} ",
         view.level.label(),

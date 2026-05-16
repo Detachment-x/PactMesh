@@ -10,10 +10,7 @@ pub enum Cmd {
     /// `:approve <fp_prefix>` — 模糊匹配 pending join 的 applicant_short
     Approve(String),
     /// `:reject <fp_prefix> [reason]` — reason 仅本地 flash，daemon proto 无字段
-    Reject {
-        fp: String,
-        reason: Option<String>,
-    },
+    Reject { fp: String, reason: Option<String> },
     /// `:revoke <fp_prefix>` — TODO，daemon 侧需 sk_root 签新 network_state
     Revoke(String),
     /// `:reconnect <peer_hostname>` — 当前回退到 :!systemctl restart pactmesh-core
@@ -132,9 +129,15 @@ fn split_first_word(s: &str) -> (&str, Option<&str>) {
 pub fn help_text(topic: Option<&str>) -> &'static str {
     match topic {
         None => HELP_OVERVIEW,
-        Some("approve") | Some("a") => "approve <fp>: passphrase modal → 解锁 sk_root → 本地签 cert → daemon RPC → 写 member_certs/<fp>.pem + 更新 network_state",
-        Some("reject") | Some("r") => "reject <fp> [reason]: daemon RPC，reason 仅本地 flash（proto 无字段）",
-        Some("!") | Some("shell") => ":!cmd → 离开 alt-screen，sh -c (unix) / cmd /c (win)，含 set-env 注入；按任意键回 TUI",
+        Some("approve") | Some("a") => {
+            "approve <fp>: passphrase modal → 解锁 sk_root → 本地签 cert → daemon RPC → 写 member_certs/<fp>.pem + 更新 network_state"
+        }
+        Some("reject") | Some("r") => {
+            "reject <fp> [reason]: daemon RPC，reason 仅本地 flash（proto 无字段）"
+        }
+        Some("!") | Some("shell") => {
+            ":!cmd → 离开 alt-screen，sh -c (unix) / cmd /c (win)，含 set-env 注入；按任意键回 TUI"
+        }
         Some(other) => {
             // 注意：返回的是静态字符串，不能含动态部分；这里保守提示
             let _ = other;
@@ -234,7 +237,10 @@ mod tests {
     #[test]
     fn help_topic() {
         assert_eq!(parse("help").unwrap(), Cmd::Help(None));
-        assert_eq!(parse("help approve").unwrap(), Cmd::Help(Some("approve".into())));
+        assert_eq!(
+            parse("help approve").unwrap(),
+            Cmd::Help(Some("approve".into()))
+        );
         assert_eq!(parse("?").unwrap(), Cmd::Help(None));
     }
 

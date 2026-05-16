@@ -26,16 +26,22 @@ impl std::fmt::Display for PathType {
 }
 
 pub fn path_type(pair: &PeerRoutePair) -> PathType {
-    let Some(route) = pair.route.as_ref() else { return PathType::Unknown };
-    let Some(peer) = pair.peer.as_ref() else { return PathType::Unknown };
+    let Some(route) = pair.route.as_ref() else {
+        return PathType::Unknown;
+    };
+    let Some(peer) = pair.peer.as_ref() else {
+        return PathType::Unknown;
+    };
 
-    let has_direct_conn = !peer.directly_connected_conns.is_empty()
-        && peer.conns.iter().any(|c| !c.is_closed);
+    let has_direct_conn =
+        !peer.directly_connected_conns.is_empty() && peer.conns.iter().any(|c| !c.is_closed);
     if has_direct_conn {
         return PathType::Direct;
     }
     if route.next_hop_peer_id != 0 && route.next_hop_peer_id != route.peer_id {
-        return PathType::Relay { hop_peer_id: route.next_hop_peer_id };
+        return PathType::Relay {
+            hop_peer_id: route.next_hop_peer_id,
+        };
     }
     PathType::Trying
 }
@@ -76,7 +82,9 @@ fn is_unknown_or_nopat(nat: NatType) -> bool {
 }
 
 pub fn relay_reason(pair: &PeerRoutePair, my_stun: &StunInfo) -> RelayReason {
-    let Some(route) = pair.route.as_ref() else { return RelayReason::Unknown };
+    let Some(route) = pair.route.as_ref() else {
+        return RelayReason::Unknown;
+    };
 
     if let Some(ff) = route.feature_flag.as_ref() {
         if ff.is_public_server {
@@ -91,8 +99,7 @@ pub fn relay_reason(pair: &PeerRoutePair, my_stun: &StunInfo) -> RelayReason {
     let my_tcp = NatType::try_from(my_stun.tcp_nat_type).unwrap_or(NatType::Unknown);
 
     if let Some(peer_stun) = route.stun_info.as_ref() {
-        let peer_udp =
-            NatType::try_from(peer_stun.udp_nat_type).unwrap_or(NatType::Unknown);
+        let peer_udp = NatType::try_from(peer_stun.udp_nat_type).unwrap_or(NatType::Unknown);
         if is_symmetric(my_udp) && is_symmetric(peer_udp) {
             return RelayReason::DoubleSymmetricNat;
         }
@@ -112,15 +119,24 @@ mod tests {
     use crate::proto::common::{NatType, PeerFeatureFlag, StunInfo, Uuid};
 
     fn pair(route: Route, peer: PeerInfo) -> PeerRoutePair {
-        PeerRoutePair { route: Some(route), peer: Some(peer) }
+        PeerRoutePair {
+            route: Some(route),
+            peer: Some(peer),
+        }
     }
 
     fn open_conn() -> PeerConnInfo {
-        PeerConnInfo { is_closed: false, ..Default::default() }
+        PeerConnInfo {
+            is_closed: false,
+            ..Default::default()
+        }
     }
 
     fn closed_conn() -> PeerConnInfo {
-        PeerConnInfo { is_closed: true, ..Default::default() }
+        PeerConnInfo {
+            is_closed: true,
+            ..Default::default()
+        }
     }
 
     fn stun(udp: NatType, tcp: NatType) -> StunInfo {
@@ -135,7 +151,10 @@ mod tests {
 
     #[test]
     fn path_type_unknown_when_route_missing() {
-        let p = PeerRoutePair { route: None, peer: Some(PeerInfo::default()) };
+        let p = PeerRoutePair {
+            route: None,
+            peer: Some(PeerInfo::default()),
+        };
         assert_eq!(path_type(&p), PathType::Unknown);
     }
 
@@ -147,7 +166,10 @@ mod tests {
             directly_connected_conns: vec![Uuid::default()],
             ..Default::default()
         };
-        let route = Route { peer_id: 2, ..Default::default() };
+        let route = Route {
+            peer_id: 2,
+            ..Default::default()
+        };
         assert_eq!(path_type(&pair(route, peer)), PathType::Direct);
     }
 
@@ -159,13 +181,20 @@ mod tests {
             directly_connected_conns: vec![Uuid::default()],
             ..Default::default()
         };
-        let route = Route { peer_id: 2, ..Default::default() };
+        let route = Route {
+            peer_id: 2,
+            ..Default::default()
+        };
         assert_ne!(path_type(&pair(route, peer)), PathType::Direct);
     }
 
     #[test]
     fn path_type_relay_when_next_hop_differs() {
-        let route = Route { peer_id: 5, next_hop_peer_id: 3, ..Default::default() };
+        let route = Route {
+            peer_id: 5,
+            next_hop_peer_id: 3,
+            ..Default::default()
+        };
         assert_eq!(
             path_type(&pair(route, PeerInfo::default())),
             PathType::Relay { hop_peer_id: 3 }
@@ -174,7 +203,11 @@ mod tests {
 
     #[test]
     fn path_type_trying_when_no_direct_and_no_next_hop() {
-        let route = Route { peer_id: 5, next_hop_peer_id: 0, ..Default::default() };
+        let route = Route {
+            peer_id: 5,
+            next_hop_peer_id: 0,
+            ..Default::default()
+        };
         assert_eq!(
             path_type(&pair(route, PeerInfo::default())),
             PathType::Trying

@@ -12,8 +12,8 @@ use crate::{set_global_var, use_global_var};
 
 pub mod acl_processor;
 pub mod compressor;
-pub mod config_dir;
 pub mod config;
+pub mod config_dir;
 pub mod constants;
 pub mod defer;
 pub mod dns;

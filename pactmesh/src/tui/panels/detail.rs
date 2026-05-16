@@ -90,11 +90,7 @@ pub fn peer_detail(pair: &PeerRoutePair, my_stun: &StunInfo) -> String {
 }
 
 pub fn connector_detail(c: &Connector) -> String {
-    let url = c
-        .url
-        .as_ref()
-        .map(|u| u.url.as_str())
-        .unwrap_or("(no url)");
+    let url = c.url.as_ref().map(|u| u.url.as_str()).unwrap_or("(no url)");
     let status = match ConnectorStatus::try_from(c.status).unwrap_or(ConnectorStatus::Disconnected)
     {
         ConnectorStatus::Connected => "CONNECTED",

@@ -132,11 +132,8 @@ pub async fn approve_join(
     let cert_dir = network_dir.join("member_certs");
     std::fs::create_dir_all(&cert_dir)
         .with_context(|| format!("failed to create {}", cert_dir.display()))?;
-    std::fs::write(
-        cert_dir.join(format!("{fingerprint}.pem")),
-        issued.to_pem(),
-    )
-    .with_context(|| format!("failed to write {fingerprint}.pem"))?;
+    std::fs::write(cert_dir.join(format!("{fingerprint}.pem")), issued.to_pem())
+        .with_context(|| format!("failed to write {fingerprint}.pem"))?;
 
     let short_fp: String = fingerprint.to_string().chars().take(8).collect();
     Ok(ApproveOutcome {
@@ -156,17 +153,11 @@ fn write_signed_state(
     let next_version = next.version.saturating_add(1);
     next.version = next_version;
     let next = next.sign(root);
-    let backup = network_dir.join(format!(
-        "network_state.v{}.cbor.pem",
-        state.details.version
-    ));
+    let backup = network_dir.join(format!("network_state.v{}.cbor.pem", state.details.version));
     std::fs::write(&backup, original_pem)
         .with_context(|| format!("failed to write {}", backup.display()))?;
-    std::fs::write(
-        network_dir.join("network_state.cbor.pem"),
-        next.to_pem(),
-    )
-    .with_context(|| "failed to write network_state.cbor.pem")?;
+    std::fs::write(network_dir.join("network_state.cbor.pem"), next.to_pem())
+        .with_context(|| "failed to write network_state.cbor.pem")?;
     Ok(next_version)
 }
 
