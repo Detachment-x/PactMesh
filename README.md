@@ -29,7 +29,7 @@ Configuration distribution does not need to be trusted. Nodes verify signatures 
 
 Device roles are governance identities, not feature toggles: a Root device can unlock this trust domain's `SK_root`, a Member device has this domain's `member_cert.pem`, and an External device is referenced by this domain without being a member. Network functions such as relay, holepunch assistance, and subnet proxying are capabilities. Tags are human grouping labels. ACLs only decide data-plane traffic permission.
 
-Root can issue admin grants for member devices with `pactmesh trust admin add/list/revoke`. In the current Alpha build these grants are root-signed, written as local PEM files, and also embedded into the signed `NetworkState` so they can be distributed and verified with normal configuration sync. Online approve/revoke/disable operations are still primarily signed by a local root key holder; admin-device operation signing in CLI/TUI remains future work.
+Root can issue admin grants for member devices with `pactmesh trust admin add/list/revoke`. In the current Alpha build these grants are root-signed, written as local PEM files, and also embedded into the signed `NetworkState` so they can be distributed and verified with normal configuration sync. CLI approval can use an active grant with `pactmesh trust approve --admin-grant <grant.pem>`; revoke/disable/enable and TUI approval still use the root-key path.
 
 ## Cross-Trust-Domain Relay Borrowing
 

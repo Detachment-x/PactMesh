@@ -90,7 +90,7 @@ use pactmesh::{
         hostname::check_hostname_unique,
         network_bootstrap::{NetworkBootstrap, bootstrap_to_qr_svg},
         revocation::RevocationReason,
-        selector_match, to_canonical_cbor, wrap_armored,
+        selector_match, to_canonical_cbor, unwrap_armored, wrap_armored,
     },
     tunnel::{TunnelScheme, tcp::TcpTunnelConnector},
     utils::{PeerRoutePair, string::cost_to_str},
@@ -915,11 +915,18 @@ enum TrustSubCommand {
         applicant_pk: String,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
+        #[arg(long, help = "use this admin grant PEM instead of sk_root.age")]
+        admin_grant: Option<PathBuf>,
         #[arg(
             long,
             help = "file containing the root key passphrase (management password)"
         )]
         passphrase_file: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "file containing the device key passphrase when local sk_self.age is encrypted"
+        )]
+        device_passphrase_file: Option<PathBuf>,
     },
     Reject {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
@@ -3183,6 +3190,7 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             device,
             json,
             passphrase_file,
+            ..
         } => handle_lab_member_toggle(
             trust_domain_id,
             network_local_id,
@@ -3833,7 +3841,9 @@ async fn handle_lab_approve(
         network_local_id,
         selected,
         json,
+        None,
         passphrase_file,
+        None,
     )
     .await
 }
@@ -5504,6 +5514,24 @@ fn write_signed_network_state(
     )
 }
 
+enum TrustApproveSigner {
+    Root(TrustDomainRoot),
+    Admin(SignKey),
+}
+
+trait SignMemberCertWithApproveSigner {
+    fn sign_with_admin_or_root(self, signer: &TrustApproveSigner) -> pactmesh::trust::MemberCert;
+}
+
+impl SignMemberCertWithApproveSigner for pactmesh::trust::UnsignedMemberCert {
+    fn sign_with_admin_or_root(self, signer: &TrustApproveSigner) -> pactmesh::trust::MemberCert {
+        match signer {
+            TrustApproveSigner::Root(root) => self.sign(root),
+            TrustApproveSigner::Admin(sk) => self.sign_with_admin(sk),
+        }
+    }
+}
+
 fn sign_next_network_state(
     original_state: &pactmesh::trust::SignedNetworkState,
     root: &TrustDomainRoot,
@@ -5511,6 +5539,18 @@ fn sign_next_network_state(
     let mut next_state = original_state.details.clone();
     next_state.version = next_state.version.saturating_add(1);
     next_state.sign(root)
+}
+
+fn sign_next_network_state_with_signer(
+    original_state: &pactmesh::trust::SignedNetworkState,
+    signer: &TrustApproveSigner,
+) -> pactmesh::trust::SignedNetworkState {
+    let mut next_state = original_state.details.clone();
+    next_state.version = next_state.version.saturating_add(1);
+    match signer {
+        TrustApproveSigner::Root(root) => next_state.sign(root),
+        TrustApproveSigner::Admin(sk) => next_state.sign_with_admin(sk),
+    }
 }
 
 fn write_pre_signed_network_state(
@@ -5550,6 +5590,91 @@ fn load_network_state_for_edit(
     let original_state = pactmesh::trust::SignedNetworkState::from_pem(&original_pem)
         .with_context(|| format!("failed to parse {}", state_path.display()))?;
     Ok((network_dir, original_pem, original_state))
+}
+
+fn load_approve_signer(
+    trust_domain_id: &str,
+    _network_local_id: &str,
+    network_dir: &std::path::Path,
+    state: &pactmesh::trust::SignedNetworkState,
+    admin_grant: Option<PathBuf>,
+    passphrase_file: Option<PathBuf>,
+    device_passphrase_file: Option<PathBuf>,
+) -> Result<TrustApproveSigner, Error> {
+    if let Some(path) = admin_grant {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read admin grant {}", path.display()))?;
+        let grant = pactmesh::trust::AdminGrant::from_pem(&text)
+            .with_context(|| format!("failed to parse admin grant {}", path.display()))?;
+        if grant.details.trust_domain_id != state.details.trust_domain_id {
+            anyhow::bail!("admin grant trust_domain_id does not match network_state");
+        }
+        if !grant.details.capabilities.approve_join {
+            anyhow::bail!("admin grant does not include approve_join capability");
+        }
+        if !state
+            .details
+            .payload
+            .admin_grants
+            .iter()
+            .any(|existing| existing == &grant)
+        {
+            anyhow::bail!("admin grant is not active in current network_state");
+        }
+        let root_pk = load_root_public_key_for_domain(trust_domain_id)?;
+        grant.verify(&root_pk.into(), now_unix_secs())?;
+        let passphrase = read_optional_device_passphrase(device_passphrase_file.as_ref())?;
+        let sk_self = load_local_network_sk_self(network_dir, passphrase.as_deref())?;
+        if sk_self.verify_key().0 != grant.details.admin_device_pk.to_bytes() {
+            anyhow::bail!("local sk_self does not match admin grant admin_device_pk");
+        }
+        return Ok(TrustApproveSigner::Admin(sk_self));
+    }
+
+    Ok(TrustApproveSigner::Root(unlock_domain_root(
+        trust_domain_id,
+        passphrase_file,
+    )?))
+}
+
+fn load_root_public_key_for_domain(trust_domain_id: &str) -> Result<VerifyingKey, Error> {
+    let domain_dir = pnw_trust_domains_dir()?.join(trust_domain_id);
+    let pem = std::fs::read_to_string(domain_dir.join("pk_root.pem"))?;
+    let payload = unwrap_armored(&pem, "PNW-PK-ROOT")?;
+    let bytes: [u8; 32] = payload
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("pk_root.pem must contain exactly 32 bytes"))?;
+    VerifyingKey::from_bytes(&bytes).context("pk_root.pem contains invalid ed25519 key")
+}
+
+fn load_local_network_sk_self(
+    network_dir: &std::path::Path,
+    passphrase: Option<&str>,
+) -> Result<SignKey, Error> {
+    let raw_path = network_dir.join(SK_SELF_RAW_FILE);
+    if raw_path.is_file() {
+        let bytes = std::fs::read(&raw_path)
+            .with_context(|| format!("failed to read {}", raw_path.display()))?;
+        let bytes: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("sk_self.raw must contain exactly 32 bytes"))?;
+        return Ok(SignKey::from_bytes(bytes));
+    }
+    let age_path = network_dir.join(SK_SELF_AGE_FILE);
+    if age_path.is_file() {
+        let passphrase = passphrase.ok_or_else(|| {
+            anyhow::anyhow!(
+                "PNW_DEVICE_PASSPHRASE or --device-passphrase-file is required for local sk_self.age"
+            )
+        })?;
+        return load_device_sign_key(&age_path, passphrase);
+    }
+    anyhow::bail!(
+        "local sk_self.raw/sk_self.age not found in {}",
+        network_dir.display()
+    )
 }
 
 fn unlock_domain_root(
@@ -6184,7 +6309,9 @@ async fn handle_trust_approve(
     network_local_id: String,
     applicant_pk_str: String,
     json: bool,
+    admin_grant: Option<PathBuf>,
     passphrase_file: Option<PathBuf>,
+    device_passphrase_file: Option<PathBuf>,
 ) -> Result<(), Error> {
     let td_id_bytes = parse_url_safe_b64_32(&trust_domain_id, "trust_domain_id")?;
     let pending = resolve_pending_join_summary(
@@ -6202,10 +6329,18 @@ async fn handle_trust_approve(
 
     let (network_dir, original_pem, mut state) =
         load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
-    let root = unlock_domain_root(&trust_domain_id, passphrase_file)?;
+    let signer = load_approve_signer(
+        &trust_domain_id,
+        &network_local_id,
+        &network_dir,
+        &state,
+        admin_grant,
+        passphrase_file,
+        device_passphrase_file,
+    )?;
     let now = now_unix_secs();
     let cert = pactmesh::trust::UnsignedMemberCert {
-        trust_domain_id: root.id(),
+        trust_domain_id: state.details.trust_domain_id,
         network_local_id: NetworkLocalId::try_from_str(&network_local_id)?,
         device_pk: VerifyingKey::from_bytes(&applicant_pk_bytes)
             .context("pending applicant_pk is not a valid ed25519 key")?,
@@ -6220,7 +6355,7 @@ async fn handle_trust_approve(
         network_state_version_ref: state.details.version,
         hostname: None,
     }
-    .sign(&root);
+    .sign_with_admin_or_root(&signer);
 
     let fingerprint = cert.fingerprint();
     let already_indexed = state
@@ -6242,7 +6377,7 @@ async fn handle_trust_approve(
                 issued_at: cert.details.not_before,
                 expires_at: cert.details.expires_at,
             });
-        Some(sign_next_network_state(&state, &root))
+        Some(sign_next_network_state_with_signer(&state, &signer))
     };
 
     let client = handler.get_trust_join_manage_client().await?;
@@ -7781,7 +7916,9 @@ async fn main() -> Result<(), Error> {
                 network_local_id,
                 applicant_pk,
                 json,
+                admin_grant,
                 passphrase_file,
+                device_passphrase_file,
             } => {
                 handle_trust_approve(
                     &handler,
@@ -7789,7 +7926,9 @@ async fn main() -> Result<(), Error> {
                     network_local_id,
                     applicant_pk,
                     json,
+                    admin_grant,
                     passphrase_file,
+                    device_passphrase_file,
                 )
                 .await?;
             }

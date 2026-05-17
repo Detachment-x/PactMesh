@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use super::admin::AdminGrant;
 use super::cbor::{ArmorError, from_cbor, to_canonical_cbor, unwrap_armored, wrap_armored};
-use super::identity::{TrustDomainRoot, VerifyKey};
+use super::identity::{SignKey, TrustDomainRoot, VerifyKey};
 use super::member_cert::SignatureBytes32;
 use super::revocation::{DisabledCert, RevokedCert};
 use super::types::{MemberCertFingerprint, NetworkLocalId, TrustDomainId};
@@ -151,6 +151,16 @@ impl UnsignedNetworkState {
     pub fn sign(self, root: &TrustDomainRoot) -> SignedNetworkState {
         let signing_bytes = self.marshal_for_signing();
         let signature = root.sign(&signing_bytes).into();
+
+        SignedNetworkState {
+            details: self,
+            signature,
+        }
+    }
+
+    pub fn sign_with_admin(self, admin_sk: &SignKey) -> SignedNetworkState {
+        let signing_bytes = self.marshal_for_signing();
+        let signature = admin_sk.sign(&signing_bytes).into();
 
         SignedNetworkState {
             details: self,
