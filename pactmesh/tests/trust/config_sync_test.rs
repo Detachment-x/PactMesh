@@ -6,23 +6,25 @@ use pactmesh::{
     common::{PeerId, error::Error as CommonError, new_peer_id},
     peers::peer_rpc::{PeerRpcManager, PeerRpcManagerTransport},
     proto::{
+        common::TunnelInfo,
         peer_rpc::{
             ConfigResourceSelector, ConfigSyncRpc, FetchConfigRequest, FetchConfigResponse,
             NetworkStateKey, PendingCertKey, QueryConfigVersionRequest, QueryConfigVersionResponse,
-            ResourceVersion, config_resource_selector,
+            ResourceVersion, UpgradeToRootDeviceRequest, config_resource_selector,
         },
-        rpc_types::{self, controller::BaseController},
+        rpc_types::{self, controller::BaseController, controller::Controller},
     },
     trust::{
         Capabilities, MemberCert, NetworkLocalId, NetworkStatePayload, SignKey, SignedNetworkState,
         SignedTrustDomainMeta, TrustDomainPool, TrustDomainRoot, UnsignedMemberCert,
-        UnsignedNetworkState, UnsignedTrustDomainMeta, from_cbor, to_canonical_cbor,
+        UnsignedNetworkState, UnsignedTrustDomainMeta, from_cbor, to_canonical_cbor, wrap_armored,
     },
     tunnel::{
         Tunnel, ZCPacketSink, ZCPacketStream, packet_def::ZCPacket, ring::create_ring_tunnel_pair,
     },
 };
 use pnet::ipnetwork::IpNetwork as IpNet;
+use serial_test::serial;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
 
@@ -87,6 +89,26 @@ fn sample_member_cert(
         hostname: None,
     }
     .sign(root)
+}
+
+fn peer_tunnel_controller() -> BaseController {
+    let mut ctrl = BaseController::default();
+    ctrl.set_tunnel_info(Some(TunnelInfo {
+        tunnel_type: "ring".to_owned(),
+        local_addr: None,
+        remote_addr: None,
+        resolved_remote_addr: None,
+    }));
+    ctrl
+}
+
+fn write_pk_root(domain_dir: &std::path::Path, root: &TrustDomainRoot) {
+    let pk = root.public_key();
+    std::fs::write(
+        domain_dir.join("pk_root.pem"),
+        wrap_armored("PNW-PK-ROOT", pk.as_bytes()),
+    )
+    .unwrap();
 }
 
 fn sample_network_state(
@@ -441,6 +463,95 @@ async fn test_config_sync_persists_network_state_and_connector_can_read_hint() {
     assert_eq!(updated.details.version, 2);
 }
 
+#[tokio::test]
+#[serial]
+async fn test_upgrade_to_root_device_saves_matching_root_key() {
+    unsafe { std::env::set_var("PNW_ROOT_UPGRADE_PASSPHRASE", "target-root-pass") };
+
+    let root = TrustDomainRoot::generate();
+    let dir = tempfile::tempdir().unwrap();
+    write_pk_root(dir.path(), &root);
+    let service = ConfigSyncService::new(build_pool(&root, None, None), NETWORK_NAME.to_owned())
+        .with_trust_domain_dir(dir.path());
+
+    let response = service
+        .upgrade_to_root_device(
+            peer_tunnel_controller(),
+            UpgradeToRootDeviceRequest {
+                trust_domain_id: root.id().0.to_vec(),
+                sk_root_payload: root.export_secret_for_root_upgrade().to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(response.ack);
+    let installed =
+        TrustDomainRoot::load_from_file(&dir.path().join("sk_root.age"), "target-root-pass")
+            .unwrap();
+    assert_eq!(installed.id(), root.id());
+
+    unsafe { std::env::remove_var("PNW_ROOT_UPGRADE_PASSPHRASE") };
+}
+
+#[tokio::test]
+#[serial]
+async fn test_upgrade_to_root_device_requires_target_passphrase() {
+    unsafe { std::env::remove_var("PNW_ROOT_UPGRADE_PASSPHRASE") };
+
+    let root = TrustDomainRoot::generate();
+    let dir = tempfile::tempdir().unwrap();
+    write_pk_root(dir.path(), &root);
+    let service = ConfigSyncService::new(build_pool(&root, None, None), NETWORK_NAME.to_owned())
+        .with_trust_domain_dir(dir.path());
+
+    let err = service
+        .upgrade_to_root_device(
+            peer_tunnel_controller(),
+            UpgradeToRootDeviceRequest {
+                trust_domain_id: root.id().0.to_vec(),
+                sk_root_payload: root.export_secret_for_root_upgrade().to_vec(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("PNW_ROOT_UPGRADE_PASSPHRASE"));
+    assert!(!dir.path().join("sk_root.age").exists());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_upgrade_to_root_device_rejects_root_key_mismatch() {
+    unsafe { std::env::set_var("PNW_ROOT_UPGRADE_PASSPHRASE", "target-root-pass") };
+
+    let expected_root = TrustDomainRoot::generate();
+    let wrong_root = TrustDomainRoot::generate();
+    let dir = tempfile::tempdir().unwrap();
+    write_pk_root(dir.path(), &expected_root);
+    let service = ConfigSyncService::new(
+        build_pool(&expected_root, None, None),
+        NETWORK_NAME.to_owned(),
+    )
+    .with_trust_domain_dir(dir.path());
+
+    let err = service
+        .upgrade_to_root_device(
+            peer_tunnel_controller(),
+            UpgradeToRootDeviceRequest {
+                trust_domain_id: expected_root.id().0.to_vec(),
+                sk_root_payload: wrong_root.export_secret_for_root_upgrade().to_vec(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("does not match"));
+    assert!(!dir.path().join("sk_root.age").exists());
+
+    unsafe { std::env::remove_var("PNW_ROOT_UPGRADE_PASSPHRASE") };
+}
+
 #[derive(Clone)]
 struct CountingDigestMismatchService {
     selector: ConfigResourceSelector,
@@ -477,6 +588,16 @@ impl ConfigSyncRpc for CountingDigestMismatchService {
             payload_cbor: self.fetch_payload.clone(),
             version: 5,
         })
+    }
+
+    async fn upgrade_to_root_device(
+        &self,
+        _ctrl: Self::Controller,
+        _input: UpgradeToRootDeviceRequest,
+    ) -> rpc_types::error::Result<pactmesh::proto::peer_rpc::UpgradeToRootDeviceResponse> {
+        Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+            "not implemented"
+        )))
     }
 }
 
@@ -545,6 +666,16 @@ impl ConfigSyncRpc for InvalidPayloadService {
             payload_cbor: self.payload_cbor.clone(),
             version: self.query_version,
         })
+    }
+
+    async fn upgrade_to_root_device(
+        &self,
+        _ctrl: Self::Controller,
+        _input: UpgradeToRootDeviceRequest,
+    ) -> rpc_types::error::Result<pactmesh::proto::peer_rpc::UpgradeToRootDeviceResponse> {
+        Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+            "not implemented"
+        )))
     }
 }
 

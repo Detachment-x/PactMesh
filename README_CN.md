@@ -34,6 +34,8 @@ PactMesh 当前处于 Alpha 阶段，面向私人和小团队使用。公网 VPS
 
 设备角色只表达治理身份，不表达具体网络功能：Root device 是能解锁本信任域 `SK_root` 的管理设备，Member device 是持有本域 `member_cert.pem` 的成员设备，External device 是被本域引用但不是本域成员的外部设备或服务资源。relay、打洞协助、子网代理属于 capability；tag 是人工分组；ACL 只负责判断数据面流量是否允许通过。
 
+把另一台已入网 Member device 提升为 Root device 时，先在目标设备 daemon 启动环境中临时设置本机 `PNW_ROOT_UPGRADE_PASSPHRASE`，再在已有 Root device 上执行 `pactmesh trust upgrade-peer-to-root <trust_domain_id> <network_local_id> <peer_id>`。已有 Root device 只解锁自己的 `sk_root.age`，通过已建立的 peer RPC/Noise 路径发送原始 `SK_root` 字节；目标设备收到后用它派生 `PK_root`，与本机缓存的 `pk_root.pem` 比对一致才写入自己的加密 `sk_root.age`。目标设备用于保存 `sk_root.age` 的密码只在目标本机提供，不会从已有 Root device 传过去。
+
 ## 跨信任域中继借用
 
 小团队信任域往往只有少量节点，且通常没有稳定的公网地址。PactMesh 允许一个信任域显式地把自己的中继借给另一个信任域使用——既不合并两个信任域，也不共享私钥。

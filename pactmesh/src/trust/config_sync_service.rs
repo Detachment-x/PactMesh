@@ -1,20 +1,24 @@
 use std::{
     collections::{HashMap, VecDeque},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::anyhow;
+use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
 use crate::{
+    common::trust_context::load_root_public_key,
     peers::peer_rpc::PeerRpcManager,
     proto::{
         peer_rpc::{
             ConfigResourceSelector, ConfigSyncRpc, ConfigSyncRpcServer, FetchConfigRequest,
             FetchConfigResponse, PendingCertKey, QueryConfigVersionRequest,
-            QueryConfigVersionResponse, ResourceVersion, config_resource_selector,
+            QueryConfigVersionResponse, ResourceVersion, UpgradeToRootDeviceRequest,
+            UpgradeToRootDeviceResponse, config_resource_selector,
         },
         rpc_types::{
             self,
@@ -23,7 +27,7 @@ use crate::{
     },
     trust::{
         MemberCert, NetworkLocalId, SignedNetworkState, SignedTrustDomainMeta, TrustDomainId,
-        TrustDomainPool, from_cbor, to_canonical_cbor,
+        TrustDomainPool, TrustDomainRoot, from_cbor, to_canonical_cbor,
     },
 };
 
@@ -90,6 +94,7 @@ impl PendingCertCache {
 pub struct ConfigSyncService {
     pub trust_pool: Arc<RwLock<TrustDomainPool>>,
     pub network_name: String,
+    trust_domain_dir: Option<PathBuf>,
     pending_cert_cache: Arc<Mutex<PendingCertCache>>,
     rate_limits: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
 }
@@ -99,9 +104,15 @@ impl ConfigSyncService {
         Self {
             trust_pool,
             network_name,
+            trust_domain_dir: None,
             pending_cert_cache: Arc::new(Mutex::new(PendingCertCache::new())),
             rate_limits: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn with_trust_domain_dir(mut self, trust_domain_dir: impl Into<PathBuf>) -> Self {
+        self.trust_domain_dir = Some(trust_domain_dir.into());
+        self
     }
 
     pub fn pending_cert_cache(&self) -> Arc<Mutex<PendingCertCache>> {
@@ -344,6 +355,46 @@ impl ConfigSyncService {
             version: 1,
         })
     }
+
+    fn ensure_peer_tunnel(ctrl: &BaseController) -> rpc_types::error::Result<()> {
+        if ctrl.get_tunnel_info().is_none() {
+            return Err(rpc_types::error::Error::ExecutionError(anyhow!(
+                "root upgrade requires an established peer tunnel"
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn install_root_from_upgrade(
+        domain_dir: &Path,
+        trust_domain_id: TrustDomainId,
+        sk_root_payload: &[u8],
+        passphrase: &str,
+    ) -> anyhow::Result<TrustDomainRoot> {
+        let bytes: [u8; 32] = sk_root_payload
+            .try_into()
+            .map_err(|_| anyhow!("sk_root_payload must be exactly 32 bytes"))?;
+        let root = TrustDomainRoot::from_root_upgrade_secret(bytes);
+        if root.id() != trust_domain_id {
+            anyhow::bail!("sk_root_payload does not match trust_domain_id");
+        }
+
+        let expected_pk = load_root_public_key(&domain_dir.join("pk_root.pem"))
+            .map_err(|err| anyhow!("failed to load pk_root.pem: {err}"))?;
+        let payload_pk = root.public_key();
+        if payload_pk.as_bytes() != expected_pk.as_bytes() {
+            anyhow::bail!("sk_root_payload does not match cached pk_root.pem");
+        }
+
+        let path = domain_dir.join("sk_root.age");
+        if path.exists() {
+            anyhow::bail!("sk_root.age already exists; refusing to overwrite root key");
+        }
+        root.save_to_file(&path, passphrase)
+            .map_err(|err| anyhow!("failed to save {}: {err}", path.display()))?;
+        Ok(root)
+    }
 }
 
 #[async_trait::async_trait]
@@ -390,6 +441,49 @@ impl ConfigSyncRpc for ConfigSyncService {
                 "selector is required".to_owned(),
             )),
         }
+    }
+
+    async fn upgrade_to_root_device(
+        &self,
+        ctrl: Self::Controller,
+        input: UpgradeToRootDeviceRequest,
+    ) -> rpc_types::error::Result<UpgradeToRootDeviceResponse> {
+        Self::ensure_peer_tunnel(&ctrl)?;
+
+        let trust_domain_id = Self::parse_trust_domain_id(&input.trust_domain_id)?;
+        let domain_dir = self.trust_domain_dir.as_ref().ok_or_else(|| {
+            rpc_types::error::Error::ExecutionError(anyhow!(
+                "root upgrade target has no configured trust-domain dir"
+            ))
+        })?;
+        let passphrase = std::env::var("PNW_ROOT_UPGRADE_PASSPHRASE").map_err(|_| {
+            rpc_types::error::Error::ExecutionError(anyhow!(
+                "PNW_ROOT_UPGRADE_PASSPHRASE is required on the target device to save sk_root.age"
+            ))
+        })?;
+
+        let root = Self::install_root_from_upgrade(
+            domain_dir,
+            trust_domain_id,
+            &input.sk_root_payload,
+            passphrase.trim_end_matches(['\r', '\n']),
+        )
+        .map_err(|err| rpc_types::error::Error::ExecutionError(anyhow!(err)))?;
+
+        {
+            let mut pool = self.trust_pool.write().await;
+            let pk = VerifyingKey::from_bytes(root.public_key().as_bytes()).map_err(|err| {
+                rpc_types::error::Error::ExecutionError(anyhow!(
+                    "installed root public key is invalid: {err}"
+                ))
+            })?;
+            pool.add_root(pk.into());
+        }
+
+        Ok(UpgradeToRootDeviceResponse {
+            ack: true,
+            device_pk_of_b: Vec::new(),
+        })
     }
 }
 

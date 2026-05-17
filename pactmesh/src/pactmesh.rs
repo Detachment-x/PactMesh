@@ -47,7 +47,8 @@ use pactmesh::{
                 ConfigRpcClientFactory, FetchPendingMemberCertRequest, InstanceConfigPatch,
                 ListPendingJoinRequestsRequest, PatchConfigRequest, PortForwardPatch,
                 RejectJoinRequestRequest, StringPatch, SubmitJoinRequestRequest,
-                TrustJoinManageRpc, TrustJoinManageRpcClientFactory, UrlPatch,
+                TrustJoinManageRpc, TrustJoinManageRpcClientFactory, UpgradePeerToRootRequest,
+                UrlPatch,
             },
             instance::{
                 AclManageRpc, AclManageRpcClientFactory, Connector, ConnectorManageRpc,
@@ -928,6 +929,21 @@ enum TrustSubCommand {
             allow_hyphen_values = true
         )]
         applicant_pk: String,
+    },
+    UpgradePeerToRoot {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(help = "target peer id shown by peer list")]
+        peer_id: u32,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
+        passphrase_file: Option<PathBuf>,
     },
     ListPending {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
@@ -5998,6 +6014,50 @@ async fn handle_trust_reject(
     Ok(())
 }
 
+async fn handle_trust_upgrade_peer_to_root(
+    handler: &CommandHandler<'_>,
+    trust_domain_id: String,
+    network_local_id: String,
+    peer_id: u32,
+    json: bool,
+    passphrase_file: Option<PathBuf>,
+) -> Result<(), Error> {
+    let td_id_bytes = parse_url_safe_b64_32(&trust_domain_id, "trust_domain_id")?;
+    let root = unlock_domain_root(&trust_domain_id, passphrase_file)?;
+    let client = handler.get_trust_join_manage_client().await?;
+    let response = client
+        .upgrade_peer_to_root(
+            BaseController::default(),
+            UpgradePeerToRootRequest {
+                instance: Some(handler.instance_selector.clone()),
+                trust_domain_id: td_id_bytes.to_vec(),
+                network_local_id: network_local_id.clone(),
+                peer_id,
+                sk_root_payload: root.export_secret_for_root_upgrade().to_vec(),
+            },
+        )
+        .await
+        .context("daemon refused to upgrade peer to root")?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ack": response.ack,
+                "peer_id": peer_id,
+                "trust_domain_id": trust_domain_id,
+                "network_local_id": network_local_id,
+            })
+        );
+    } else {
+        println!(
+            "upgraded peer_id={} to root holder for trust_domain_id={} network_local_id={}",
+            peer_id, trust_domain_id, network_local_id
+        );
+    }
+    Ok(())
+}
+
 async fn handle_trust_list_pending(
     handler: &CommandHandler<'_>,
     trust_domain_id: String,
@@ -7414,6 +7474,23 @@ async fn main() -> Result<(), Error> {
             } => {
                 handle_trust_reject(&handler, trust_domain_id, network_local_id, applicant_pk)
                     .await?;
+            }
+            TrustSubCommand::UpgradePeerToRoot {
+                trust_domain_id,
+                network_local_id,
+                peer_id,
+                json,
+                passphrase_file,
+            } => {
+                handle_trust_upgrade_peer_to_root(
+                    &handler,
+                    trust_domain_id,
+                    network_local_id,
+                    peer_id,
+                    json,
+                    passphrase_file,
+                )
+                .await?;
             }
             TrustSubCommand::ListPending {
                 trust_domain_id,

@@ -134,6 +134,16 @@ message RejectJoinRequestRequest {
 
 message RejectJoinRequestResponse {}
 
+message UpgradePeerToRootRequest {
+  api.instance.InstanceIdentifier instance = 1;
+  bytes trust_domain_id = 2;
+  string network_local_id = 3;
+  uint32 peer_id = 4;
+  bytes sk_root_payload = 5;
+}
+
+message UpgradePeerToRootResponse { bool ack = 1; }
+
 message ListPendingJoinRequestsRequest {
   api.instance.InstanceIdentifier instance = 1;
   bytes trust_domain_id = 2;
@@ -149,5 +159,6 @@ service TrustJoinManageRpc {
   rpc FetchPendingMemberCert(FetchPendingMemberCertRequest) returns (FetchPendingMemberCertResponse);
   rpc ApproveJoinRequest(ApproveJoinRequestRequest) returns (ApproveJoinRequestResponse);
   rpc RejectJoinRequest(RejectJoinRequestRequest) returns (RejectJoinRequestResponse);
+  rpc UpgradePeerToRoot(UpgradePeerToRootRequest) returns (UpgradePeerToRootResponse);
   rpc ListPendingJoinRequests(ListPendingJoinRequestsRequest) returns (ListPendingJoinRequestsResponse);
 }

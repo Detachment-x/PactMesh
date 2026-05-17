@@ -28,6 +28,8 @@ Configuration distribution does not need to be trusted. Nodes verify signatures 
 
 Device roles are governance identities, not feature toggles: a Root device can unlock this trust domain's `SK_root`, a Member device has this domain's `member_cert.pem`, and an External device is referenced by this domain without being a member. Network functions such as relay, holepunch assistance, and subnet proxying are capabilities. Tags are human grouping labels. ACLs only decide data-plane traffic permission.
 
+To make another already-joined member device a Root device, start the target daemon with a temporary local `PNW_ROOT_UPGRADE_PASSPHRASE` value, then run `pactmesh trust upgrade-peer-to-root <trust_domain_id> <network_local_id> <peer_id>` on an existing Root device. The existing Root device unlocks its local `sk_root.age`, sends raw `SK_root` bytes through the established peer RPC/Noise path, and the target verifies the derived `PK_root` against its cached `pk_root.pem` before writing its own encrypted `sk_root.age`. The target passphrase is never sent from the existing Root device; it must be supplied locally on the target side.
+
 ## Cross-Trust-Domain Relay Borrowing
 
 A small-team trust domain often has only a handful of nodes, none of which sit on a stable public address. PactMesh lets one trust domain explicitly lend its relays to another, without merging the two domains or sharing private keys.

@@ -8,6 +8,7 @@ use crate::{
             FetchPendingMemberCertResponse, ListPendingJoinRequestsRequest,
             ListPendingJoinRequestsResponse, RejectJoinRequestRequest, RejectJoinRequestResponse,
             SubmitJoinRequestRequest, SubmitJoinRequestResponse, TrustJoinManageRpc,
+            UpgradePeerToRootRequest, UpgradePeerToRootResponse,
         },
         rpc_types::{self, controller::BaseController},
     },
@@ -69,6 +70,17 @@ impl TrustJoinManageRpc for TrustJoinManageRpcService {
         super::get_instance_service(&self.instance_manager, &input.instance)?
             .get_trust_join_manage_service()
             .reject_join_request(ctrl, input)
+            .await
+    }
+
+    async fn upgrade_peer_to_root(
+        &self,
+        ctrl: Self::Controller,
+        input: UpgradePeerToRootRequest,
+    ) -> Result<UpgradePeerToRootResponse, rpc_types::error::Error> {
+        super::get_instance_service(&self.instance_manager, &input.instance)?
+            .get_trust_join_manage_service()
+            .upgrade_peer_to_root(ctrl, input)
             .await
     }
 

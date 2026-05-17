@@ -6,8 +6,9 @@
 //! memory-hard KDF + AEAD properties); §4.1's "Argon2id" wording is satisfied
 //! at the design-intent level (T-021 notes).
 //!
-//! The private key never exits this module: `TrustDomainRoot` exposes `sign(...)`
-//! but no `signing_key()` getter.
+//! The private key normally never exits this module: `TrustDomainRoot` exposes
+//! `sign(...)` but no `signing_key()` getter. The only raw export/import APIs
+//! are narrowly scoped to the §16 multi-root device upgrade flow.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -107,6 +108,20 @@ impl TrustDomainRoot {
     /// Public verifying key.
     pub fn public_key(&self) -> VerifyingKey {
         VerifyingKey::from_bytes(self.pk.as_bytes()).expect("root public key must remain valid")
+    }
+
+    /// Serialize SK_root for §16 root-device upgrade over an already encrypted
+    /// and trust-domain verified Noise channel.
+    pub fn export_secret_for_root_upgrade(&self) -> [u8; 32] {
+        self.sk.to_bytes()
+    }
+
+    /// Rebuild SK_root received by §16 root-device upgrade.
+    pub fn from_root_upgrade_secret(bytes: [u8; 32]) -> Self {
+        let sk = SigningKey::from_bytes(&bytes);
+        let pk = sk.verifying_key();
+        let id = TrustDomainId::from_root_pubkey(&pk);
+        Self { sk, pk, id }
     }
 
     /// Sign an arbitrary byte slice with the root key.

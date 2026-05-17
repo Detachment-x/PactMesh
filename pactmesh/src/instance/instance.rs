@@ -50,6 +50,7 @@ use crate::proto::api::config::{
     PatchConfigRequest, PatchConfigResponse, PendingJoinRequestSummary, PortForwardPatch,
     RejectJoinRequestRequest, RejectJoinRequestResponse, SubmitJoinRequestRequest,
     SubmitJoinRequestResponse, TrustJoinManageRpc, TrustJoinManageRpcServer,
+    UpgradePeerToRootRequest, UpgradePeerToRootResponse,
 };
 use crate::proto::api::instance::{
     GetPrometheusStatsRequest, GetPrometheusStatsResponse, GetStatsRequest, GetStatsResponse,
@@ -61,8 +62,8 @@ use crate::proto::api::instance::{
 use crate::proto::api::manage::NetworkConfig;
 use crate::proto::common::{PortForwardConfigPb, TunnelInfo};
 use crate::proto::peer_rpc::{
-    ConfigResourceSelector, ConfigSyncRpc, ForwardJoinRequestRequest, JoinForwardRpc,
-    PendingCertKey, config_resource_selector,
+    ConfigResourceSelector, ConfigSyncRpc, ConfigSyncRpcClientFactory, ForwardJoinRequestRequest,
+    JoinForwardRpc, PendingCertKey, UpgradeToRootDeviceRequest, config_resource_selector,
 };
 use crate::proto::rpc_impl::standalone::{RpcServerHook, StandAloneServer};
 use crate::proto::rpc_types;
@@ -693,7 +694,13 @@ impl Instance {
 
         let network_name = global_ctx.get_network_name();
         let peer_rpc_mgr = peer_manager.get_peer_rpc_mgr();
-        let config_sync = Arc::new(ConfigSyncService::new(trust_pool, network_name.clone()));
+        let config_sync_service = ConfigSyncService::new(trust_pool, network_name.clone());
+        let config_sync_service = if let Some(trust_domain) = global_ctx.config.get_trust_domain() {
+            config_sync_service.with_trust_domain_dir(trust_domain.domain_dir)
+        } else {
+            config_sync_service
+        };
+        let config_sync = Arc::new(config_sync_service);
         config_sync.register(&peer_rpc_mgr);
 
         let (pending, am_root_for, can_sign_pending_certs) =
@@ -843,6 +850,16 @@ impl Instance {
             ) -> crate::proto::rpc_types::error::Result<RejectJoinRequestResponse> {
                 Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
                     "join admission endpoint does not allow rejections"
+                )))
+            }
+
+            async fn upgrade_peer_to_root(
+                &self,
+                _ctrl: Self::Controller,
+                _request: UpgradePeerToRootRequest,
+            ) -> crate::proto::rpc_types::error::Result<UpgradePeerToRootResponse> {
+                Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                    "join admission endpoint does not allow root upgrades"
                 )))
             }
 
@@ -1701,6 +1718,8 @@ impl Instance {
         pub struct TrustJoinManageService {
             join_forward_service: Option<Arc<JoinForwardService>>,
             config_sync_service: Option<Arc<ConfigSyncService>>,
+            peer_manager: Arc<PeerManager>,
+            network_name: String,
         }
 
         #[async_trait::async_trait]
@@ -1953,6 +1972,60 @@ impl Instance {
                 Ok(RejectJoinRequestResponse {})
             }
 
+            async fn upgrade_peer_to_root(
+                &self,
+                _ctrl: Self::Controller,
+                request: UpgradePeerToRootRequest,
+            ) -> crate::proto::rpc_types::error::Result<UpgradePeerToRootResponse> {
+                let service = self.join_forward_service.as_ref().ok_or_else(|| {
+                    rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                        "join-forward service is not available"
+                    ))
+                })?;
+                let (td_id, network_local_id) =
+                    parse_trust_target(&request.trust_domain_id, &request.network_local_id)?;
+                if !service
+                    .am_root_for
+                    .iter()
+                    .any(|(td, nlid)| td == &td_id && nlid == &network_local_id)
+                {
+                    return Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                        "this instance is not the trust-domain root for the given (trust_domain_id, network_local_id)"
+                    )));
+                }
+                if request.sk_root_payload.len() != 32 {
+                    return Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                        "sk_root_payload must be exactly 32 bytes"
+                    )));
+                }
+
+                let client = self
+                    .peer_manager
+                    .get_peer_rpc_mgr()
+                    .rpc_client()
+                    .scoped_client::<ConfigSyncRpcClientFactory<BaseController>>(
+                    self.peer_manager.my_peer_id(),
+                    request.peer_id,
+                    self.network_name.clone(),
+                );
+                let response = client
+                    .upgrade_to_root_device(
+                        BaseController::default(),
+                        UpgradeToRootDeviceRequest {
+                            trust_domain_id: request.trust_domain_id,
+                            sk_root_payload: request.sk_root_payload,
+                        },
+                    )
+                    .await
+                    .map_err(|err| {
+                        rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                            "upgrade peer to root failed: {err}"
+                        ))
+                    })?;
+
+                Ok(UpgradePeerToRootResponse { ack: response.ack })
+            }
+
             async fn list_pending_join_requests(
                 &self,
                 _ctrl: Self::Controller,
@@ -2038,6 +2111,8 @@ impl Instance {
         TrustJoinManageService {
             join_forward_service: self.join_forward_service.clone(),
             config_sync_service: self.config_sync_service.clone(),
+            peer_manager: self.peer_manager.clone(),
+            network_name: self.global_ctx.get_network_name(),
         }
     }
 
