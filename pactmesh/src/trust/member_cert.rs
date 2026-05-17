@@ -191,18 +191,6 @@ impl UnsignedMemberCert {
             signature,
         }
     }
-
-    /// Sign with an already authorized admin device key. Verifiers must check
-    /// the corresponding root-signed `AdminGrant` from network_state.
-    pub fn sign_with_admin(self, admin_sk: &super::identity::SignKey) -> MemberCert {
-        let signing_bytes = self.marshal_for_signing();
-        let signature = admin_sk.sign(&signing_bytes).into();
-
-        MemberCert {
-            details: self,
-            signature,
-        }
-    }
 }
 
 /// Signed member certificate (payload + signature).

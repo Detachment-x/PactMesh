@@ -105,7 +105,6 @@ fn sample_network_state(
             acl: vec![version as u8],
             routes: Vec::new(),
             peer_hints: Vec::new(),
-            admin_grants: Vec::new(),
         },
     }
     .sign(root)

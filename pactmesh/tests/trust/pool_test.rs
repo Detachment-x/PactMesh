@@ -3,9 +3,7 @@
 use pactmesh::trust::network_state::UnsignedNetworkState;
 use pactmesh::trust::pool::{PoolApplyError, TrustDomainPool};
 use pactmesh::trust::trust_domain_meta::UnsignedTrustDomainMeta;
-use pactmesh::trust::{
-    AdminCapabilities, NetworkLocalId, SignKey, TrustDomainRoot, UnsignedAdminGrant,
-};
+use pactmesh::trust::{NetworkLocalId, TrustDomainRoot};
 
 fn sample_unsigned_network_state_for_root(
     root: &TrustDomainRoot,
@@ -22,7 +20,6 @@ fn sample_unsigned_network_state_for_root(
             acl: Vec::new(),
             routes: Vec::new(),
             peer_hints: Vec::new(),
-            admin_grants: Vec::new(),
         },
     }
 }
@@ -83,116 +80,6 @@ fn test_apply_old_version_rejected() {
         pool.apply_network_state(state_v1),
         Err(PoolApplyError::StaleVersion { have: 2, got: 1 })
     );
-}
-
-#[test]
-fn test_apply_network_state_rejects_admin_grant_from_wrong_root() {
-    let root = TrustDomainRoot::generate();
-    let other_root = TrustDomainRoot::generate();
-    let admin_sk = SignKey::generate();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let bad_grant = UnsignedAdminGrant {
-        trust_domain_id: root.id(),
-        admin_device_pk: ed25519_dalek::VerifyingKey::from_bytes(&admin_sk.verify_key().0).unwrap(),
-        admin_label: "bad-admin".to_owned(),
-        not_before: now.saturating_sub(1),
-        expires_at: now.saturating_add(3600),
-        capabilities: AdminCapabilities::approve_only(),
-    }
-    .sign(&other_root);
-    let mut unsigned = sample_unsigned_network_state_for_root(&root, 1);
-    unsigned.payload.admin_grants.push(bad_grant);
-
-    let mut pool = TrustDomainPool::new();
-    pool.add_root(root.public_key().into());
-
-    assert_eq!(
-        pool.apply_network_state(unsigned.sign(&root)),
-        Err(PoolApplyError::BadAdminGrant)
-    );
-}
-
-#[test]
-fn test_apply_network_state_accepts_admin_signed_next_state() {
-    let root = TrustDomainRoot::generate();
-    let admin_sk = SignKey::generate();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let grant = UnsignedAdminGrant {
-        trust_domain_id: root.id(),
-        admin_device_pk: ed25519_dalek::VerifyingKey::from_bytes(&admin_sk.verify_key().0).unwrap(),
-        admin_label: "ops-laptop".to_owned(),
-        not_before: now.saturating_sub(1),
-        expires_at: now.saturating_add(3600),
-        capabilities: AdminCapabilities::approve_only(),
-    }
-    .sign(&root);
-    let mut current = sample_unsigned_network_state_for_root(&root, 1);
-    current.payload.admin_grants.push(grant.clone());
-
-    let mut pool = TrustDomainPool::new();
-    pool.add_root(root.public_key().into());
-    assert_eq!(pool.apply_network_state(current.sign(&root)), Ok(()));
-
-    let mut next = sample_unsigned_network_state_for_root(&root, 2);
-    next.payload.admin_grants.push(grant);
-    assert_eq!(
-        pool.apply_network_state(next.sign_with_admin(&admin_sk)),
-        Ok(())
-    );
-}
-
-#[test]
-fn test_verify_member_cert_accepts_admin_signed_join_cert() {
-    use pactmesh::trust::member_cert::{Capabilities, UnsignedMemberCert};
-    use pnet::ipnetwork::IpNetwork as IpNet;
-
-    let root = TrustDomainRoot::generate();
-    let admin_sk = SignKey::generate();
-    let applicant_sk = SignKey::generate();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let grant = UnsignedAdminGrant {
-        trust_domain_id: root.id(),
-        admin_device_pk: ed25519_dalek::VerifyingKey::from_bytes(&admin_sk.verify_key().0).unwrap(),
-        admin_label: "ops-laptop".to_owned(),
-        not_before: now.saturating_sub(1),
-        expires_at: now.saturating_add(3600),
-        capabilities: AdminCapabilities::approve_only(),
-    }
-    .sign(&root);
-    let mut state = sample_unsigned_network_state_for_root(&root, 6);
-    state.payload.admin_grants.push(grant);
-
-    let mut pool = TrustDomainPool::new();
-    pool.add_root(root.public_key().into());
-    assert_eq!(pool.apply_network_state(state.sign(&root)), Ok(()));
-
-    let cert = UnsignedMemberCert {
-        trust_domain_id: root.id(),
-        network_local_id: NetworkLocalId::try_from_str("office-net").unwrap(),
-        device_pk: ed25519_dalek::VerifyingKey::from_bytes(&applicant_sk.verify_key().0).unwrap(),
-        device_label: "new-laptop".to_owned(),
-        not_before: now.saturating_sub(1),
-        expires_at: now.saturating_add(3600),
-        capabilities: Capabilities {
-            can_relay_data: false,
-            can_relay_control: false,
-            can_proxy_subnet: Vec::<IpNet>::new(),
-        },
-        network_state_version_ref: 5,
-        hostname: None,
-    }
-    .sign_with_admin(&admin_sk);
-
-    assert!(pool.verify_member_cert(&cert, now).is_ok());
 }
 
 #[test]

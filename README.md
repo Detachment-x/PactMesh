@@ -17,7 +17,6 @@ The core implementation is currently focused on:
 - Member certificates for device admission, revocation, disable/enable, and hostname assignment.
 - Trust-aware EasyTier handshakes and packet ACL enforcement.
 - Bootstrap invite/import flows for moving public trust-domain information between devices.
-- Trust-derived Alpha data keys for packet encryption, derived from signed network state instead of a legacy shared `network_secret`.
 
 ## Trust Model
 
@@ -28,8 +27,6 @@ The user-facing management password is the root key passphrase for the local `sk
 Configuration distribution does not need to be trusted. Nodes verify signatures locally before accepting a `NetworkState`, `TrustDomainMeta`, member certificate, or join-related payload. This keeps the network usable over ordinary EasyTier paths, relays, files, QR/bootstrap payloads, or future sync channels without giving those channels authority.
 
 Device roles are governance identities, not feature toggles: a Root device can unlock this trust domain's `SK_root`, a Member device has this domain's `member_cert.pem`, and an External device is referenced by this domain without being a member. Network functions such as relay, holepunch assistance, and subnet proxying are capabilities. Tags are human grouping labels. ACLs only decide data-plane traffic permission.
-
-Root can issue admin grants for member devices with `pactmesh trust admin add/list/revoke`. In the current Alpha build these grants are root-signed, written as local PEM files, and also embedded into the signed `NetworkState` so they can be distributed and verified with normal configuration sync. CLI approval can use an active grant with `pactmesh trust approve --admin-grant <grant.pem>`; revoke/disable/enable and TUI approval still use the root-key path.
 
 ## Cross-Trust-Domain Relay Borrowing
 

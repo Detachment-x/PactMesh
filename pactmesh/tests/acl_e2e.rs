@@ -119,7 +119,6 @@ fn state(root: &TrustDomainRoot, version: u64, acl: AclPolicy) -> SignedNetworkS
             acl: pactmesh::trust::to_canonical_cbor(&acl),
             routes: Vec::new(),
             peer_hints: Vec::new(),
-            admin_grants: Vec::new(),
         },
     }
     .sign(root)

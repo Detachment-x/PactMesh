@@ -90,7 +90,7 @@ use pactmesh::{
         hostname::check_hostname_unique,
         network_bootstrap::{NetworkBootstrap, bootstrap_to_qr_svg},
         revocation::RevocationReason,
-        selector_match, to_canonical_cbor, unwrap_armored, wrap_armored,
+        selector_match, to_canonical_cbor, wrap_armored,
     },
     tunnel::{TunnelScheme, tcp::TcpTunnelConnector},
     utils::{PeerRoutePair, string::cost_to_str},
@@ -864,10 +864,6 @@ enum TrustSubCommand {
         #[command(subcommand)]
         command: TrustPeerHintSubCommand,
     },
-    Admin {
-        #[command(subcommand)]
-        command: TrustAdminSubCommand,
-    },
     Acl {
         #[command(subcommand)]
         command: TrustAclSubCommand,
@@ -915,18 +911,11 @@ enum TrustSubCommand {
         applicant_pk: String,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
-        #[arg(long, help = "use this admin grant PEM instead of sk_root.age")]
-        admin_grant: Option<PathBuf>,
         #[arg(
             long,
             help = "file containing the root key passphrase (management password)"
         )]
         passphrase_file: Option<PathBuf>,
-        #[arg(
-            long,
-            help = "file containing the device key passphrase when local sk_self.age is encrypted"
-        )]
-        device_passphrase_file: Option<PathBuf>,
     },
     Reject {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
@@ -1034,60 +1023,6 @@ enum TrustPeerHintSubCommand {
         network_local_id: String,
         #[arg(help = "peer hint URL")]
         url: Url,
-        #[arg(long, help = "emit machine-readable JSON")]
-        json: bool,
-        #[arg(
-            long,
-            help = "file containing the root key passphrase (management password)"
-        )]
-        passphrase_file: Option<PathBuf>,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum TrustAdminSubCommand {
-    Add {
-        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
-        trust_domain_id: String,
-        #[arg(help = "network-local id")]
-        network_local_id: String,
-        #[arg(help = "device id or unique prefix", allow_hyphen_values = true)]
-        device_id: String,
-        #[arg(long, help = "admin label; defaults to the member device label")]
-        label: Option<String>,
-        #[arg(
-            long = "capability",
-            action = ArgAction::Append,
-            help = "admin capability: approve_join,revoke_member,disable_member,edit_acl,rotate_admins,all"
-        )]
-        capabilities: Vec<String>,
-        #[arg(long, help = "unix timestamp when grant expires")]
-        expires_at: Option<u64>,
-        #[arg(long, help = "emit machine-readable JSON")]
-        json: bool,
-        #[arg(
-            long,
-            help = "file containing the root key passphrase (management password)"
-        )]
-        passphrase_file: Option<PathBuf>,
-    },
-    List {
-        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
-        trust_domain_id: String,
-        #[arg(help = "network-local id")]
-        network_local_id: String,
-        #[arg(long, help = "include revoked local grant files")]
-        include_revoked: bool,
-        #[arg(long, help = "emit machine-readable JSON")]
-        json: bool,
-    },
-    Revoke {
-        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
-        trust_domain_id: String,
-        #[arg(help = "network-local id")]
-        network_local_id: String,
-        #[arg(help = "device id or unique prefix", allow_hyphen_values = true)]
-        device_id: String,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
         #[arg(
@@ -3190,7 +3125,6 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             device,
             json,
             passphrase_file,
-            ..
         } => handle_lab_member_toggle(
             trust_domain_id,
             network_local_id,
@@ -3841,9 +3775,7 @@ async fn handle_lab_approve(
         network_local_id,
         selected,
         json,
-        None,
         passphrase_file,
-        None,
     )
     .await
 }
@@ -4429,288 +4361,6 @@ fn handle_trust_show_device(
         println!("status: {}", row.status.as_str());
         println!("capabilities: {}", row.capabilities.render_compact());
         println!("hostname: {}", row.hostname);
-    }
-    Ok(())
-}
-
-struct TrustAdminAddOptions {
-    trust_domain_id: String,
-    network_local_id: String,
-    device_id: String,
-    label: Option<String>,
-    capabilities: Vec<String>,
-    expires_at: Option<u64>,
-    json: bool,
-    passphrase_file: Option<PathBuf>,
-}
-
-fn admin_grants_dir(network_dir: &std::path::Path) -> PathBuf {
-    network_dir.join("admin_grants")
-}
-
-fn revoked_admin_grants_dir(network_dir: &std::path::Path) -> PathBuf {
-    admin_grants_dir(network_dir).join("revoked")
-}
-
-fn parse_admin_capabilities(
-    values: &[String],
-) -> Result<pactmesh::trust::AdminCapabilities, Error> {
-    if values.is_empty() {
-        return Ok(pactmesh::trust::AdminCapabilities::approve_only());
-    }
-    let mut caps = pactmesh::trust::AdminCapabilities {
-        approve_join: false,
-        revoke_member: false,
-        disable_member: false,
-        edit_acl: false,
-        rotate_admins: false,
-    };
-    for value in values {
-        for item in value
-            .split(',')
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-        {
-            match item {
-                "all" => return Ok(pactmesh::trust::AdminCapabilities::all()),
-                "approve_join" | "approve" => caps.approve_join = true,
-                "revoke_member" | "revoke" => caps.revoke_member = true,
-                "disable_member" | "disable" => caps.disable_member = true,
-                "edit_acl" | "acl" => caps.edit_acl = true,
-                "rotate_admins" | "admin" => caps.rotate_admins = true,
-                other => anyhow::bail!("unknown admin capability: {other}"),
-            }
-        }
-    }
-    Ok(caps)
-}
-
-fn render_admin_capabilities(caps: &pactmesh::trust::AdminCapabilities) -> String {
-    let mut out = Vec::new();
-    if caps.approve_join {
-        out.push("approve_join");
-    }
-    if caps.revoke_member {
-        out.push("revoke_member");
-    }
-    if caps.disable_member {
-        out.push("disable_member");
-    }
-    if caps.edit_acl {
-        out.push("edit_acl");
-    }
-    if caps.rotate_admins {
-        out.push("rotate_admins");
-    }
-    if out.is_empty() {
-        "none".to_owned()
-    } else {
-        out.join(",")
-    }
-}
-
-fn handle_trust_admin_add(options: TrustAdminAddOptions) -> Result<(), Error> {
-    let (network_dir, original_pem, mut state) =
-        load_network_state_for_edit(&options.trust_domain_id, &options.network_local_id)?;
-    let rows = collect_member_list_rows(&network_dir, &state, &options.network_local_id);
-    let row = resolve_device_view(rows, &options.device_id)?;
-    let member_fp = parse_member_cert_fingerprint(&row.fingerprint)?;
-    let certs = read_member_cert_bodies(&network_dir);
-    let cert = certs
-        .get(&member_fp)
-        .ok_or_else(|| anyhow::anyhow!("member cert body not found for {}", row.fingerprint))?;
-    let root = unlock_domain_root(&options.trust_domain_id, options.passphrase_file)?;
-    let now = now_unix_secs();
-    let grant = pactmesh::trust::UnsignedAdminGrant {
-        trust_domain_id: root.id(),
-        admin_device_pk: cert.details.device_pk,
-        admin_label: options.label.unwrap_or(row.device_label),
-        not_before: now,
-        expires_at: options.expires_at.unwrap_or(now + 365 * 24 * 60 * 60),
-        capabilities: parse_admin_capabilities(&options.capabilities)?,
-    }
-    .sign(&root);
-
-    let dir = admin_grants_dir(&network_dir);
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{}.pem", row.device_id));
-    std::fs::write(&path, grant.to_pem())?;
-    state
-        .details
-        .payload
-        .admin_grants
-        .retain(|existing| existing.details.admin_device_pk != grant.details.admin_device_pk);
-    state.details.payload.admin_grants.push(grant.clone());
-    let old_version = state.details.version;
-    let new_version = write_signed_network_state(&network_dir, &state, original_pem, &root)?;
-
-    if options.json {
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({
-                "device_id": row.device_id,
-                "path": path,
-                "admin_label": grant.details.admin_label,
-                "expires_at": grant.details.expires_at,
-                "capabilities": render_admin_capabilities(&grant.details.capabilities),
-                "old_version": old_version,
-                "new_version": new_version,
-            }))?
-        );
-    } else {
-        println!(
-            "admin grant written: {} device={} capabilities={} expires_at={} network_state version {} -> {}",
-            path.display(),
-            row.device_id,
-            render_admin_capabilities(&grant.details.capabilities),
-            grant.details.expires_at,
-            old_version,
-            new_version
-        );
-    }
-    Ok(())
-}
-
-fn handle_trust_admin_list(
-    trust_domain_id: String,
-    network_local_id: String,
-    include_revoked: bool,
-    json: bool,
-) -> Result<(), Error> {
-    let (network_dir, _pem, state) =
-        load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
-    let mut rows = Vec::new();
-    collect_admin_grants(&admin_grants_dir(&network_dir), false, &mut rows)?;
-    if include_revoked {
-        collect_admin_grants(&revoked_admin_grants_dir(&network_dir), true, &mut rows)?;
-    }
-    for row in &mut rows {
-        let pk_b64 = row["admin_device_pk"].as_str().unwrap_or("");
-        let in_state = state
-            .details
-            .payload
-            .admin_grants
-            .iter()
-            .any(|grant| encode_device_id(grant.details.admin_device_pk.as_bytes()) == pk_b64);
-        row["in_network_state"] = serde_json::Value::Bool(in_state);
-    }
-    rows.sort_by(|left, right| left["device_id"].as_str().cmp(&right["device_id"].as_str()));
-    if json {
-        println!("{}", serde_json::to_string(&rows)?);
-        return Ok(());
-    }
-    if rows.is_empty() {
-        println!("(no admin grants)");
-        return Ok(());
-    }
-    println!("device_id	label	expires_at	status	in_network_state	capabilities	path");
-    for row in rows {
-        println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            row["device_id"].as_str().unwrap_or(""),
-            row["admin_label"].as_str().unwrap_or(""),
-            row["expires_at"].as_u64().unwrap_or_default(),
-            row["status"].as_str().unwrap_or(""),
-            row["in_network_state"].as_bool().unwrap_or(false),
-            row["capabilities"].as_str().unwrap_or(""),
-            row["path"].as_str().unwrap_or(""),
-        );
-    }
-    Ok(())
-}
-
-fn collect_admin_grants(
-    dir: &std::path::Path,
-    revoked: bool,
-    rows: &mut Vec<serde_json::Value>,
-) -> Result<(), Error> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Ok(());
-    };
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("pem") {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path)?;
-        let grant = pactmesh::trust::AdminGrant::from_pem(&text)
-            .with_context(|| format!("failed to parse {}", path.display()))?;
-        let device_id = path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("unknown")
-            .to_owned();
-        rows.push(serde_json::json!({
-            "device_id": device_id,
-            "admin_device_pk": encode_device_id(grant.details.admin_device_pk.as_bytes()),
-            "admin_label": grant.details.admin_label,
-            "expires_at": grant.details.expires_at,
-            "status": if revoked { "revoked" } else { "active" },
-            "capabilities": render_admin_capabilities(&grant.details.capabilities),
-            "path": path,
-        }));
-    }
-    Ok(())
-}
-
-fn handle_trust_admin_revoke(
-    trust_domain_id: String,
-    network_local_id: String,
-    device_id: String,
-    json: bool,
-    passphrase_file: Option<PathBuf>,
-) -> Result<(), Error> {
-    let (network_dir, original_pem, mut state) =
-        load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
-    let rows = collect_member_list_rows(&network_dir, &state, &network_local_id);
-    let row = resolve_device_view(rows, &device_id)?;
-    let member_fp = parse_member_cert_fingerprint(&row.fingerprint)?;
-    let certs = read_member_cert_bodies(&network_dir);
-    let cert = certs
-        .get(&member_fp)
-        .ok_or_else(|| anyhow::anyhow!("member cert body not found for {}", row.fingerprint))?;
-    let src = admin_grants_dir(&network_dir).join(format!("{}.pem", row.device_id));
-    if !src.is_file() {
-        anyhow::bail!("admin grant not found for device {}", row.device_id);
-    }
-    let root = unlock_domain_root(&trust_domain_id, passphrase_file)?;
-    let dst_dir = revoked_admin_grants_dir(&network_dir);
-    std::fs::create_dir_all(&dst_dir)?;
-    let dst = dst_dir.join(format!("{}.pem", row.device_id));
-    std::fs::rename(&src, &dst)?;
-    let old_version = state.details.version;
-    let old_len = state.details.payload.admin_grants.len();
-    state
-        .details
-        .payload
-        .admin_grants
-        .retain(|grant| grant.details.admin_device_pk != cert.details.device_pk);
-    if state.details.payload.admin_grants.len() == old_len {
-        anyhow::bail!(
-            "admin grant not found in network_state for device {}",
-            row.device_id
-        );
-    }
-    let new_version = write_signed_network_state(&network_dir, &state, original_pem, &root)?;
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({
-                "device_id": row.device_id,
-                "status": "revoked",
-                "path": dst,
-                "old_version": old_version,
-                "new_version": new_version,
-            }))?
-        );
-    } else {
-        println!(
-            "admin grant revoked: {} -> {} network_state version {} -> {}",
-            src.display(),
-            dst.display(),
-            old_version,
-            new_version
-        );
     }
     Ok(())
 }
@@ -5514,24 +5164,6 @@ fn write_signed_network_state(
     )
 }
 
-enum TrustApproveSigner {
-    Root(TrustDomainRoot),
-    Admin(SignKey),
-}
-
-trait SignMemberCertWithApproveSigner {
-    fn sign_with_admin_or_root(self, signer: &TrustApproveSigner) -> pactmesh::trust::MemberCert;
-}
-
-impl SignMemberCertWithApproveSigner for pactmesh::trust::UnsignedMemberCert {
-    fn sign_with_admin_or_root(self, signer: &TrustApproveSigner) -> pactmesh::trust::MemberCert {
-        match signer {
-            TrustApproveSigner::Root(root) => self.sign(root),
-            TrustApproveSigner::Admin(sk) => self.sign_with_admin(sk),
-        }
-    }
-}
-
 fn sign_next_network_state(
     original_state: &pactmesh::trust::SignedNetworkState,
     root: &TrustDomainRoot,
@@ -5539,18 +5171,6 @@ fn sign_next_network_state(
     let mut next_state = original_state.details.clone();
     next_state.version = next_state.version.saturating_add(1);
     next_state.sign(root)
-}
-
-fn sign_next_network_state_with_signer(
-    original_state: &pactmesh::trust::SignedNetworkState,
-    signer: &TrustApproveSigner,
-) -> pactmesh::trust::SignedNetworkState {
-    let mut next_state = original_state.details.clone();
-    next_state.version = next_state.version.saturating_add(1);
-    match signer {
-        TrustApproveSigner::Root(root) => next_state.sign(root),
-        TrustApproveSigner::Admin(sk) => next_state.sign_with_admin(sk),
-    }
 }
 
 fn write_pre_signed_network_state(
@@ -5590,91 +5210,6 @@ fn load_network_state_for_edit(
     let original_state = pactmesh::trust::SignedNetworkState::from_pem(&original_pem)
         .with_context(|| format!("failed to parse {}", state_path.display()))?;
     Ok((network_dir, original_pem, original_state))
-}
-
-fn load_approve_signer(
-    trust_domain_id: &str,
-    _network_local_id: &str,
-    network_dir: &std::path::Path,
-    state: &pactmesh::trust::SignedNetworkState,
-    admin_grant: Option<PathBuf>,
-    passphrase_file: Option<PathBuf>,
-    device_passphrase_file: Option<PathBuf>,
-) -> Result<TrustApproveSigner, Error> {
-    if let Some(path) = admin_grant {
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read admin grant {}", path.display()))?;
-        let grant = pactmesh::trust::AdminGrant::from_pem(&text)
-            .with_context(|| format!("failed to parse admin grant {}", path.display()))?;
-        if grant.details.trust_domain_id != state.details.trust_domain_id {
-            anyhow::bail!("admin grant trust_domain_id does not match network_state");
-        }
-        if !grant.details.capabilities.approve_join {
-            anyhow::bail!("admin grant does not include approve_join capability");
-        }
-        if !state
-            .details
-            .payload
-            .admin_grants
-            .iter()
-            .any(|existing| existing == &grant)
-        {
-            anyhow::bail!("admin grant is not active in current network_state");
-        }
-        let root_pk = load_root_public_key_for_domain(trust_domain_id)?;
-        grant.verify(&root_pk.into(), now_unix_secs())?;
-        let passphrase = read_optional_device_passphrase(device_passphrase_file.as_ref())?;
-        let sk_self = load_local_network_sk_self(network_dir, passphrase.as_deref())?;
-        if sk_self.verify_key().0 != grant.details.admin_device_pk.to_bytes() {
-            anyhow::bail!("local sk_self does not match admin grant admin_device_pk");
-        }
-        return Ok(TrustApproveSigner::Admin(sk_self));
-    }
-
-    Ok(TrustApproveSigner::Root(unlock_domain_root(
-        trust_domain_id,
-        passphrase_file,
-    )?))
-}
-
-fn load_root_public_key_for_domain(trust_domain_id: &str) -> Result<VerifyingKey, Error> {
-    let domain_dir = pnw_trust_domains_dir()?.join(trust_domain_id);
-    let pem = std::fs::read_to_string(domain_dir.join("pk_root.pem"))?;
-    let payload = unwrap_armored(&pem, "PNW-PK-ROOT")?;
-    let bytes: [u8; 32] = payload
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("pk_root.pem must contain exactly 32 bytes"))?;
-    VerifyingKey::from_bytes(&bytes).context("pk_root.pem contains invalid ed25519 key")
-}
-
-fn load_local_network_sk_self(
-    network_dir: &std::path::Path,
-    passphrase: Option<&str>,
-) -> Result<SignKey, Error> {
-    let raw_path = network_dir.join(SK_SELF_RAW_FILE);
-    if raw_path.is_file() {
-        let bytes = std::fs::read(&raw_path)
-            .with_context(|| format!("failed to read {}", raw_path.display()))?;
-        let bytes: [u8; 32] = bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("sk_self.raw must contain exactly 32 bytes"))?;
-        return Ok(SignKey::from_bytes(bytes));
-    }
-    let age_path = network_dir.join(SK_SELF_AGE_FILE);
-    if age_path.is_file() {
-        let passphrase = passphrase.ok_or_else(|| {
-            anyhow::anyhow!(
-                "PNW_DEVICE_PASSPHRASE or --device-passphrase-file is required for local sk_self.age"
-            )
-        })?;
-        return load_device_sign_key(&age_path, passphrase);
-    }
-    anyhow::bail!(
-        "local sk_self.raw/sk_self.age not found in {}",
-        network_dir.display()
-    )
 }
 
 fn unlock_domain_root(
@@ -6309,9 +5844,7 @@ async fn handle_trust_approve(
     network_local_id: String,
     applicant_pk_str: String,
     json: bool,
-    admin_grant: Option<PathBuf>,
     passphrase_file: Option<PathBuf>,
-    device_passphrase_file: Option<PathBuf>,
 ) -> Result<(), Error> {
     let td_id_bytes = parse_url_safe_b64_32(&trust_domain_id, "trust_domain_id")?;
     let pending = resolve_pending_join_summary(
@@ -6329,18 +5862,10 @@ async fn handle_trust_approve(
 
     let (network_dir, original_pem, mut state) =
         load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
-    let signer = load_approve_signer(
-        &trust_domain_id,
-        &network_local_id,
-        &network_dir,
-        &state,
-        admin_grant,
-        passphrase_file,
-        device_passphrase_file,
-    )?;
+    let root = unlock_domain_root(&trust_domain_id, passphrase_file)?;
     let now = now_unix_secs();
     let cert = pactmesh::trust::UnsignedMemberCert {
-        trust_domain_id: state.details.trust_domain_id,
+        trust_domain_id: root.id(),
         network_local_id: NetworkLocalId::try_from_str(&network_local_id)?,
         device_pk: VerifyingKey::from_bytes(&applicant_pk_bytes)
             .context("pending applicant_pk is not a valid ed25519 key")?,
@@ -6355,7 +5880,7 @@ async fn handle_trust_approve(
         network_state_version_ref: state.details.version,
         hostname: None,
     }
-    .sign_with_admin_or_root(&signer);
+    .sign(&root);
 
     let fingerprint = cert.fingerprint();
     let already_indexed = state
@@ -6377,7 +5902,7 @@ async fn handle_trust_approve(
                 issued_at: cert.details.not_before,
                 expires_at: cert.details.expires_at,
             });
-        Some(sign_next_network_state_with_signer(&state, &signer))
+        Some(sign_next_network_state(&state, &root))
     };
 
     let client = handler.get_trust_join_manage_client().await?;
@@ -6732,7 +6257,6 @@ fn handle_trust_create_network(
             acl: to_canonical_cbor(&acl),
             routes: Vec::new(),
             peer_hints: Vec::new(),
-            admin_grants: Vec::new(),
         },
     }
     .sign(&root);
@@ -7811,51 +7335,6 @@ async fn main() -> Result<(), Error> {
                     passphrase_file,
                 })?,
             },
-            TrustSubCommand::Admin { command } => match command {
-                TrustAdminSubCommand::Add {
-                    trust_domain_id,
-                    network_local_id,
-                    device_id,
-                    label,
-                    capabilities,
-                    expires_at,
-                    json,
-                    passphrase_file,
-                } => handle_trust_admin_add(TrustAdminAddOptions {
-                    trust_domain_id,
-                    network_local_id,
-                    device_id,
-                    label,
-                    capabilities,
-                    expires_at,
-                    json,
-                    passphrase_file,
-                })?,
-                TrustAdminSubCommand::List {
-                    trust_domain_id,
-                    network_local_id,
-                    include_revoked,
-                    json,
-                } => handle_trust_admin_list(
-                    trust_domain_id,
-                    network_local_id,
-                    include_revoked,
-                    json,
-                )?,
-                TrustAdminSubCommand::Revoke {
-                    trust_domain_id,
-                    network_local_id,
-                    device_id,
-                    json,
-                    passphrase_file,
-                } => handle_trust_admin_revoke(
-                    trust_domain_id,
-                    network_local_id,
-                    device_id,
-                    json,
-                    passphrase_file,
-                )?,
-            },
             TrustSubCommand::Acl { command } => match command {
                 TrustAclSubCommand::Explain {
                     trust_domain_id,
@@ -7916,9 +7395,7 @@ async fn main() -> Result<(), Error> {
                 network_local_id,
                 applicant_pk,
                 json,
-                admin_grant,
                 passphrase_file,
-                device_passphrase_file,
             } => {
                 handle_trust_approve(
                     &handler,
@@ -7926,9 +7403,7 @@ async fn main() -> Result<(), Error> {
                     network_local_id,
                     applicant_pk,
                     json,
-                    admin_grant,
                     passphrase_file,
-                    device_passphrase_file,
                 )
                 .await?;
             }

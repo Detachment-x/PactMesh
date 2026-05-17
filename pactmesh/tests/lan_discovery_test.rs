@@ -47,7 +47,6 @@ fn state(
             acl: Vec::new(),
             routes: Vec::new(),
             peer_hints: hints,
-            admin_grants: Vec::new(),
         },
     }
     .sign(root)

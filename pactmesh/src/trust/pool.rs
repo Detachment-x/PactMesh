@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 
 use ed25519_dalek::VerifyingKey;
-use ed25519_dalek::{Signature, Verifier};
 use thiserror::Error;
 
 use super::cache::CachedMemberCert;
@@ -63,19 +62,9 @@ impl TrustDomainPool {
             .domains
             .get_mut(&state.details.trust_domain_id)
             .ok_or(PoolApplyError::UnknownDomain)?;
-        if state.verify(&entry.pk_root).is_err() {
-            let Some(existing) = entry.networks.get(&state.details.network_local_id) else {
-                return Err(PoolApplyError::BadSignature);
-            };
-            Self::verify_network_state_against_admin_grants(&state, existing, &entry.pk_root)
-                .map_err(|_| PoolApplyError::BadSignature)?;
-        }
-        let now = now_unix_secs();
-        for grant in &state.details.payload.admin_grants {
-            grant
-                .verify(&entry.pk_root, now)
-                .map_err(|_| PoolApplyError::BadAdminGrant)?;
-        }
+        state
+            .verify(&entry.pk_root)
+            .map_err(|_| PoolApplyError::BadSignature)?;
 
         let network_local_id = state.details.network_local_id.clone();
         if let Some(existing) = entry.networks.get(&network_local_id)
@@ -149,16 +138,14 @@ impl TrustDomainPool {
             .ok_or(PoolVerifyError::UnknownDomain)?;
         let root_pk = ed25519_dalek::VerifyingKey::from_bytes(&entry.pk_root.0)
             .expect("stored public key must be valid");
+        Self::verify_cert_against_root_pk(cert, &root_pk, now)?;
+
         let state = entry.networks.get(&cert.details.network_local_id).ok_or(
             PoolVerifyError::NoNetworkState {
                 td: cert.details.trust_domain_id,
                 nlid: cert.details.network_local_id.clone(),
             },
         )?;
-
-        if Self::verify_cert_against_root_pk(cert, &root_pk, now).is_err() {
-            Self::verify_member_cert_against_admin_grants(cert, state, now)?;
-        }
 
         if cert.details.network_state_version_ref > state.details.version {
             return Err(PoolVerifyError::FutureVersionRef {
@@ -277,70 +264,6 @@ impl TrustDomainPool {
 
         Ok(())
     }
-
-    fn verify_member_cert_against_admin_grants(
-        cert: &MemberCert,
-        state: &SignedNetworkState,
-        now: u64,
-    ) -> Result<(), PoolVerifyError> {
-        if cert.details.network_state_version_ref > state.details.version {
-            return Err(PoolVerifyError::FutureVersionRef {
-                have: state.details.version,
-                got: cert.details.network_state_version_ref,
-            });
-        }
-        if cert.details.not_before >= cert.details.expires_at {
-            return Err(PoolVerifyError::BadSignature);
-        }
-        let sig =
-            signature_from_bytes(&cert.signature.0).map_err(|_| PoolVerifyError::BadSignature)?;
-        let message = cert.details.marshal_for_signing();
-        let ok = state.details.payload.admin_grants.iter().any(|grant| {
-            grant.details.capabilities.approve_join
-                && now >= grant.details.not_before
-                && now < grant.details.expires_at
-                && grant.details.admin_device_pk.verify(&message, &sig).is_ok()
-        });
-        if ok {
-            Ok(())
-        } else {
-            Err(PoolVerifyError::BadSignature)
-        }
-    }
-
-    fn verify_network_state_against_admin_grants(
-        next: &SignedNetworkState,
-        current: &SignedNetworkState,
-        root_pk: &VerifyKey,
-    ) -> Result<(), PoolApplyError> {
-        if next.details.version <= current.details.version {
-            return Err(PoolApplyError::StaleVersion {
-                have: current.details.version,
-                got: next.details.version,
-            });
-        }
-        let now = now_unix_secs();
-        let sig =
-            signature_from_bytes(&next.signature.0).map_err(|_| PoolApplyError::BadSignature)?;
-        let message = next.details.marshal_for_signing();
-        for grant in &current.details.payload.admin_grants {
-            if !grant.details.capabilities.approve_join {
-                continue;
-            }
-            if grant.verify(root_pk, now).is_err() {
-                continue;
-            }
-            if grant.details.admin_device_pk.verify(&message, &sig).is_ok() {
-                return Ok(());
-            }
-        }
-        Err(PoolApplyError::BadSignature)
-    }
-}
-
-fn signature_from_bytes(bytes: &[u8]) -> Result<Signature, ()> {
-    let sig_bytes: [u8; 64] = bytes.try_into().map_err(|_| ())?;
-    Ok(Signature::from_bytes(&sig_bytes))
 }
 
 pub type TrustDomainPoolError = PoolVerifyError;
@@ -354,15 +277,6 @@ pub enum PoolApplyError {
     BadSignature,
     #[error("version regressed: have {have}, got {got}")]
     StaleVersion { have: u64, got: u64 },
-    #[error("admin grant verification failed")]
-    BadAdminGrant,
-}
-
-fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }
 
 /// `verify_member_cert` failure modes (mirror §7.3 ordering).

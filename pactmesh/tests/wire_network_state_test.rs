@@ -93,7 +93,6 @@ fn full_payload() -> NetworkStatePayload {
         acl: to_canonical_cbor(&policy(Action::Drop)),
         routes: vec![0x01, 0x02],
         peer_hints: Vec::new(),
-        admin_grants: Vec::new(),
     }
 }
 
@@ -120,7 +119,6 @@ fn test_round_trip_with_empty_acl_default_action_accept() {
             acl: to_canonical_cbor(&policy(Action::Accept)),
             routes: Vec::new(),
             peer_hints: Vec::new(),
-            admin_grants: Vec::new(),
         },
     );
     let decoded =

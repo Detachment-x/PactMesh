@@ -32,7 +32,6 @@ fn state(
                 updated_at: 100,
                 expires_at: Some(2_000_000_000),
             }],
-            admin_grants: Vec::new(),
         },
     }
     .sign(root)
