@@ -12,9 +12,10 @@ pub mod panels;
 pub mod state;
 
 use std::collections::{HashMap, VecDeque};
-use std::io;
-use std::path::PathBuf;
-use std::process::Command;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, TableState, Tabs, Wrap};
 use tokio::sync::{Mutex, mpsc};
 
+use crate::common::config_dir::pnw_config_dir;
 use crate::proto::api::instance::InstanceIdentifier;
 use crate::tui::panels::logs::{GrepTemplate, LevelFilter, LogsView};
 
@@ -1050,35 +1052,81 @@ fn run_setup_root(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
     let exe = std::env::current_exe()?;
-    let exe = shell_quote(&exe.to_string_lossy());
     let domain_label = domain_label.unwrap_or("home");
-    let script = format!(
-        "set -eu\n\
-exe={exe}\n\
-core=$(dirname -- \"$exe\")/pactmesh-core\n\
-if [ ! -x \"$core\" ]; then echo \"pactmesh-core not found next to $exe: $core\" >&2; exit 1; fi\n\
-td_json=$(\"$exe\" trust create-domain --label {domain_label} --json)\n\
-printf '%s\\n' \"$td_json\"\n\
-td=$(printf '%s' \"$td_json\" | sed -n 's/.*\"trust_domain_id\":\"\\([^\"]*\\)\".*/\\1/p')\n\
-if [ -z \"$td\" ]; then echo \"failed to parse trust_domain_id\" >&2; exit 1; fi\n\
-\"$exe\" trust create-network \"$td\" {network} --json\n\
-\"$exe\" trust bootstrap-self \"$td\" {network} --device-label {label} --json\n\
-invite=$(\"$exe\" trust invite \"$td\" {network} --seed {seed} --format url)\n\
-printf '%s\\n' \"$invite\"\n\
-config_base=${{XDG_CONFIG_HOME:-$HOME/.config}}/privateNetwork\n\
-log_dir=${{PNW_TEST_HOME:-.}}\n\
-mkdir -p \"$log_dir\"\n\
-nohup \"$core\" --network-name {network} --trust-domain-dir \"$config_base/trust-domains/$td\" --network-local-id {network} --rpc-portal 127.0.0.1:{rpc_port} --listeners {listen_port} --no-tun true --disable-ipv6 true --instance-name {label} --console-log-level debug --daemon > \"$log_dir/{label}.log\" 2>&1 &\n\
-printf 'started root daemon pid=%s log=%s\\n' \"$!\" \"$log_dir/{label}.log\"\n",
-        exe = exe,
-        domain_label = shell_quote(domain_label),
-        network = shell_quote(network),
-        label = shell_quote(label),
-        seed = shell_quote(seed),
-        listen_port = shell_quote(listen_port),
-        rpc_port = shell_quote(rpc_port),
-    );
-    run_shell(&script, &HashMap::new(), terminal)
+    run_interactive(terminal, |out| {
+        let core = pactmesh_core_path(&exe)?;
+        let td_json = run_and_capture(
+            out,
+            &exe,
+            &["trust", "create-domain", "--label", domain_label, "--json"],
+        )?;
+        write_line(out, &td_json)?;
+        let td = parse_json_string_field(&td_json, "trust_domain_id")?;
+        run_and_stream(
+            out,
+            &exe,
+            &["trust", "create-network", &td, network, "--json"],
+        )?;
+        run_and_stream(
+            out,
+            &exe,
+            &[
+                "trust",
+                "bootstrap-self",
+                &td,
+                network,
+                "--device-label",
+                label,
+                "--json",
+            ],
+        )?;
+        let invite = run_and_capture(
+            out,
+            &exe,
+            &[
+                "trust", "invite", &td, network, "--seed", seed, "--format", "url",
+            ],
+        )?;
+        write_line(out, &invite)?;
+        let domain_dir = pnw_config_dir()?.join("trust-domains").join(&td);
+        let log_path = setup_log_path(label)?;
+        let child = spawn_core_daemon(
+            &core,
+            &log_path,
+            &[
+                "--network-name",
+                network,
+                "--trust-domain-dir",
+                domain_dir
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("trust-domain path is not UTF-8"))?,
+                "--network-local-id",
+                network,
+                "--rpc-portal",
+                &format!("127.0.0.1:{rpc_port}"),
+                "--listeners",
+                listen_port,
+                "--no-tun",
+                "true",
+                "--disable-ipv6",
+                "true",
+                "--instance-name",
+                label,
+                "--console-log-level",
+                "debug",
+                "--daemon",
+            ],
+        )?;
+        write_line(
+            out,
+            &format!(
+                "started root daemon pid={} log={}",
+                child.id(),
+                log_path.display()
+            ),
+        )?;
+        Ok(())
+    })
 }
 
 fn run_setup_join(
@@ -1089,24 +1137,160 @@ fn run_setup_join(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
     let exe = std::env::current_exe()?;
-    let exe = shell_quote(&exe.to_string_lossy());
-    let script = format!(
-        "set -eu\n\
-exe={exe}\n\
-core=$(dirname -- \"$exe\")/pactmesh-core\n\
-if [ ! -x \"$core\" ]; then echo \"pactmesh-core not found next to $exe: $core\" >&2; exit 1; fi\n\
-\"$exe\" --rpc-portal 127.0.0.1:{rpc_port} trust accept-invite {invite} --device-label {label} --online --wait-secs 600 --poll-secs 2\n\
-log_dir=${{PNW_TEST_HOME:-.}}\n\
-mkdir -p \"$log_dir\"\n\
-nohup \"$core\" --network-name {network} --network-local-id {network} --rpc-portal 127.0.0.1:{rpc_port} --listeners 11010 --no-tun true --disable-ipv6 true --instance-name {label} --console-log-level debug --daemon > \"$log_dir/{label}.log\" 2>&1 &\n\
-printf 'started joiner daemon pid=%s log=%s\\n' \"$!\" \"$log_dir/{label}.log\"\n",
-        exe = exe,
-        invite = shell_quote(invite),
-        network = shell_quote(network),
-        label = shell_quote(label),
-        rpc_port = shell_quote(rpc_port),
-    );
-    run_shell(&script, &HashMap::new(), terminal)
+    run_interactive(terminal, |out| {
+        let core = pactmesh_core_path(&exe)?;
+        run_and_stream(
+            out,
+            &exe,
+            &[
+                "--rpc-portal",
+                &format!("127.0.0.1:{rpc_port}"),
+                "trust",
+                "accept-invite",
+                invite,
+                "--device-label",
+                label,
+                "--online",
+                "--wait-secs",
+                "600",
+                "--poll-secs",
+                "2",
+            ],
+        )?;
+        let log_path = setup_log_path(label)?;
+        let child = spawn_core_daemon(
+            &core,
+            &log_path,
+            &[
+                "--network-name",
+                network,
+                "--network-local-id",
+                network,
+                "--rpc-portal",
+                &format!("127.0.0.1:{rpc_port}"),
+                "--listeners",
+                "11010",
+                "--no-tun",
+                "true",
+                "--disable-ipv6",
+                "true",
+                "--instance-name",
+                label,
+                "--console-log-level",
+                "debug",
+                "--daemon",
+            ],
+        )?;
+        write_line(
+            out,
+            &format!(
+                "started joiner daemon pid={} log={}",
+                child.id(),
+                log_path.display()
+            ),
+        )?;
+        Ok(())
+    })
+}
+
+fn run_interactive<F>(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, f: F) -> Result<()>
+where
+    F: FnOnce(&mut io::Stderr) -> Result<()>,
+{
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+
+    let mut err = io::stderr();
+    let result = f(&mut err);
+
+    eprintln!("\n[pactmesh tui] press Enter to return...");
+    let mut sink = String::new();
+    let _ = io::stdin().read_line(&mut sink);
+
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    terminal.clear()?;
+    result
+}
+
+fn run_and_stream(out: &mut io::Stderr, exe: &Path, args: &[&str]) -> Result<()> {
+    write_command(out, exe, args)?;
+    let status = Command::new(exe).args(args).status()?;
+    if !status.success() {
+        anyhow::bail!("command exited {status}");
+    }
+    Ok(())
+}
+
+fn run_and_capture(out: &mut io::Stderr, exe: &Path, args: &[&str]) -> Result<String> {
+    write_command(out, exe, args)?;
+    let output = Command::new(exe).args(args).output()?;
+    out.write_all(&output.stderr)?;
+    if !output.status.success() {
+        anyhow::bail!("command exited {}", output.status);
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+fn write_command(out: &mut io::Stderr, exe: &Path, args: &[&str]) -> Result<()> {
+    write_line(out, &format!("$ {} {}", exe.display(), args.join(" ")))
+}
+
+fn write_line(out: &mut io::Stderr, line: &str) -> Result<()> {
+    writeln!(out, "{line}")?;
+    Ok(())
+}
+
+fn pactmesh_core_path(exe: &Path) -> Result<PathBuf> {
+    let name = if cfg!(windows) {
+        "pactmesh-core.exe"
+    } else {
+        "pactmesh-core"
+    };
+    let core = exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("failed to locate pactmesh binary directory"))?
+        .join(name);
+    if !core.is_file() {
+        anyhow::bail!(
+            "pactmesh-core not found next to {}: {}",
+            exe.display(),
+            core.display()
+        );
+    }
+    Ok(core)
+}
+
+fn setup_log_path(label: &str) -> Result<PathBuf> {
+    let dir = std::env::var_os("PNW_TEST_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join(format!("{label}.log")))
+}
+
+fn spawn_core_daemon(core: &Path, log_path: &Path, args: &[&str]) -> Result<std::process::Child> {
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+    let stderr = stdout.try_clone()?;
+    Command::new(core)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(Into::into)
+}
+
+fn parse_json_string_field(text: &str, field: &str) -> Result<String> {
+    let value: serde_json::Value = serde_json::from_str(text)?;
+    value
+        .get(field)
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("missing JSON string field {field}"))
 }
 
 fn shell_quote(s: &str) -> String {

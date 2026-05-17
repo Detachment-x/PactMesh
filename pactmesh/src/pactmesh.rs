@@ -501,6 +501,16 @@ enum LabSubCommand {
         #[command(subcommand)]
         command: LabPeersSubCommand,
     },
+    #[command(about = "SSH preflight for remote A/B/C test automation")]
+    RemoteCheck {
+        #[arg(long = "host", required = true, help = "SSH host alias or user@host")]
+        hosts: Vec<String>,
+        #[arg(
+            long,
+            help = "directory containing pactmesh binaries on the remote host"
+        )]
+        bin_dir: Option<String>,
+    },
     #[command(about = "disable a member interactively")]
     Disable {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
@@ -3088,6 +3098,9 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
         LabSubCommand::Peers { command } => match command {
             LabPeersSubCommand::Explain => handle_lab_peers_explain(handler).await,
         },
+        LabSubCommand::RemoteCheck { hosts, bin_dir } => {
+            handle_lab_remote_check(&hosts, bin_dir.as_deref())
+        }
         LabSubCommand::Disable {
             trust_domain_id,
             network_local_id,
@@ -3539,6 +3552,56 @@ async fn handle_lab_peers_explain(handler: &CommandHandler<'_>) -> Result<(), Er
         }
     }
     Ok(())
+}
+
+fn handle_lab_remote_check(hosts: &[String], bin_dir: Option<&str>) -> Result<(), Error> {
+    let bin_dir = bin_dir.unwrap_or(".");
+    for host in hosts {
+        println!("== {host} ==");
+        let os = ssh_capture(
+            host,
+            "uname -s 2>/dev/null || powershell -NoProfile -Command \"Write-Output Windows\"",
+        )?;
+        let os = os.trim();
+        println!("os: {}", if os.is_empty() { "unknown" } else { os });
+        let command = if os.to_ascii_lowercase().contains("windows") {
+            let dir = bin_dir.replace('\'', "''");
+            format!(
+                "powershell -NoProfile -Command \"& '{}\\pactmesh.exe' --version; & '{}\\pactmesh-core.exe' --version\"",
+                dir, dir
+            )
+        } else {
+            let dir = bin_dir.replace('\'', "'\\''");
+            format!("'{dir}/pactmesh' --version && '{dir}/pactmesh-core' --version")
+        };
+        let versions = ssh_capture(host, &command)?;
+        print!("{versions}");
+        if !versions.ends_with('\n') {
+            println!();
+        }
+    }
+    Ok(())
+}
+
+fn ssh_capture(host: &str, command: &str) -> Result<String, Error> {
+    let output = std::process::Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            host,
+            command,
+        ])
+        .output()
+        .with_context(|| format!("failed to run ssh for {host}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "ssh {host} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn handle_lab_member_toggle(
