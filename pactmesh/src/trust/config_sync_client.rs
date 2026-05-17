@@ -83,15 +83,26 @@ impl ConfigSyncClient {
     }
 
     pub fn pull_loop(self) -> JoinHandle<()> {
+        self.pull_loop_with_hook(|| {})
+    }
+
+    pub fn pull_loop_with_hook<F>(self, mut after_sync: F) -> JoinHandle<()>
+    where
+        F: FnMut() + Send + 'static,
+    {
         tokio::spawn(async move {
-            let _ = self.sync_once(true).await;
+            if self.sync_once(true).await.is_ok() {
+                after_sync();
+            }
             let mut interval = tokio::time::interval(self.tick_interval);
             let mut last_full_sync = tokio::time::Instant::now();
 
             loop {
                 interval.tick().await;
                 let force_full_sync = last_full_sync.elapsed() >= self.full_sync_interval;
-                let _ = self.sync_once(force_full_sync).await;
+                if self.sync_once(force_full_sync).await.is_ok() {
+                    after_sync();
+                }
                 if force_full_sync {
                     last_full_sync = tokio::time::Instant::now();
                 }

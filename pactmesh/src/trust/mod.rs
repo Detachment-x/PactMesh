@@ -57,8 +57,8 @@ pub use hostname::{HostnameError, HostnameLabel};
 pub use identity::{SignKey, TrustDomainRoot, VerifyKey};
 pub use join::JoinRequest;
 pub use lan_discovery::{
-    LAN_DISCOVERY_SOURCE, LanDiscoveryError, LanNetworkStateQuery, LanNetworkStateResponse,
-    apply_lan_response, build_lan_query, response_for_query,
+    LAN_DISCOVERY_SOURCE, LanDiscoveryError, LanNetworkStateDiscoveryReport, LanNetworkStateQuery,
+    LanNetworkStateResponse, build_lan_query, discovery_report_for_response, response_for_query,
 };
 pub use lan_recovery::{LanRecoveryError, apply_lan_recovered_network_state};
 pub use member_cert::{Capabilities, MemberCert, UnsignedMemberCert};

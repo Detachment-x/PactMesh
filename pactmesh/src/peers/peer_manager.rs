@@ -56,8 +56,8 @@ use crate::{
         },
     },
     trust::{
-        AclPolicy, BorrowedRelayProof, Cidr, DeviceFingerprint, MemberCert, PacketTuple,
-        PeerMatchContext, RelayGrantTable, TrustDomainPool, decide, from_cbor,
+        AclPolicy, BorrowedRelayProof, Cidr, DeviceFingerprint, MemberCert, MemberCertFingerprint,
+        PacketTuple, PeerMatchContext, RelayGrantTable, TrustDomainPool, decide, from_cbor,
     },
     tunnel::{
         self, Tunnel, TunnelConnector,
@@ -475,7 +475,9 @@ impl PeerManager {
     fn device_fingerprint_from_member_cert(cert: &MemberCert) -> DeviceFingerprint {
         use sha2::{Digest, Sha256};
 
-        DeviceFingerprint::new(Sha256::digest(cert.details.device_pk.as_bytes()).into())
+        DeviceFingerprint::new(
+            Sha256::digest(crate::trust::to_canonical_cbor(cert).as_slice()).into(),
+        )
     }
 
     fn proxy_cidrs_from_cert(cert: &MemberCert) -> Vec<Cidr> {
@@ -496,6 +498,57 @@ impl PeerManager {
             proxy_cidrs: Self::proxy_cidrs_from_cert(&cert),
         };
         self.peer_trust_acl_identities.insert(peer_id, identity);
+    }
+
+    async fn peer_identity_allowed_by_current_trust_state(
+        global_ctx: &ArcGlobalCtx,
+        trust_pool: &Option<Arc<RwLock<TrustDomainPool>>>,
+        identity: &TrustAclPeerIdentity,
+    ) -> bool {
+        let Some(trust_pool) = trust_pool else {
+            return true;
+        };
+        let Some(trust_ctx) = global_ctx.get_trust_context().await else {
+            return true;
+        };
+        let pool = trust_pool.read().await;
+        let Some(state) =
+            pool.network_state(&trust_ctx.trust_domain_id, &trust_ctx.network_local_id)
+        else {
+            return true;
+        };
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        !state.details.payload.revoked_certs.iter().any(|revoked| {
+            revoked.cert_fingerprint == MemberCertFingerprint(identity.fingerprint.0)
+                && revoked.is_active_at(now)
+        }) && !state.details.payload.disabled_certs.iter().any(|disabled| {
+            disabled.cert_fingerprint == MemberCertFingerprint(identity.fingerprint.0)
+                && disabled.is_active_at(now)
+        })
+    }
+
+    pub async fn enforce_current_trust_state(&self) {
+        let identities: Vec<_> = self
+            .peer_trust_acl_identities
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().clone()))
+            .collect();
+        for (peer_id, identity) in identities {
+            if !Self::peer_identity_allowed_by_current_trust_state(
+                &self.global_ctx,
+                &self.trust_pool,
+                &identity,
+            )
+            .await
+            {
+                tracing::info!(?peer_id, "closing peer rejected by current trust state");
+                self.peer_trust_acl_identities.remove(&peer_id);
+                let _ = self.peers.close_peer(peer_id).await;
+            }
+        }
     }
 
     fn trust_acl_packet_tuple(packet: &ZCPacket) -> Option<PacketTuple> {
@@ -644,6 +697,19 @@ impl PeerManager {
         let Some(remote) = identities.get(&peer_id).map(|entry| entry.clone()) else {
             return true;
         };
+        if !Self::peer_identity_allowed_by_current_trust_state(
+            global_ctx,
+            &Some(trust_pool.clone()),
+            &remote,
+        )
+        .await
+        {
+            tracing::debug!(
+                ?peer_id,
+                "trust state dropped packet from revoked or disabled peer"
+            );
+            return false;
+        }
         let local = TrustAclPeerIdentity {
             fingerprint: Self::device_fingerprint_from_member_cert(&trust_ctx.member_cert),
             proxy_cidrs: Self::proxy_cidrs_from_cert(&trust_ctx.member_cert),

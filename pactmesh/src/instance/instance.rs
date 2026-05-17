@@ -69,6 +69,7 @@ use crate::proto::rpc_impl::standalone::{RpcServerHook, StandAloneServer};
 use crate::proto::rpc_types;
 use crate::proto::rpc_types::controller::BaseController;
 use crate::rpc_service::InstanceRpcService;
+use crate::trust::config_sync_client::ConfigSyncClient;
 use crate::trust::{
     MemberCert, NetworkLocalId, SignedNetworkState, TrustDomainId, TrustDomainPool,
     TrustDomainRoot, config_sync_service::ConfigSyncService, from_cbor, join_dedup::JoinDedup,
@@ -569,6 +570,7 @@ pub struct Instance {
     quic_proxy: Option<QuicProxy>,
 
     config_sync_service: Option<Arc<ConfigSyncService>>,
+    config_sync_client_task: Option<AbortOnDropHandle<()>>,
     join_forward_service: Option<Arc<JoinForwardService>>,
     join_admission_servers: Vec<StandAloneServer<TcpTunnelListener>>,
 
@@ -667,6 +669,7 @@ impl Instance {
             quic_proxy: None,
 
             config_sync_service,
+            config_sync_client_task: None,
             join_forward_service,
             join_admission_servers: Vec::new(),
 
@@ -1068,6 +1071,46 @@ impl Instance {
         Sha256::digest(global_ctx.get_id().as_bytes()).into()
     }
 
+    fn start_config_sync_client(&mut self) {
+        let Some(trust_pool) = self.peer_manager.get_trust_pool() else {
+            return;
+        };
+        let Some(trust_ctx) = self.global_ctx.trust_context_blocking() else {
+            return;
+        };
+        let mut client = ConfigSyncClient::new(
+            self.peer_manager.get_peer_rpc_mgr(),
+            self.peer_manager.my_peer_id(),
+            trust_pool,
+            self.global_ctx.get_network_name(),
+        )
+        .with_caller_member_cert(&trust_ctx.member_cert);
+        if let Some(trust_domain) = self.global_ctx.config.get_trust_domain() {
+            client = client.with_network_state_persist_domain_dir(trust_domain.domain_dir);
+        }
+        let peer_manager = self.peer_manager.clone();
+        let global_ctx = self.global_ctx.clone();
+        self.config_sync_client_task = Some(AbortOnDropHandle::new(client.pull_loop_with_hook(
+            move || {
+                let peer_manager = peer_manager.clone();
+                let global_ctx = global_ctx.clone();
+                tokio::spawn(async move {
+                    peer_manager.enforce_current_trust_state().await;
+                    if let Some(trust_ctx) = global_ctx.get_trust_context().await
+                        && let Some(trust_pool) = peer_manager.get_trust_pool()
+                        && let Some(state) = trust_pool
+                            .read()
+                            .await
+                            .network_state(&trust_ctx.trust_domain_id, &trust_ctx.network_local_id)
+                            .cloned()
+                    {
+                        global_ctx.set_trust_data_keys_from_network_state(&state);
+                    }
+                });
+            },
+        )));
+    }
+
     pub fn get_config_sync_service(&self) -> Option<Arc<ConfigSyncService>> {
         self.config_sync_service.clone()
     }
@@ -1365,6 +1408,7 @@ impl Instance {
         self.listener_manager.lock().await.run().await?;
         self.run_join_admission_servers().await?;
         self.peer_manager.run().await?;
+        self.start_config_sync_client();
 
         #[cfg(feature = "tun")]
         {

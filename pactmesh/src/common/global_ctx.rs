@@ -636,6 +636,12 @@ impl GlobalCtx {
         self.trust_context.read().await.clone()
     }
 
+    pub fn trust_context_blocking(
+        &self,
+    ) -> Option<Arc<crate::common::trust_context::TrustDomainContext>> {
+        self.trust_context.blocking_read().clone()
+    }
+
     pub async fn set_trust_context(
         &self,
         ctx: Arc<crate::common::trust_context::TrustDomainContext>,
