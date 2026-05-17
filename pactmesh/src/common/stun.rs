@@ -525,7 +525,11 @@ impl StunNatTypeDetectResult {
 
     fn nat_type_udp(&self) -> NatType {
         if self.stun_server_count() < 2 {
-            return NatType::Unknown;
+            return if self.usable_stun_resp_count() > 0 {
+                NatType::PortRestricted
+            } else {
+                NatType::Unknown
+            };
         }
 
         if self.is_cone() {
@@ -1423,6 +1427,28 @@ mod tests {
         assert!(!is_public_stun_server_addr("::1".parse().unwrap()));
         assert!(!is_public_stun_server_addr("fc00::1".parse().unwrap()));
         assert!(!is_public_stun_server_addr("fe80::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_udp_nat_type_single_stun_response_is_port_restricted() {
+        let result = StunNatTypeDetectResult::new(
+            StunTransport::Udp,
+            "0.0.0.0:12345".parse().unwrap(),
+            vec![BindRequestResponse {
+                local_addr: "0.0.0.0:12345".parse().unwrap(),
+                stun_server_addr: "47.115.208.211:11010".parse().unwrap(),
+                recv_from_addr: "47.115.208.211:11010".parse().unwrap(),
+                mapped_socket_addr: Some("111.43.134.139:61735".parse().unwrap()),
+                changed_socket_addr: None,
+                change_ip: false,
+                change_port: false,
+                real_ip_changed: false,
+                real_port_changed: false,
+                latency_us: 1_000,
+            }],
+        );
+
+        assert_eq!(result.nat_type(), NatType::PortRestricted);
     }
 
     #[tokio::test]
