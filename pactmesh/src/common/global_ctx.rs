@@ -804,6 +804,7 @@ pub mod tests {
                     acl: Vec::new(),
                     routes: Vec::new(),
                     peer_hints: Vec::new(),
+                    admin_grants: Vec::new(),
                 },
             }
             .sign(root)

@@ -86,6 +86,7 @@ fn setup_network(root_dir: &Path) -> (String, String, MemberCertFingerprint) {
             acl: to_canonical_cbor(&acl),
             routes: Vec::new(),
             peer_hints: Vec::new(),
+            admin_grants: Vec::new(),
         },
     }
     .sign(&root);

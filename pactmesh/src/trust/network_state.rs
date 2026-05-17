@@ -8,6 +8,7 @@ use ed25519_dalek::{Signature, Verifier};
 use minicbor::{Decoder, Encoder};
 use thiserror::Error;
 
+use super::admin::AdminGrant;
 use super::cbor::{ArmorError, from_cbor, to_canonical_cbor, unwrap_armored, wrap_armored};
 use super::identity::{TrustDomainRoot, VerifyKey};
 use super::member_cert::SignatureBytes32;
@@ -56,6 +57,33 @@ mod peer_hint_vec_cbor {
     }
 }
 
+mod admin_grant_vec_cbor {
+    use super::*;
+
+    pub fn encode<Ctx, W: minicbor::encode::Write>(
+        value: &[AdminGrant],
+        encoder: &mut Encoder<W>,
+        ctx: &mut Ctx,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        minicbor::Encode::encode(value, encoder, ctx)
+    }
+
+    pub fn decode<'b, Ctx>(
+        decoder: &mut Decoder<'b>,
+        ctx: &mut Ctx,
+    ) -> Result<Vec<AdminGrant>, minicbor::decode::Error> {
+        minicbor::Decode::decode(decoder, ctx)
+    }
+
+    pub fn nil() -> Option<Vec<AdminGrant>> {
+        Some(Vec::new())
+    }
+
+    pub fn is_nil(value: &[AdminGrant]) -> bool {
+        value.is_empty()
+    }
+}
+
 /// Root-signed recommended connection candidate. Hints are not authorization.
 #[derive(minicbor::Encode, minicbor::Decode, Debug, Clone, PartialEq, Eq)]
 pub struct PeerHint {
@@ -95,6 +123,9 @@ pub struct NetworkStatePayload {
     #[n(5)]
     #[cbor(with = "peer_hint_vec_cbor", has_nil)]
     pub peer_hints: Vec<PeerHint>,
+    #[n(6)]
+    #[cbor(with = "admin_grant_vec_cbor", has_nil)]
+    pub admin_grants: Vec<AdminGrant>,
 }
 
 /// Header + payload before signing.

@@ -254,6 +254,7 @@ pub fn rewrite_network_state_with_members(
         acl: current.details.payload.acl,
         routes: current.details.payload.routes,
         peer_hints: current.details.payload.peer_hints,
+        admin_grants: Vec::new(),
     };
     let state = UnsignedNetworkState {
         trust_domain_id: current.details.trust_domain_id,

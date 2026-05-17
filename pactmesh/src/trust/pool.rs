@@ -65,6 +65,12 @@ impl TrustDomainPool {
         state
             .verify(&entry.pk_root)
             .map_err(|_| PoolApplyError::BadSignature)?;
+        let now = now_unix_secs();
+        for grant in &state.details.payload.admin_grants {
+            grant
+                .verify(&entry.pk_root, now)
+                .map_err(|_| PoolApplyError::BadAdminGrant)?;
+        }
 
         let network_local_id = state.details.network_local_id.clone();
         if let Some(existing) = entry.networks.get(&network_local_id)
@@ -277,6 +283,15 @@ pub enum PoolApplyError {
     BadSignature,
     #[error("version regressed: have {have}, got {got}")]
     StaleVersion { have: u64, got: u64 },
+    #[error("admin grant verification failed")]
+    BadAdminGrant,
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 /// `verify_member_cert` failure modes (mirror §7.3 ordering).

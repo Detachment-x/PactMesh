@@ -51,6 +51,7 @@ fn build_state(
             acl: to_canonical_cbor(&acl),
             routes: Vec::new(),
             peer_hints: Vec::new(),
+            admin_grants: Vec::new(),
         },
     }
     .sign(root)

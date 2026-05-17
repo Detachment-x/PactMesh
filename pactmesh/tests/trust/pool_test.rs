@@ -3,7 +3,9 @@
 use pactmesh::trust::network_state::UnsignedNetworkState;
 use pactmesh::trust::pool::{PoolApplyError, TrustDomainPool};
 use pactmesh::trust::trust_domain_meta::UnsignedTrustDomainMeta;
-use pactmesh::trust::{NetworkLocalId, TrustDomainRoot};
+use pactmesh::trust::{
+    AdminCapabilities, NetworkLocalId, SignKey, TrustDomainRoot, UnsignedAdminGrant,
+};
 
 fn sample_unsigned_network_state_for_root(
     root: &TrustDomainRoot,
@@ -20,6 +22,7 @@ fn sample_unsigned_network_state_for_root(
             acl: Vec::new(),
             routes: Vec::new(),
             peer_hints: Vec::new(),
+            admin_grants: Vec::new(),
         },
     }
 }
@@ -79,6 +82,36 @@ fn test_apply_old_version_rejected() {
     assert_eq!(
         pool.apply_network_state(state_v1),
         Err(PoolApplyError::StaleVersion { have: 2, got: 1 })
+    );
+}
+
+#[test]
+fn test_apply_network_state_rejects_admin_grant_from_wrong_root() {
+    let root = TrustDomainRoot::generate();
+    let other_root = TrustDomainRoot::generate();
+    let admin_sk = SignKey::generate();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let bad_grant = UnsignedAdminGrant {
+        trust_domain_id: root.id(),
+        admin_device_pk: ed25519_dalek::VerifyingKey::from_bytes(&admin_sk.verify_key().0).unwrap(),
+        admin_label: "bad-admin".to_owned(),
+        not_before: now.saturating_sub(1),
+        expires_at: now.saturating_add(3600),
+        capabilities: AdminCapabilities::approve_only(),
+    }
+    .sign(&other_root);
+    let mut unsigned = sample_unsigned_network_state_for_root(&root, 1);
+    unsigned.payload.admin_grants.push(bad_grant);
+
+    let mut pool = TrustDomainPool::new();
+    pool.add_root(root.public_key().into());
+
+    assert_eq!(
+        pool.apply_network_state(unsigned.sign(&root)),
+        Err(PoolApplyError::BadAdminGrant)
     );
 }
 

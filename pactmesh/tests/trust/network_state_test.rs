@@ -60,6 +60,7 @@ fn sample_payload() -> NetworkStatePayload {
         acl: vec![0x01, 0x02, 0x03, 0x80],
         routes: vec![0xa1, 0x00, 0x01],
         peer_hints: Vec::new(),
+        admin_grants: Vec::new(),
     }
 }
 
@@ -101,6 +102,7 @@ fn test_payload_empty_lists_ok() {
         acl: Vec::new(),
         routes: Vec::new(),
         peer_hints: Vec::new(),
+        admin_grants: Vec::new(),
     };
 
     let encoded = to_canonical_cbor(&payload);

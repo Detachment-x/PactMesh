@@ -1083,6 +1083,11 @@ enum TrustAdminSubCommand {
         device_id: String,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
+        passphrase_file: Option<PathBuf>,
     },
 }
 
@@ -4495,7 +4500,7 @@ fn render_admin_capabilities(caps: &pactmesh::trust::AdminCapabilities) -> Strin
 }
 
 fn handle_trust_admin_add(options: TrustAdminAddOptions) -> Result<(), Error> {
-    let (network_dir, _pem, state) =
+    let (network_dir, original_pem, mut state) =
         load_network_state_for_edit(&options.trust_domain_id, &options.network_local_id)?;
     let rows = collect_member_list_rows(&network_dir, &state, &options.network_local_id);
     let row = resolve_device_view(rows, &options.device_id)?;
@@ -4520,6 +4525,14 @@ fn handle_trust_admin_add(options: TrustAdminAddOptions) -> Result<(), Error> {
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.pem", row.device_id));
     std::fs::write(&path, grant.to_pem())?;
+    state
+        .details
+        .payload
+        .admin_grants
+        .retain(|existing| existing.details.admin_device_pk != grant.details.admin_device_pk);
+    state.details.payload.admin_grants.push(grant.clone());
+    let old_version = state.details.version;
+    let new_version = write_signed_network_state(&network_dir, &state, original_pem, &root)?;
 
     if options.json {
         println!(
@@ -4530,15 +4543,19 @@ fn handle_trust_admin_add(options: TrustAdminAddOptions) -> Result<(), Error> {
                 "admin_label": grant.details.admin_label,
                 "expires_at": grant.details.expires_at,
                 "capabilities": render_admin_capabilities(&grant.details.capabilities),
+                "old_version": old_version,
+                "new_version": new_version,
             }))?
         );
     } else {
         println!(
-            "admin grant written: {} device={} capabilities={} expires_at={}",
+            "admin grant written: {} device={} capabilities={} expires_at={} network_state version {} -> {}",
             path.display(),
             row.device_id,
             render_admin_capabilities(&grant.details.capabilities),
-            grant.details.expires_at
+            grant.details.expires_at,
+            old_version,
+            new_version
         );
     }
     Ok(())
@@ -4550,12 +4567,22 @@ fn handle_trust_admin_list(
     include_revoked: bool,
     json: bool,
 ) -> Result<(), Error> {
-    let (network_dir, _pem, _state) =
+    let (network_dir, _pem, state) =
         load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
     let mut rows = Vec::new();
     collect_admin_grants(&admin_grants_dir(&network_dir), false, &mut rows)?;
     if include_revoked {
         collect_admin_grants(&revoked_admin_grants_dir(&network_dir), true, &mut rows)?;
+    }
+    for row in &mut rows {
+        let pk_b64 = row["admin_device_pk"].as_str().unwrap_or("");
+        let in_state = state
+            .details
+            .payload
+            .admin_grants
+            .iter()
+            .any(|grant| encode_device_id(grant.details.admin_device_pk.as_bytes()) == pk_b64);
+        row["in_network_state"] = serde_json::Value::Bool(in_state);
     }
     rows.sort_by(|left, right| left["device_id"].as_str().cmp(&right["device_id"].as_str()));
     if json {
@@ -4566,14 +4593,15 @@ fn handle_trust_admin_list(
         println!("(no admin grants)");
         return Ok(());
     }
-    println!("device_id	label	expires_at	status	capabilities	path");
+    println!("device_id	label	expires_at	status	in_network_state	capabilities	path");
     for row in rows {
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
             row["device_id"].as_str().unwrap_or(""),
             row["admin_label"].as_str().unwrap_or(""),
             row["expires_at"].as_u64().unwrap_or_default(),
             row["status"].as_str().unwrap_or(""),
+            row["in_network_state"].as_bool().unwrap_or(false),
             row["capabilities"].as_str().unwrap_or(""),
             row["path"].as_str().unwrap_or(""),
         );
@@ -4604,6 +4632,7 @@ fn collect_admin_grants(
             .to_owned();
         rows.push(serde_json::json!({
             "device_id": device_id,
+            "admin_device_pk": encode_device_id(grant.details.admin_device_pk.as_bytes()),
             "admin_label": grant.details.admin_label,
             "expires_at": grant.details.expires_at,
             "status": if revoked { "revoked" } else { "active" },
@@ -4619,19 +4648,40 @@ fn handle_trust_admin_revoke(
     network_local_id: String,
     device_id: String,
     json: bool,
+    passphrase_file: Option<PathBuf>,
 ) -> Result<(), Error> {
-    let (network_dir, _pem, state) =
+    let (network_dir, original_pem, mut state) =
         load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
     let rows = collect_member_list_rows(&network_dir, &state, &network_local_id);
     let row = resolve_device_view(rows, &device_id)?;
+    let member_fp = parse_member_cert_fingerprint(&row.fingerprint)?;
+    let certs = read_member_cert_bodies(&network_dir);
+    let cert = certs
+        .get(&member_fp)
+        .ok_or_else(|| anyhow::anyhow!("member cert body not found for {}", row.fingerprint))?;
     let src = admin_grants_dir(&network_dir).join(format!("{}.pem", row.device_id));
     if !src.is_file() {
         anyhow::bail!("admin grant not found for device {}", row.device_id);
     }
+    let root = unlock_domain_root(&trust_domain_id, passphrase_file)?;
     let dst_dir = revoked_admin_grants_dir(&network_dir);
     std::fs::create_dir_all(&dst_dir)?;
     let dst = dst_dir.join(format!("{}.pem", row.device_id));
     std::fs::rename(&src, &dst)?;
+    let old_version = state.details.version;
+    let old_len = state.details.payload.admin_grants.len();
+    state
+        .details
+        .payload
+        .admin_grants
+        .retain(|grant| grant.details.admin_device_pk != cert.details.device_pk);
+    if state.details.payload.admin_grants.len() == old_len {
+        anyhow::bail!(
+            "admin grant not found in network_state for device {}",
+            row.device_id
+        );
+    }
+    let new_version = write_signed_network_state(&network_dir, &state, original_pem, &root)?;
     if json {
         println!(
             "{}",
@@ -4639,13 +4689,17 @@ fn handle_trust_admin_revoke(
                 "device_id": row.device_id,
                 "status": "revoked",
                 "path": dst,
+                "old_version": old_version,
+                "new_version": new_version,
             }))?
         );
     } else {
         println!(
-            "admin grant revoked: {} -> {}",
+            "admin grant revoked: {} -> {} network_state version {} -> {}",
             src.display(),
-            dst.display()
+            dst.display(),
+            old_version,
+            new_version
         );
     }
     Ok(())
@@ -6543,6 +6597,7 @@ fn handle_trust_create_network(
             acl: to_canonical_cbor(&acl),
             routes: Vec::new(),
             peer_hints: Vec::new(),
+            admin_grants: Vec::new(),
         },
     }
     .sign(&root);
@@ -7657,7 +7712,14 @@ async fn main() -> Result<(), Error> {
                     network_local_id,
                     device_id,
                     json,
-                } => handle_trust_admin_revoke(trust_domain_id, network_local_id, device_id, json)?,
+                    passphrase_file,
+                } => handle_trust_admin_revoke(
+                    trust_domain_id,
+                    network_local_id,
+                    device_id,
+                    json,
+                    passphrase_file,
+                )?,
             },
             TrustSubCommand::Acl { command } => match command {
                 TrustAclSubCommand::Explain {

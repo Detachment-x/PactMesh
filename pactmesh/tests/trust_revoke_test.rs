@@ -65,6 +65,7 @@ fn setup_network(root_dir: &Path, version: u64) -> (String, String, MemberCertFi
             acl: to_canonical_cbor(&acl),
             routes: Vec::new(),
             peer_hints: Vec::new(),
+            admin_grants: Vec::new(),
         },
     }
     .sign(&root);
