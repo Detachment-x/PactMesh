@@ -1006,6 +1006,7 @@ impl PeerConn {
         };
         let session = self.get_peer_session_store().apply_initiator_action(
             &SessionKey::new(network.network_name.clone(), remote_peer_id),
+            self.my_peer_id,
             session_action,
             msg2_pb.b_session_generation,
             root_key,
@@ -1142,6 +1143,7 @@ impl PeerConn {
             initial_epoch,
         } = self.get_peer_session_store().upsert_responder_session(
             &SessionKey::new(remote_network_name.clone(), remote_peer_id),
+            self.my_peer_id,
             msg1_pb.a_session_generation,
             algo.clone(),
             msg1_pb.client_encryption_algorithm.clone(),

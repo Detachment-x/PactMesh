@@ -264,6 +264,8 @@ async fn relay_peer_map_secure_session_decrypt() {
     let algo = ctx.get_flags().encryption_algorithm.clone();
     let root_key = [7u8; 32];
     let session = Arc::new(PeerSession::new(
+        ctx.get_network_identity().network_name.clone(),
+        10,
         20,
         root_key,
         1,
@@ -803,6 +805,8 @@ async fn relay_peer_map_remove_peer() {
     // Add session for peer_1
     let root_key = [1u8; 32];
     let session = Arc::new(PeerSession::new(
+        ctx.get_network_name(),
+        10,
         peer_1,
         root_key,
         1,

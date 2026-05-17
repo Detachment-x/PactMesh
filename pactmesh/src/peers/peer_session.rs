@@ -6,7 +6,9 @@ use std::sync::{
 use anyhow::anyhow;
 use dashmap::DashMap;
 
-use super::secure_datagram::{SecureDatagramDirection, SecureDatagramSession};
+use super::secure_datagram::{
+    SecureDatagramDirection, SecureDatagramKdfContext, SecureDatagramSession,
+};
 use crate::{common::PeerId, tunnel::packet_def::ZCPacket};
 
 pub struct UpsertResponderSessionReturn {
@@ -84,6 +86,7 @@ impl PeerSessionStore {
     pub fn upsert_responder_session(
         &self,
         key: &SessionKey,
+        local_peer_id: PeerId,
         a_session_generation: Option<u32>,
         send_algorithm: String,
         recv_algorithm: String,
@@ -101,6 +104,8 @@ impl PeerSessionStore {
                 let session_generation = 1u32;
                 let initial_epoch = 0u32;
                 let session = Arc::new(PeerSession::new(
+                    key.network_name.clone(),
+                    local_peer_id,
                     key.peer_id,
                     root_key,
                     session_generation,
@@ -150,6 +155,7 @@ impl PeerSessionStore {
     pub fn apply_initiator_action(
         &self,
         key: &SessionKey,
+        local_peer_id: PeerId,
         action: PeerSessionAction,
         b_session_generation: u32,
         root_key_32: Option<[u8; 32]>,
@@ -184,6 +190,8 @@ impl PeerSessionStore {
                     .entry(key.clone())
                     .or_insert_with(|| {
                         Arc::new(PeerSession::new(
+                            key.network_name.clone(),
+                            local_peer_id,
                             key.peer_id,
                             root_key,
                             b_session_generation,
@@ -229,6 +237,8 @@ impl PeerSession {
     const SYNC_RX_GRACE_AFTER_MS: u64 = SecureDatagramSession::SYNC_RX_GRACE_AFTER_MS;
 
     pub fn new(
+        network_name: String,
+        local_peer_id: PeerId,
         peer_id: PeerId,
         root_key: [u8; 32],
         session_generation: u32,
@@ -240,12 +250,17 @@ impl PeerSession {
         Self {
             peer_id,
             peer_static_pubkey: RwLock::new(peer_static_pubkey),
-            datagram: SecureDatagramSession::new(
+            datagram: SecureDatagramSession::new_with_kdf_context(
                 root_key,
                 session_generation,
                 initial_epoch,
                 send_cipher_algorithm,
                 recv_cipher_algorithm,
+                Some(SecureDatagramKdfContext::new(
+                    network_name,
+                    local_peer_id,
+                    peer_id,
+                )),
             ),
             invalidated: AtomicBool::new(false),
         }
@@ -375,6 +390,8 @@ mod tests {
         let initial_epoch = 0u32;
 
         let sa = PeerSession::new(
+            "net1".to_string(),
+            a,
             b,
             root_key,
             generation,
@@ -384,6 +401,8 @@ mod tests {
             None,
         );
         let sb = PeerSession::new(
+            "net1".to_string(),
+            b,
             a,
             root_key,
             generation,
@@ -406,6 +425,81 @@ mod tests {
         sb.encrypt_payload(b, a, &mut pkt2).unwrap();
         sa.decrypt_payload(b, a, &mut pkt2).unwrap();
         assert_eq!(pkt2.payload(), plaintext2);
+    }
+
+    #[test]
+    fn peer_session_kdf_context_binds_network_and_peer_pair() {
+        let a: PeerId = 10;
+        let b: PeerId = 20;
+        let c: PeerId = 30;
+        let root_key = [9u8; 32];
+
+        let sa = PeerSession::new(
+            "net1".to_string(),
+            a,
+            b,
+            root_key,
+            1,
+            0,
+            "aes-256-gcm".to_string(),
+            "aes-256-gcm".to_string(),
+            None,
+        );
+        let sb = PeerSession::new(
+            "net1".to_string(),
+            b,
+            a,
+            root_key,
+            1,
+            0,
+            "aes-256-gcm".to_string(),
+            "aes-256-gcm".to_string(),
+            None,
+        );
+        let wrong_peer = PeerSession::new(
+            "net1".to_string(),
+            c,
+            a,
+            root_key,
+            1,
+            0,
+            "aes-256-gcm".to_string(),
+            "aes-256-gcm".to_string(),
+            None,
+        );
+        let wrong_network = PeerSession::new(
+            "net2".to_string(),
+            b,
+            a,
+            root_key,
+            1,
+            0,
+            "aes-256-gcm".to_string(),
+            "aes-256-gcm".to_string(),
+            None,
+        );
+
+        let plaintext = b"pairwise bound";
+        let mut pkt = ZCPacket::new_with_payload(plaintext);
+        pkt.fill_peer_manager_hdr(a as u32, b as u32, 0);
+        sa.encrypt_payload(a, b, &mut pkt).unwrap();
+
+        let mut wrong_peer_pkt = pkt.clone();
+        assert!(
+            wrong_peer
+                .decrypt_payload(a, b, &mut wrong_peer_pkt)
+                .is_err()
+        );
+
+        let mut wrong_network_pkt = pkt.clone();
+        assert!(
+            wrong_network
+                .decrypt_payload(a, b, &mut wrong_network_pkt)
+                .is_err()
+        );
+
+        sb.decrypt_payload(a, b, &mut pkt).unwrap();
+        assert_eq!(pkt.payload(), plaintext);
     }
 
     #[test]

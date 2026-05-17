@@ -424,6 +424,7 @@ impl RelayPeerMap {
             .peer_session_store
             .apply_initiator_action(
                 &session_key,
+                self.my_peer_id,
                 session_action,
                 msg2_pb.b_session_generation,
                 root_key_bytes,
@@ -570,6 +571,7 @@ impl RelayPeerMap {
             .peer_session_store
             .upsert_responder_session(
                 &key,
+                self.my_peer_id,
                 msg1_pb.a_session_generation,
                 algo.clone(),
                 msg1_pb.client_encryption_algorithm.clone(),

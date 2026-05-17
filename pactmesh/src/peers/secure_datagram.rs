@@ -204,9 +204,36 @@ impl SyncRxGrace {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecureDatagramKdfContext {
+    network_name: String,
+    low_peer_id: u32,
+    high_peer_id: u32,
+}
+
+impl SecureDatagramKdfContext {
+    pub fn new(network_name: String, local_peer_id: u32, remote_peer_id: u32) -> Self {
+        let low_peer_id = local_peer_id.min(remote_peer_id);
+        let high_peer_id = local_peer_id.max(remote_peer_id);
+        Self {
+            network_name,
+            low_peer_id,
+            high_peer_id,
+        }
+    }
+
+    fn update_hmac(&self, hmac: &mut HmacSha256) {
+        hmac.update(&(self.network_name.len() as u32).to_be_bytes());
+        hmac.update(self.network_name.as_bytes());
+        hmac.update(&self.low_peer_id.to_be_bytes());
+        hmac.update(&self.high_peer_id.to_be_bytes());
+    }
+}
+
 pub struct SecureDatagramSession {
     root_key: RwLock<[u8; 32]>,
     session_generation: AtomicU32,
+    kdf_context: Option<SecureDatagramKdfContext>,
 
     send_epoch: AtomicU32,
     send_seq: [AtomicU64; 2],
@@ -230,6 +257,7 @@ impl std::fmt::Debug for SecureDatagramSession {
         f.debug_struct("SecureDatagramSession")
             .field("root_key", &self.root_key)
             .field("session_generation", &self.session_generation)
+            .field("kdf_context", &self.kdf_context)
             .field("send_epoch", &self.send_epoch)
             .field("send_seq", &self.send_seq)
             .field("send_epoch_started_ms", &self.send_epoch_started_ms)
@@ -262,6 +290,24 @@ impl SecureDatagramSession {
         send_cipher_algorithm: String,
         recv_cipher_algorithm: String,
     ) -> Self {
+        Self::new_with_kdf_context(
+            root_key,
+            session_generation,
+            initial_epoch,
+            send_cipher_algorithm,
+            recv_cipher_algorithm,
+            None,
+        )
+    }
+
+    pub fn new_with_kdf_context(
+        root_key: [u8; 32],
+        session_generation: u32,
+        initial_epoch: u32,
+        send_cipher_algorithm: String,
+        recv_cipher_algorithm: String,
+        kdf_context: Option<SecureDatagramKdfContext>,
+    ) -> Self {
         let rx_slots = [
             [EpochRxSlot::default(), EpochRxSlot::default()],
             [EpochRxSlot::default(), EpochRxSlot::default()],
@@ -274,6 +320,7 @@ impl SecureDatagramSession {
         Self {
             root_key: RwLock::new(root_key),
             session_generation: AtomicU32::new(session_generation),
+            kdf_context,
             send_epoch: AtomicU32::new(initial_epoch),
             send_seq: [AtomicU64::new(0), AtomicU64::new(0)],
             send_epoch_started_ms: AtomicU64::new(now_ms),
@@ -395,13 +442,14 @@ impl SecureDatagramSession {
         extract.update(&root_key);
         let prk = extract.finalize().into_bytes();
 
-        let mut info = Vec::with_capacity(9 + 4 + 1);
-        info.extend_from_slice(b"et-traffic");
-        info.extend_from_slice(&epoch.to_be_bytes());
-        info.push(dir.idx() as u8);
-
         let mut expand = HmacSha256::new_from_slice(&prk).unwrap();
-        expand.update(&info);
+        expand.update(b"pactmesh secure datagram traffic v1");
+        expand.update(&self.session_generation().to_be_bytes());
+        expand.update(&epoch.to_be_bytes());
+        expand.update(&[dir.idx() as u8]);
+        if let Some(ctx) = &self.kdf_context {
+            ctx.update_hmac(&mut expand);
+        }
         expand.update(&[1u8]);
         let okm = expand.finalize().into_bytes();
         let mut key = [0u8; 32];
