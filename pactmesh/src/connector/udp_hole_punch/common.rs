@@ -1,3 +1,6 @@
+#[cfg(target_os = "windows")]
+use anyhow::Context;
+
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::Arc,
@@ -227,6 +230,10 @@ impl UdpSocketArray {
     }
 
     pub async fn add_new_socket(&self, socket: Arc<UdpSocket>) -> Result<(), anyhow::Error> {
+        #[cfg(target_os = "windows")]
+        crate::arch::windows::disable_connection_reset(socket.as_ref())
+            .with_context(|| "failed to disable UDP connection reset for hole punch socket")?;
+
         let socket_map = self.sockets.clone();
         let local_addr = socket.local_addr()?;
         let intreast_tids = self.intreast_tids.clone();
@@ -238,8 +245,12 @@ impl UdpSocketArray {
                 let mut buf = [0u8; UDP_TUNNEL_HEADER_SIZE + HOLE_PUNCH_PACKET_BODY_LEN as usize];
                 tracing::trace!(?local_addr, "udp socket added");
                 loop {
-                    let Ok((len, addr)) = socket.recv_from(&mut buf).await else {
-                        break;
+                    let (len, addr) = match socket.recv_from(&mut buf).await {
+                        Ok(ret) => ret,
+                        Err(err) => {
+                            tracing::debug!(?err, ?local_addr, "udp socket recv loop ended");
+                            break;
+                        }
                     };
 
                     tracing::debug!(?len, ?addr, "got raw packet");
