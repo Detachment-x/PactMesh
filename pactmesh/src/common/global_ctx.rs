@@ -31,6 +31,7 @@ use crate::{
     tunnel::matches_protocol,
 };
 use crossbeam::atomic::AtomicCell;
+use sha2::{Digest, Sha256};
 use socket2::Protocol;
 
 pub type NetworkIdentity = crate::common::config::NetworkIdentity;
@@ -194,6 +195,7 @@ pub struct GlobalCtx {
     pub network: NetworkIdentity,
     pub trust_context:
         tokio::sync::RwLock<Option<Arc<crate::common::trust_context::TrustDomainContext>>>,
+    trust_data_keys: ArcSwap<TrustDataKeys>,
 
     event_bus: EventBus,
 
@@ -291,6 +293,7 @@ impl GlobalCtx {
             net_ns: net_ns.clone(),
             network,
             trust_context: tokio::sync::RwLock::new(None),
+            trust_data_keys: ArcSwap::new(Arc::new(TrustDataKeys::zero())),
 
             event_bus,
             cached_ipv4: AtomicCell::new(None),
@@ -465,14 +468,12 @@ impl GlobalCtx {
     pub fn flags_arc(&self) -> Arc<Flags> {
         self.flags.load_full()
     }
-    // FIXME(§10): trust-derived key path; zero-placeholder during transition
     pub fn get_128_key(&self) -> [u8; 16] {
-        [0u8; 16]
+        self.trust_data_keys.load().key_128
     }
 
-    // FIXME(§10): trust-derived key path; zero-placeholder during transition
     pub fn get_256_key(&self) -> [u8; 32] {
-        [0u8; 32]
+        self.trust_data_keys.load().key_256
     }
     pub fn enable_exit_node(&self) -> bool {
         self.flags.load().enable_exit_node || cfg!(target_env = "ohos")
@@ -641,6 +642,47 @@ impl GlobalCtx {
     ) {
         *self.trust_context.write().await = Some(ctx);
     }
+
+    pub fn set_trust_data_keys_from_network_state(&self, state: &crate::trust::SignedNetworkState) {
+        self.trust_data_keys
+            .store(Arc::new(TrustDataKeys::derive_from_network_state(state)));
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TrustDataKeys {
+    key_128: [u8; 16],
+    key_256: [u8; 32],
+}
+
+impl TrustDataKeys {
+    fn zero() -> Self {
+        Self {
+            key_128: [0u8; 16],
+            key_256: [0u8; 32],
+        }
+    }
+
+    fn derive_from_network_state(state: &crate::trust::SignedNetworkState) -> Self {
+        let base = derive_trust_key(state, b"pactmesh data-plane key v1");
+        let key_128_full = derive_trust_key(state, b"pactmesh data-plane key v1 aes-128");
+        let mut key_128 = [0u8; 16];
+        key_128.copy_from_slice(&key_128_full[..16]);
+        Self {
+            key_128,
+            key_256: base,
+        }
+    }
+}
+
+fn derive_trust_key(state: &crate::trust::SignedNetworkState, label: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(label);
+    hasher.update(state.details.trust_domain_id.as_bytes());
+    hasher.update(state.details.network_local_id.as_str().as_bytes());
+    hasher.update(state.details.version.to_be_bytes());
+    hasher.update(&state.signature.0);
+    hasher.finalize().into()
 }
 
 #[cfg(test)]
@@ -742,6 +784,45 @@ pub mod tests {
         assert!(feature_flags.support_conn_list_sync);
         assert!(feature_flags.avoid_relay_data);
         assert!(feature_flags.is_public_server);
+    }
+
+    #[test]
+    fn trust_data_keys_are_shared_for_same_network_state_and_rotate_with_version() {
+        use crate::trust::{
+            NetworkLocalId, NetworkStatePayload, TrustDomainRoot, UnsignedNetworkState,
+        };
+
+        fn state(root: &TrustDomainRoot, version: u64) -> crate::trust::SignedNetworkState {
+            UnsignedNetworkState {
+                trust_domain_id: root.id(),
+                network_local_id: NetworkLocalId::try_from_str("office-net").unwrap(),
+                version,
+                payload: NetworkStatePayload {
+                    member_cert_index: Vec::new(),
+                    revoked_certs: Vec::new(),
+                    disabled_certs: Vec::new(),
+                    acl: Vec::new(),
+                    routes: Vec::new(),
+                    peer_hints: Vec::new(),
+                },
+            }
+            .sign(root)
+        }
+
+        let root = TrustDomainRoot::generate();
+        let state_v1 = state(&root, 1);
+        let state_v1_again = state_v1.clone();
+        let state_v2 = state(&root, 2);
+
+        let k1 = TrustDataKeys::derive_from_network_state(&state_v1);
+        let k1_again = TrustDataKeys::derive_from_network_state(&state_v1_again);
+        let k2 = TrustDataKeys::derive_from_network_state(&state_v2);
+
+        assert_ne!(k1.key_128, [0u8; 16]);
+        assert_ne!(k1.key_256, [0u8; 32]);
+        assert_eq!(k1.key_128, k1_again.key_128);
+        assert_eq!(k1.key_256, k1_again.key_256);
+        assert_ne!(k1.key_256, k2.key_256);
     }
 
     #[tokio::test]

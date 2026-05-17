@@ -28,6 +28,10 @@ impl TrustDomainId {
     pub fn to_base64(&self) -> String {
         URL_SAFE_NO_PAD.encode(self.0)
     }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for TrustDomainId {
@@ -55,6 +59,10 @@ impl MemberCertFingerprint {
     /// Render as base64 for human display.
     pub fn to_base64(&self) -> String {
         URL_SAFE_NO_PAD.encode(self.0)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 

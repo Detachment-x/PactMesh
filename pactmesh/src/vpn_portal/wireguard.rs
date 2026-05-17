@@ -31,9 +31,8 @@ use super::VpnPortal;
 
 type WgPeerIpTable = Arc<DashMap<Ipv4Addr, Arc<ClientEntry>>>;
 
-pub(crate) fn get_wg_config_for_portal(_nid: &NetworkIdentity) -> WgConfig {
-    // FIXME(§10): trust-derived key path; zero-placeholder during transition
-    let key_seed = String::new();
+pub(crate) fn get_wg_config_for_portal(_nid: &NetworkIdentity, key_seed: [u8; 32]) -> WgConfig {
+    let key_seed = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, key_seed);
     WgConfig::new_for_portal(&key_seed, &key_seed)
 }
 
@@ -56,7 +55,7 @@ struct WireGuardImpl {
 impl WireGuardImpl {
     fn new(global_ctx: ArcGlobalCtx, peer_mgr: Arc<PeerManager>) -> Self {
         let nid = global_ctx.get_network_identity();
-        let wg_config = get_wg_config_for_portal(&nid);
+        let wg_config = get_wg_config_for_portal(&nid, global_ctx.get_256_key());
 
         let vpn_cfg = global_ctx.config.get_vpn_portal_config().unwrap();
         let listener_addr = vpn_cfg.wireguard_listen;

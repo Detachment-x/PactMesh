@@ -15,6 +15,7 @@ pub mod acl;
 pub mod acl_error;
 pub mod acl_match;
 pub mod acl_validate;
+pub mod admin;
 pub mod cache;
 pub mod cbor;
 pub mod config_sync_client;
@@ -47,6 +48,10 @@ pub use acl::{
 pub use acl_error::AclError;
 pub use acl_match::{PacketTuple, PeerMatchContext, TagsMap, decide, selector_match};
 pub use acl_validate::{validate_for_receiving, validate_for_signing};
+pub use admin::{
+    AdminCapabilities, AdminGrant, AdminGrantParseError, AdminGrantVerifyError, UnsignedAdminGrant,
+    sign_admin_operation,
+};
 pub use cache::CachedMemberCert;
 pub use cbor::{from_cbor, to_canonical_cbor, unwrap_armored, wrap_armored};
 pub use device_view::{

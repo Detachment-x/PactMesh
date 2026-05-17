@@ -1072,7 +1072,10 @@ pub async fn wireguard_vpn_portal(#[values(true, false)] test_v6: bool) {
 
     let net_ns = NetNS::new(Some("net_d".into()));
     let _g = net_ns.guard();
-    let wg_cfg = get_wg_config_for_portal(&insts[2].get_global_ctx().get_network_identity());
+    let wg_cfg = get_wg_config_for_portal(
+        &insts[2].get_global_ctx().get_network_identity(),
+        insts[2].get_global_ctx().get_256_key(),
+    );
     run_wireguard_client(
         dst_socket_addr,
         Key::try_from(wg_cfg.my_public_key()).unwrap(),

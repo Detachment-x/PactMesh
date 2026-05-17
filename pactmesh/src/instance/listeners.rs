@@ -35,8 +35,10 @@ pub fn create_listener_by_url(
             IpScheme::Wg => {
                 use crate::tunnel::wireguard::{WgConfig, WgTunnelListener};
                 let nid = global_ctx.get_network_identity();
-                // FIXME(§10): trust-derived key path; zero-placeholder during transition
-                let wg_psk = String::new();
+                let wg_psk = base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    global_ctx.get_256_key(),
+                );
                 let wg_config = WgConfig::new_from_network_identity(&nid.network_name, &wg_psk);
                 WgTunnelListener::new(l.clone(), wg_config).boxed()
             }

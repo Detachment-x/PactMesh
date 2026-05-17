@@ -11,6 +11,8 @@ mod acl_match_test;
 mod acl_test;
 #[path = "trust/acl_validate_test.rs"]
 mod acl_validate_test;
+#[path = "trust/admin_grant_test.rs"]
+mod admin_grant_test;
 #[path = "trust/bootstrap_self_test.rs"]
 mod bootstrap_self_test;
 #[path = "trust/bootstrap_test.rs"]

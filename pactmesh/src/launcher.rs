@@ -191,6 +191,7 @@ pub async fn inject_trust_pool_from_config(
         trust_domain.domain_dir.as_path(),
         &trust_domain.network_local_id,
     )?;
+    global_ctx.set_trust_data_keys_from_network_state(&self_state);
     pool.apply_network_state(self_state)
         .map_err(|err| anyhow::anyhow!("failed to apply self network_state: {err}"))?;
 
@@ -340,6 +341,13 @@ impl EasyTierLauncher {
         // Subscribe to global context events
         let global_ctx = instance.get_global_ctx();
         if let Some(trust_ctx) = trust_ctx {
+            if let Some(trust_domain) = cfg.get_trust_domain() {
+                let self_state = load_local_network_state(
+                    trust_domain.domain_dir.as_path(),
+                    &trust_domain.network_local_id,
+                )?;
+                global_ctx.set_trust_data_keys_from_network_state(&self_state);
+            }
             global_ctx.set_trust_context(trust_ctx).await;
         }
         let data_c = data.clone();
