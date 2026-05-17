@@ -108,7 +108,10 @@ impl HostResolverIter {
             match lookup_host(&host).await {
                 Ok(ips) => {
                     self.ips = ips
-                        .filter(|x| if use_ipv6 { x.is_ipv6() } else { x.is_ipv4() })
+                        .filter(|x| {
+                            (if use_ipv6 { x.is_ipv6() } else { x.is_ipv4() })
+                                && is_public_stun_server_addr(x.ip())
+                        })
                         .choose_multiple(&mut rand::thread_rng(), self.max_ip_per_domain as usize);
 
                     if self.ips.is_empty() {
@@ -124,6 +127,55 @@ impl HostResolverIter {
 
         Some(self.ips.remove(0))
     }
+}
+
+fn is_public_stun_server_addr(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_public_stun_server_ipv4(ip),
+        IpAddr::V6(ip) => is_public_stun_server_ipv6(ip),
+    }
+}
+
+fn is_public_stun_server_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+
+    if ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || ip.is_documentation()
+    {
+        return false;
+    }
+
+    // 100.64.0.0/10 is shared CGNAT space; 198.18.0.0/15 is commonly used
+    // by proxy fake-ip DNS. Neither can be a valid public STUN server address.
+    if octets[0] == 100 && (octets[1] & 0b1100_0000) == 64 {
+        return false;
+    }
+    if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
+        return false;
+    }
+
+    true
+}
+
+fn is_public_stun_server_ipv6(ip: Ipv6Addr) -> bool {
+    if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+        return false;
+    }
+
+    let segments = ip.segments();
+    let first = segments[0];
+
+    // fc00::/7 unique local, fe80::/10 link-local.
+    if (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80 {
+        return false;
+    }
+
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -1348,6 +1400,30 @@ mod tests {
     use tokio_util::task::AbortOnDropHandle;
 
     use super::*;
+
+    #[test]
+    fn test_public_stun_server_addr_filter() {
+        assert!(is_public_stun_server_addr("8.8.8.8".parse().unwrap()));
+        assert!(is_public_stun_server_addr("1.1.1.1".parse().unwrap()));
+        assert!(is_public_stun_server_addr(
+            "2001:4860:4860::8888".parse().unwrap()
+        ));
+
+        assert!(!is_public_stun_server_addr("198.18.0.81".parse().unwrap()));
+        assert!(!is_public_stun_server_addr(
+            "198.19.255.255".parse().unwrap()
+        ));
+        assert!(!is_public_stun_server_addr("10.0.0.100".parse().unwrap()));
+        assert!(!is_public_stun_server_addr("172.16.0.1".parse().unwrap()));
+        assert!(!is_public_stun_server_addr("192.168.1.1".parse().unwrap()));
+        assert!(!is_public_stun_server_addr("100.64.0.1".parse().unwrap()));
+        assert!(!is_public_stun_server_addr("127.0.0.1".parse().unwrap()));
+        assert!(!is_public_stun_server_addr("169.254.1.1".parse().unwrap()));
+        assert!(!is_public_stun_server_addr("192.0.2.1".parse().unwrap()));
+        assert!(!is_public_stun_server_addr("::1".parse().unwrap()));
+        assert!(!is_public_stun_server_addr("fc00::1".parse().unwrap()));
+        assert!(!is_public_stun_server_addr("fe80::1".parse().unwrap()));
+    }
 
     #[tokio::test]
     async fn test_udp_nat_type_detector() {
