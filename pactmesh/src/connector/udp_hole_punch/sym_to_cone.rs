@@ -38,7 +38,14 @@ use crate::{
 use super::common::{PunchHoleServerCommon, UdpNatType, UdpSocketArray};
 
 const UDP_ARRAY_SIZE_FOR_HARD_SYM: usize = 84;
-const MAX_EASY_SYM_MAPPING_PROBES: usize = 12;
+const MAX_EASY_SYM_MAPPING_PROBES: usize = 32;
+
+fn easy_sym_predict_window(observed_span: u32) -> u32 {
+    observed_span
+        .saturating_add((UDP_ARRAY_SIZE_FOR_HARD_SYM as u32) * 16)
+        .saturating_add(512)
+        .clamp(1024, 4096)
+}
 
 pub(crate) struct PunchSymToConeHoleServer {
     common: Arc<PunchHoleServerCommon>,
@@ -290,10 +297,7 @@ impl PunchSymToConeHoleClient {
         let last = *mapped_ports.last().unwrap();
         let base_port = if inc { first } else { last };
         let observed_span = last.saturating_sub(first) as u32;
-        let max_port_num = observed_span
-            .saturating_add((UDP_ARRAY_SIZE_FOR_HARD_SYM as u32) * 3)
-            .saturating_add(64)
-            .clamp(96, 512);
+        let max_port_num = easy_sym_predict_window(observed_span);
 
         tracing::info!(
             ?mapped_ports,
@@ -334,7 +338,7 @@ impl PunchSymToConeHoleClient {
         let ret = rpc_stub
             .send_punch_packet_easy_sym(
                 BaseController {
-                    timeout_ms: 4000,
+                    timeout_ms: 12000,
                     trace_id: 0,
                     ..Default::default()
                 },
@@ -603,6 +607,14 @@ pub mod tests {
         proto::common::NatType,
         tunnel::common::tests::wait_for_condition,
     };
+
+    #[test]
+    fn easy_sym_predict_window_is_wide_enough_for_real_nat_jitter() {
+        assert_eq!(super::easy_sym_predict_window(0), 1856);
+        assert_eq!(super::easy_sym_predict_window(53), 1909);
+        assert_eq!(super::easy_sym_predict_window(554), 2410);
+        assert_eq!(super::easy_sym_predict_window(10_000), 4096);
+    }
 
     #[tokio::test]
     #[serial_test::serial]
