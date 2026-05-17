@@ -38,6 +38,7 @@ use crate::{
 use super::common::{PunchHoleServerCommon, UdpNatType, UdpSocketArray};
 
 const UDP_ARRAY_SIZE_FOR_HARD_SYM: usize = 84;
+const MAX_EASY_SYM_MAPPING_PROBES: usize = 12;
 
 pub(crate) struct PunchSymToConeHoleServer {
     common: Arc<PunchHoleServerCommon>,
@@ -247,30 +248,69 @@ impl PunchSymToConeHoleClient {
         wlocked.take();
     }
 
-    async fn get_base_port_for_easy_sym(&self, my_nat_info: UdpNatType) -> Option<u16> {
-        let global_ctx = self.peer_mgr.get_global_ctx();
-        if my_nat_info.is_easy_sym() {
-            match global_ctx
-                .get_stun_info_collector()
-                .get_udp_port_mapping(0)
+    async fn get_base_port_for_easy_sym(
+        &self,
+        my_nat_info: UdpNatType,
+        udp_array: &UdpSocketArray,
+    ) -> Option<(u16, u32)> {
+        if !my_nat_info.is_easy_sym() {
+            return None;
+        }
+
+        let inc = my_nat_info.get_inc_of_easy_sym().unwrap_or(true);
+        let stun_collector = self.peer_mgr.get_global_ctx().get_stun_info_collector();
+        let mut mapped_ports = Vec::new();
+
+        for socket in udp_array
+            .sockets()
+            .into_iter()
+            .take(MAX_EASY_SYM_MAPPING_PROBES)
+        {
+            match stun_collector
+                .get_udp_port_mapping_with_socket(socket)
                 .await
             {
-                Ok(addr) => Some(addr.port()),
+                Ok(addr) => mapped_ports.push(addr.port()),
+                ret => tracing::warn!(?ret, "failed to map udp array socket for easy sym"),
+            }
+        }
+
+        if mapped_ports.is_empty() {
+            match stun_collector.get_udp_port_mapping(0).await {
+                Ok(addr) => mapped_ports.push(addr.port()),
                 ret => {
-                    tracing::warn!(?ret, "failed to get udp port mapping for easy sym");
-                    None
+                    tracing::warn!(?ret, "failed to get fallback udp port mapping for easy sym");
+                    return None;
                 }
             }
-        } else {
-            None
         }
+
+        mapped_ports.sort_unstable();
+        let first = *mapped_ports.first().unwrap();
+        let last = *mapped_ports.last().unwrap();
+        let base_port = if inc { first } else { last };
+        let observed_span = last.saturating_sub(first) as u32;
+        let max_port_num = observed_span
+            .saturating_add((UDP_ARRAY_SIZE_FOR_HARD_SYM as u32) * 3)
+            .saturating_add(64)
+            .clamp(96, 512);
+
+        tracing::info!(
+            ?mapped_ports,
+            ?base_port,
+            ?max_port_num,
+            ?inc,
+            "easy symmetric nat prediction based on udp array sockets"
+        );
+
+        Some((base_port, max_port_num))
     }
 
     async fn remote_send_hole_punch_packet_predicable<
         S: UdpHolePunchRpc<Controller = BaseController>,
     >(
         rpc_stub: S,
-        base_port_for_easy_sym: Option<u16>,
+        base_port_for_easy_sym: Option<(u16, u32)>,
         my_nat_info: UdpNatType,
         remote_mapped_addr: crate::proto::common::SocketAddr,
         public_ips: Vec<Ipv4Addr>,
@@ -279,12 +319,15 @@ impl PunchSymToConeHoleClient {
         let Some(inc) = my_nat_info.get_inc_of_easy_sym() else {
             return;
         };
+        let Some((base_port_num, max_port_num)) = base_port_for_easy_sym else {
+            return;
+        };
         let req = SendPunchPacketEasySymRequest {
             listener_mapped_addr: remote_mapped_addr.into(),
             public_ips: public_ips.clone().into_iter().map(|x| x.into()).collect(),
             transaction_id: tid,
-            base_port_num: base_port_for_easy_sym.unwrap() as u32,
-            max_port_num: 50,
+            base_port_num: base_port_num as u32,
+            max_port_num,
             is_incremental: inc,
         };
         tracing::debug!(?req, "send punch packet for easy sym start");
@@ -474,7 +517,9 @@ impl PunchSymToConeHoleClient {
         defer! { udp_array.remove_intreast_tid(tid);}
 
         let port_index = *last_port_idx as u32;
-        let base_port_for_easy_sym = self.get_base_port_for_easy_sym(my_nat_info).await;
+        let base_port_for_easy_sym = self
+            .get_base_port_for_easy_sym(my_nat_info, &udp_array)
+            .await;
         udp_array
             .send_with_all(&packet, remote_mapped_addr.into())
             .await?;

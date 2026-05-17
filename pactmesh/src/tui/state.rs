@@ -46,6 +46,7 @@ pub struct JoinRow {
 
 #[derive(Debug, Default, Clone)]
 pub struct Snapshot {
+    pub setup: SetupSnapshot,
     pub node_info: Option<NodeInfo>,
     pub stun: StunInfo,
     pub peers: Vec<PeerRoutePair>,
@@ -53,6 +54,15 @@ pub struct Snapshot {
     pub connectors: Vec<Connector>,
     pub last_error: Option<String>,
     pub last_refresh_at: Option<SystemTime>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct SetupSnapshot {
+    pub trust_domains_dir: Option<PathBuf>,
+    pub trust_domain_count: usize,
+    pub network_count: usize,
+    pub root_domain_count: usize,
+    pub member_network_count: usize,
 }
 
 pub fn new_state() -> AppState {
@@ -94,6 +104,7 @@ pub async fn refresh_all(
     state: &AppState,
 ) -> Result<()> {
     let mut last_err: Option<String> = None;
+    let setup = snapshot_setup_state().unwrap_or_default();
 
     let (node, stun, peers) = fetch_node_peers(rpc, instance)
         .await
@@ -120,6 +131,7 @@ pub async fn refresh_all(
     };
 
     let new = Snapshot {
+        setup,
         node_info: node,
         stun,
         peers,
@@ -130,6 +142,51 @@ pub async fn refresh_all(
     };
     state.store(Arc::new(new));
     Ok(())
+}
+
+pub fn snapshot_setup_state() -> Result<SetupSnapshot> {
+    let base = match pnw_trust_domains_dir() {
+        Ok(b) => b,
+        Err(_) => return Ok(SetupSnapshot::default()),
+    };
+    let entries = match std::fs::read_dir(&base) {
+        Ok(it) => it,
+        Err(_) => {
+            return Ok(SetupSnapshot {
+                trust_domains_dir: Some(base),
+                ..Default::default()
+            });
+        }
+    };
+    let mut snap = SetupSnapshot {
+        trust_domains_dir: Some(base),
+        ..Default::default()
+    };
+    for td_entry in entries.flatten() {
+        let td_path = td_entry.path();
+        if !td_path.is_dir() {
+            continue;
+        }
+        snap.trust_domain_count += 1;
+        if td_path.join("sk_root.age").is_file() {
+            snap.root_domain_count += 1;
+        }
+        let networks_dir = td_path.join("networks");
+        let Ok(net_iter) = std::fs::read_dir(&networks_dir) else {
+            continue;
+        };
+        for net_entry in net_iter.flatten() {
+            let net_path = net_entry.path();
+            if !net_path.is_dir() {
+                continue;
+            }
+            snap.network_count += 1;
+            if net_path.join("member_cert.pem").is_file() {
+                snap.member_network_count += 1;
+            }
+        }
+    }
+    Ok(snap)
 }
 
 async fn fetch_node_peers(

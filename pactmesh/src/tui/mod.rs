@@ -35,7 +35,7 @@ use tokio::sync::{Mutex, mpsc};
 use crate::proto::api::instance::InstanceIdentifier;
 use crate::tui::panels::logs::{GrepTemplate, LevelFilter, LogsView};
 
-use self::cmd::Cmd;
+use self::cmd::{Cmd, DaemonAction};
 use self::log_tail::LogTail;
 use self::state::{
     AppState, JoinRow, RpcClient, new_state, record_error, refresh_all, reject_join_request,
@@ -43,13 +43,15 @@ use self::state::{
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Tab {
+    Setup,
     Node,
     Peers,
     Joins,
     Connectors,
     Logs,
 }
-const TABS: [Tab; 5] = [
+const TABS: [Tab; 6] = [
+    Tab::Setup,
     Tab::Node,
     Tab::Peers,
     Tab::Joins,
@@ -60,6 +62,7 @@ const TABS: [Tab; 5] = [
 fn tab_label(t: Tab) -> &'static str {
     match t {
         Tab::Node => "Node",
+        Tab::Setup => "Setup",
         Tab::Peers => "Peers",
         Tab::Joins => "Joins",
         Tab::Connectors => "Connectors",
@@ -75,11 +78,63 @@ const LOG_CAP: usize = 5000;
 enum InputMode {
     Normal,
     Command(String),
+    SetupWizard(SetupWizard),
     Filter(String),
     Passphrase { buf: String, action: PendingAction },
     RejectReason { row: JoinRow, reason: String },
     Help(&'static str),
     Detail(String),
+}
+
+enum SetupWizard {
+    Root {
+        fields: SetupRootFields,
+        step: RootSetupStep,
+        input: String,
+    },
+    Join {
+        fields: SetupJoinFields,
+        step: JoinSetupStep,
+        input: String,
+    },
+}
+
+#[derive(Default)]
+struct SetupRootFields {
+    network: String,
+    label: String,
+    seed: String,
+    listen_port: String,
+    rpc_port: String,
+    domain_label: String,
+}
+
+#[derive(Default)]
+struct SetupJoinFields {
+    invite: String,
+    network: String,
+    label: String,
+    rpc_port: String,
+}
+
+#[derive(Copy, Clone)]
+enum RootSetupStep {
+    Network,
+    Label,
+    Seed,
+    ListenPort,
+    RpcPort,
+    DomainLabel,
+    Confirm,
+}
+
+#[derive(Copy, Clone)]
+enum JoinSetupStep {
+    Invite,
+    Network,
+    Label,
+    RpcPort,
+    Confirm,
 }
 
 enum PendingAction {
@@ -161,7 +216,7 @@ impl UiState {
 
 fn row_count(snap: &state::Snapshot, tab: Tab) -> usize {
     match tab {
-        Tab::Node | Tab::Logs => 0,
+        Tab::Setup | Tab::Node | Tab::Logs => 0,
         Tab::Peers => snap.peers.len(),
         Tab::Joins => snap.pending_joins.len(),
         Tab::Connectors => snap.connectors.len(),
@@ -341,6 +396,9 @@ async fn event_loop(
                 }
                 _ => ui.mode = InputMode::Command(buf),
             },
+            InputMode::SetupWizard(wizard) => {
+                handle_setup_wizard_key(&mut ui, wizard, k.code, terminal);
+            }
             InputMode::Filter(mut buf) => match k.code {
                 KeyCode::Esc => {
                     ui.log_substring = None;
@@ -578,7 +636,77 @@ fn dispatch_cmd(
             ui.flash_info("not in TUI v0 — use: pactmesh trust revoke <td> <net> <fp>");
         }
         Cmd::Reconnect(_) | Cmd::RestartConnector(_) => {
-            ui.flash_info("no daemon RPC for reconnect — try :!systemctl restart pactmesh-core");
+            ui.flash_info("connector-level reconnect is not exposed yet — use :daemon restart");
+        }
+        Cmd::Daemon { action, service } => {
+            if let Err(e) = run_daemon_service_action(action, service.as_deref(), terminal) {
+                ui.flash_err(format!("daemon command failed: {e:#}"));
+            } else {
+                ui.flash_ok("daemon command finished");
+                ui.force_refresh = true;
+            }
+        }
+        Cmd::SetupRootWizard => {
+            ui.mode = InputMode::SetupWizard(SetupWizard::Root {
+                fields: SetupRootFields {
+                    network: "office-net".to_string(),
+                    label: "root-a".to_string(),
+                    seed: "tcp://<public-ip>:11010".to_string(),
+                    listen_port: "11010".to_string(),
+                    rpc_port: "15888".to_string(),
+                    domain_label: "home".to_string(),
+                },
+                step: RootSetupStep::Network,
+                input: "office-net".to_string(),
+            });
+        }
+        Cmd::SetupRoot {
+            network,
+            label,
+            seed,
+            listen_port,
+            rpc_port,
+            domain_label,
+        } => {
+            if let Err(e) = run_setup_root(
+                &network,
+                &label,
+                &seed,
+                &listen_port,
+                &rpc_port,
+                domain_label.as_deref(),
+                terminal,
+            ) {
+                ui.flash_err(format!("setup-root failed: {e:#}"));
+            } else {
+                ui.flash_ok("setup-root finished");
+                ui.force_refresh = true;
+            }
+        }
+        Cmd::SetupJoinWizard => {
+            ui.mode = InputMode::SetupWizard(SetupWizard::Join {
+                fields: SetupJoinFields {
+                    invite: "privatenetwork://join?...".to_string(),
+                    network: "office-net".to_string(),
+                    label: "node-b".to_string(),
+                    rpc_port: "15889".to_string(),
+                },
+                step: JoinSetupStep::Invite,
+                input: "privatenetwork://join?...".to_string(),
+            });
+        }
+        Cmd::SetupJoin {
+            invite,
+            network,
+            label,
+            rpc_port,
+        } => {
+            if let Err(e) = run_setup_join(&invite, &network, &label, &rpc_port, terminal) {
+                ui.flash_err(format!("setup-join failed: {e:#}"));
+            } else {
+                ui.flash_ok("setup-join finished");
+                ui.force_refresh = true;
+            }
         }
         Cmd::ExportBundle(_) => {
             ui.flash_info(
@@ -608,6 +736,218 @@ fn find_pending(snap: &state::Snapshot, prefix: &str) -> Result<JoinRow, String>
         1 => Ok(matches[0].clone()),
         n => Err(format!("ambiguous prefix '{prefix}' matches {n} requests")),
     }
+}
+
+fn handle_setup_wizard_key(
+    ui: &mut UiState,
+    wizard: SetupWizard,
+    code: KeyCode,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) {
+    match code {
+        KeyCode::Esc => ui.flash_info("setup cancelled"),
+        KeyCode::Backspace => match wizard {
+            SetupWizard::Root {
+                fields,
+                step,
+                mut input,
+            } => {
+                input.pop();
+                ui.mode = InputMode::SetupWizard(SetupWizard::Root {
+                    fields,
+                    step,
+                    input,
+                });
+            }
+            SetupWizard::Join {
+                fields,
+                step,
+                mut input,
+            } => {
+                input.pop();
+                ui.mode = InputMode::SetupWizard(SetupWizard::Join {
+                    fields,
+                    step,
+                    input,
+                });
+            }
+        },
+        KeyCode::Char(c) => match wizard {
+            SetupWizard::Root {
+                fields,
+                step,
+                mut input,
+            } => {
+                input.push(c);
+                ui.mode = InputMode::SetupWizard(SetupWizard::Root {
+                    fields,
+                    step,
+                    input,
+                });
+            }
+            SetupWizard::Join {
+                fields,
+                step,
+                mut input,
+            } => {
+                input.push(c);
+                ui.mode = InputMode::SetupWizard(SetupWizard::Join {
+                    fields,
+                    step,
+                    input,
+                });
+            }
+        },
+        KeyCode::Enter => match wizard {
+            SetupWizard::Root {
+                mut fields,
+                step,
+                input,
+            } => handle_root_setup_enter(ui, &mut fields, step, input, terminal),
+            SetupWizard::Join {
+                mut fields,
+                step,
+                input,
+            } => handle_join_setup_enter(ui, &mut fields, step, input, terminal),
+        },
+        _ => ui.mode = InputMode::SetupWizard(wizard),
+    }
+}
+
+fn handle_root_setup_enter(
+    ui: &mut UiState,
+    fields: &mut SetupRootFields,
+    step: RootSetupStep,
+    input: String,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) {
+    let value = input.trim().to_string();
+    match step {
+        RootSetupStep::Network => {
+            fields.network = value;
+            ui.mode = root_setup_mode(std::mem::take(fields), RootSetupStep::Label);
+        }
+        RootSetupStep::Label => {
+            fields.label = value;
+            ui.mode = root_setup_mode(std::mem::take(fields), RootSetupStep::Seed);
+        }
+        RootSetupStep::Seed => {
+            fields.seed = value;
+            ui.mode = root_setup_mode(std::mem::take(fields), RootSetupStep::ListenPort);
+        }
+        RootSetupStep::ListenPort => {
+            fields.listen_port = value;
+            ui.mode = root_setup_mode(std::mem::take(fields), RootSetupStep::RpcPort);
+        }
+        RootSetupStep::RpcPort => {
+            fields.rpc_port = value;
+            ui.mode = root_setup_mode(std::mem::take(fields), RootSetupStep::DomainLabel);
+        }
+        RootSetupStep::DomainLabel => {
+            fields.domain_label = value;
+            ui.mode = root_setup_mode(std::mem::take(fields), RootSetupStep::Confirm);
+        }
+        RootSetupStep::Confirm => {
+            if value.eq_ignore_ascii_case("y") || value.eq_ignore_ascii_case("yes") {
+                let fields = std::mem::take(fields);
+                if let Err(e) = run_setup_root(
+                    &fields.network,
+                    &fields.label,
+                    &fields.seed,
+                    &fields.listen_port,
+                    &fields.rpc_port,
+                    Some(&fields.domain_label),
+                    terminal,
+                ) {
+                    ui.flash_err(format!("setup-root failed: {e:#}"));
+                } else {
+                    ui.flash_ok("setup-root finished");
+                    ui.force_refresh = true;
+                }
+            } else {
+                ui.flash_info("setup-root cancelled");
+            }
+        }
+    }
+}
+
+fn handle_join_setup_enter(
+    ui: &mut UiState,
+    fields: &mut SetupJoinFields,
+    step: JoinSetupStep,
+    input: String,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) {
+    let value = input.trim().to_string();
+    match step {
+        JoinSetupStep::Invite => {
+            fields.invite = value;
+            ui.mode = join_setup_mode(std::mem::take(fields), JoinSetupStep::Network);
+        }
+        JoinSetupStep::Network => {
+            fields.network = value;
+            ui.mode = join_setup_mode(std::mem::take(fields), JoinSetupStep::Label);
+        }
+        JoinSetupStep::Label => {
+            fields.label = value;
+            ui.mode = join_setup_mode(std::mem::take(fields), JoinSetupStep::RpcPort);
+        }
+        JoinSetupStep::RpcPort => {
+            fields.rpc_port = value;
+            ui.mode = join_setup_mode(std::mem::take(fields), JoinSetupStep::Confirm);
+        }
+        JoinSetupStep::Confirm => {
+            if value.eq_ignore_ascii_case("y") || value.eq_ignore_ascii_case("yes") {
+                let fields = std::mem::take(fields);
+                if let Err(e) = run_setup_join(
+                    &fields.invite,
+                    &fields.network,
+                    &fields.label,
+                    &fields.rpc_port,
+                    terminal,
+                ) {
+                    ui.flash_err(format!("setup-join failed: {e:#}"));
+                } else {
+                    ui.flash_ok("setup-join finished");
+                    ui.force_refresh = true;
+                }
+            } else {
+                ui.flash_info("setup-join cancelled");
+            }
+        }
+    }
+}
+
+fn root_setup_mode(fields: SetupRootFields, step: RootSetupStep) -> InputMode {
+    let input = match step {
+        RootSetupStep::Network => fields.network.clone(),
+        RootSetupStep::Label => fields.label.clone(),
+        RootSetupStep::Seed => fields.seed.clone(),
+        RootSetupStep::ListenPort => fields.listen_port.clone(),
+        RootSetupStep::RpcPort => fields.rpc_port.clone(),
+        RootSetupStep::DomainLabel => fields.domain_label.clone(),
+        RootSetupStep::Confirm => "yes".to_string(),
+    };
+    InputMode::SetupWizard(SetupWizard::Root {
+        fields,
+        step,
+        input,
+    })
+}
+
+fn join_setup_mode(fields: SetupJoinFields, step: JoinSetupStep) -> InputMode {
+    let input = match step {
+        JoinSetupStep::Invite => fields.invite.clone(),
+        JoinSetupStep::Network => fields.network.clone(),
+        JoinSetupStep::Label => fields.label.clone(),
+        JoinSetupStep::RpcPort => fields.rpc_port.clone(),
+        JoinSetupStep::Confirm => "yes".to_string(),
+    };
+    InputMode::SetupWizard(SetupWizard::Join {
+        fields,
+        step,
+        input,
+    })
 }
 
 fn spawn_action(
@@ -675,6 +1015,109 @@ fn run_shell(
     }
 }
 
+fn run_daemon_service_action(
+    action: DaemonAction,
+    service: Option<&str>,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let action_arg = match action {
+        DaemonAction::Start => "start",
+        DaemonAction::Stop => "stop",
+        DaemonAction::Restart => "restart",
+        DaemonAction::Status => "status",
+    };
+    let service = service.unwrap_or(env!("CARGO_PKG_NAME"));
+    run_shell(
+        &format!(
+            "{} service --name {} {}",
+            shell_quote(&exe.to_string_lossy()),
+            shell_quote(service),
+            action_arg
+        ),
+        &HashMap::new(),
+        terminal,
+    )
+}
+
+fn run_setup_root(
+    network: &str,
+    label: &str,
+    seed: &str,
+    listen_port: &str,
+    rpc_port: &str,
+    domain_label: Option<&str>,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let exe = shell_quote(&exe.to_string_lossy());
+    let domain_label = domain_label.unwrap_or("home");
+    let script = format!(
+        "set -eu\n\
+exe={exe}\n\
+core=$(dirname -- \"$exe\")/pactmesh-core\n\
+if [ ! -x \"$core\" ]; then echo \"pactmesh-core not found next to $exe: $core\" >&2; exit 1; fi\n\
+td_json=$(\"$exe\" trust create-domain --label {domain_label} --json)\n\
+printf '%s\\n' \"$td_json\"\n\
+td=$(printf '%s' \"$td_json\" | sed -n 's/.*\"trust_domain_id\":\"\\([^\"]*\\)\".*/\\1/p')\n\
+if [ -z \"$td\" ]; then echo \"failed to parse trust_domain_id\" >&2; exit 1; fi\n\
+\"$exe\" trust create-network \"$td\" {network} --json\n\
+\"$exe\" trust bootstrap-self \"$td\" {network} --device-label {label} --json\n\
+invite=$(\"$exe\" trust invite \"$td\" {network} --seed {seed} --format url)\n\
+printf '%s\\n' \"$invite\"\n\
+config_base=${{XDG_CONFIG_HOME:-$HOME/.config}}/privateNetwork\n\
+log_dir=${{PNW_TEST_HOME:-.}}\n\
+mkdir -p \"$log_dir\"\n\
+nohup \"$core\" --network-name {network} --trust-domain-dir \"$config_base/trust-domains/$td\" --network-local-id {network} --rpc-portal 127.0.0.1:{rpc_port} --listeners {listen_port} --no-tun true --disable-ipv6 true --instance-name {label} --console-log-level debug --daemon > \"$log_dir/{label}.log\" 2>&1 &\n\
+printf 'started root daemon pid=%s log=%s\\n' \"$!\" \"$log_dir/{label}.log\"\n",
+        exe = exe,
+        domain_label = shell_quote(domain_label),
+        network = shell_quote(network),
+        label = shell_quote(label),
+        seed = shell_quote(seed),
+        listen_port = shell_quote(listen_port),
+        rpc_port = shell_quote(rpc_port),
+    );
+    run_shell(&script, &HashMap::new(), terminal)
+}
+
+fn run_setup_join(
+    invite: &str,
+    network: &str,
+    label: &str,
+    rpc_port: &str,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let exe = shell_quote(&exe.to_string_lossy());
+    let script = format!(
+        "set -eu\n\
+exe={exe}\n\
+core=$(dirname -- \"$exe\")/pactmesh-core\n\
+if [ ! -x \"$core\" ]; then echo \"pactmesh-core not found next to $exe: $core\" >&2; exit 1; fi\n\
+\"$exe\" --rpc-portal 127.0.0.1:{rpc_port} trust accept-invite {invite} --device-label {label} --online --wait-secs 600 --poll-secs 2\n\
+log_dir=${{PNW_TEST_HOME:-.}}\n\
+mkdir -p \"$log_dir\"\n\
+nohup \"$core\" --network-name {network} --network-local-id {network} --rpc-portal 127.0.0.1:{rpc_port} --listeners 11010 --no-tun true --disable-ipv6 true --instance-name {label} --console-log-level debug --daemon > \"$log_dir/{label}.log\" 2>&1 &\n\
+printf 'started joiner daemon pid=%s log=%s\\n' \"$!\" \"$log_dir/{label}.log\"\n",
+        exe = exe,
+        invite = shell_quote(invite),
+        network = shell_quote(network),
+        label = shell_quote(label),
+        rpc_port = shell_quote(rpc_port),
+    );
+    run_shell(&script, &HashMap::new(), terminal)
+}
+
+fn shell_quote(s: &str) -> String {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':' | '\\'))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 #[cfg(unix)]
 fn suspend(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     use nix::sys::signal::{Signal, raise};
@@ -711,6 +1154,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, snap: &state::Snapshot, ui: &UiState) {
 
     let mut ts = ui.table_states[ui.tab_index].clone();
     match TABS[ui.tab_index] {
+        Tab::Setup => panels::setup::render(frame, snap, chunks[1]),
         Tab::Node => panels::node::render(frame, snap, chunks[1]),
         Tab::Peers => panels::peers::render(frame, snap, chunks[1], &mut ts),
         Tab::Joins => panels::joins::render(frame, snap, chunks[1], &mut ts),
@@ -735,6 +1179,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, snap: &state::Snapshot, ui: &UiState) {
     );
 
     match &ui.mode {
+        InputMode::SetupWizard(wizard) => draw_setup_wizard_modal(frame, wizard),
         InputMode::Passphrase { buf, action } => draw_passphrase_modal(frame, buf, action),
         InputMode::RejectReason { row, reason } => draw_reject_modal(frame, row, reason),
         InputMode::Help(text) => draw_text_modal(frame, " Help — any key to close ", text, 70, 60),
@@ -742,6 +1187,173 @@ fn draw(frame: &mut ratatui::Frame<'_>, snap: &state::Snapshot, ui: &UiState) {
             draw_text_modal(frame, " Detail — any key to close ", text, 75, 70)
         }
         _ => {}
+    }
+}
+
+fn draw_setup_wizard_modal(frame: &mut ratatui::Frame<'_>, wizard: &SetupWizard) {
+    let area = centered_rect(72, 55, frame.area());
+    frame.render_widget(Clear, area);
+    let (title, body) = match wizard {
+        SetupWizard::Root {
+            fields,
+            step,
+            input,
+        } => (
+            " Root Setup ",
+            root_setup_lines(fields, *step, input.as_str()),
+        ),
+        SetupWizard::Join {
+            fields,
+            step,
+            input,
+        } => (
+            " Joiner Setup ",
+            join_setup_lines(fields, *step, input.as_str()),
+        ),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_alignment(Alignment::Center)
+        .style(Style::default().bg(Color::Black));
+    frame.render_widget(
+        Paragraph::new(body).block(block).wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn field_line<'a>(name: &'a str, value: String, active: bool) -> Line<'a> {
+    let style = if active {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{name:13}: "),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(value, style),
+    ])
+}
+
+fn root_setup_lines<'a>(
+    fields: &'a SetupRootFields,
+    step: RootSetupStep,
+    input: &'a str,
+) -> Vec<Line<'a>> {
+    let mut lines = vec![Line::from("Fill fields. Enter accepts, Esc cancels.")];
+    lines.push(Line::from(""));
+    lines.push(field_line(
+        "network",
+        field_value(
+            &fields.network,
+            input,
+            matches!(step, RootSetupStep::Network),
+        ),
+        matches!(step, RootSetupStep::Network),
+    ));
+    lines.push(field_line(
+        "label",
+        field_value(&fields.label, input, matches!(step, RootSetupStep::Label)),
+        matches!(step, RootSetupStep::Label),
+    ));
+    lines.push(field_line(
+        "seed",
+        field_value(&fields.seed, input, matches!(step, RootSetupStep::Seed)),
+        matches!(step, RootSetupStep::Seed),
+    ));
+    lines.push(field_line(
+        "listen_port",
+        field_value(
+            &fields.listen_port,
+            input,
+            matches!(step, RootSetupStep::ListenPort),
+        ),
+        matches!(step, RootSetupStep::ListenPort),
+    ));
+    lines.push(field_line(
+        "rpc_port",
+        field_value(
+            &fields.rpc_port,
+            input,
+            matches!(step, RootSetupStep::RpcPort),
+        ),
+        matches!(step, RootSetupStep::RpcPort),
+    ));
+    lines.push(field_line(
+        "domain_label",
+        field_value(
+            &fields.domain_label,
+            input,
+            matches!(step, RootSetupStep::DomainLabel),
+        ),
+        matches!(step, RootSetupStep::DomainLabel),
+    ));
+    if matches!(step, RootSetupStep::Confirm) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Type yes and Enter to run setup-root.",
+            Style::default().fg(Color::Cyan),
+        )));
+        lines.push(Line::from(format!("confirm: {input}")));
+    }
+    lines
+}
+
+fn join_setup_lines<'a>(
+    fields: &'a SetupJoinFields,
+    step: JoinSetupStep,
+    input: &'a str,
+) -> Vec<Line<'a>> {
+    let mut lines = vec![Line::from("Fill fields. Enter accepts, Esc cancels.")];
+    lines.push(Line::from(""));
+    lines.push(field_line(
+        "invite",
+        field_value(&fields.invite, input, matches!(step, JoinSetupStep::Invite)),
+        matches!(step, JoinSetupStep::Invite),
+    ));
+    lines.push(field_line(
+        "network",
+        field_value(
+            &fields.network,
+            input,
+            matches!(step, JoinSetupStep::Network),
+        ),
+        matches!(step, JoinSetupStep::Network),
+    ));
+    lines.push(field_line(
+        "label",
+        field_value(&fields.label, input, matches!(step, JoinSetupStep::Label)),
+        matches!(step, JoinSetupStep::Label),
+    ));
+    lines.push(field_line(
+        "rpc_port",
+        field_value(
+            &fields.rpc_port,
+            input,
+            matches!(step, JoinSetupStep::RpcPort),
+        ),
+        matches!(step, JoinSetupStep::RpcPort),
+    ));
+    if matches!(step, JoinSetupStep::Confirm) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Type yes and Enter to run setup-join.",
+            Style::default().fg(Color::Cyan),
+        )));
+        lines.push(Line::from(format!("confirm: {input}")));
+    }
+    lines
+}
+
+fn field_value(committed: &str, input: &str, active: bool) -> String {
+    if active {
+        format!("{input}█")
+    } else {
+        committed.to_string()
     }
 }
 

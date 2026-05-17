@@ -184,7 +184,7 @@ fn file_layers(
     let wrapper = {
         let path = {
             let dir = config.dir.as_deref().unwrap_or(".");
-            let file = config.file.as_deref().unwrap_or("easytier.log");
+            let file = config.file.as_deref().unwrap_or("pactmesh.log");
             let path = std::path::Path::new(dir).join(file);
             path.to_string_lossy().into_owned()
         };

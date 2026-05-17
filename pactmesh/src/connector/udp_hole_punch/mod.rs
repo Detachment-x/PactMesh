@@ -606,6 +606,7 @@ pub mod tests {
     use crate::proto::common::NatType;
     use crate::tunnel::common::tests::wait_for_condition;
 
+    use super::common::{UdpNatType, UdpPunchClientMethod};
     use super::{RUN_TESTING, UdpHolePunchConnector, UdpHolePunchPeerTaskLauncher};
 
     pub fn replace_stun_info_collector(peer_mgr: Arc<PeerManager>, udp_nat_type: NatType) {
@@ -635,6 +636,49 @@ pub mod tests {
             .into_iter()
             .map(|task| task.dst_peer_id)
             .collect()
+    }
+
+    #[tokio::test]
+    async fn symmetric_nat_strategy_allows_randomized_hole_punching() {
+        let peer_mgr = create_mock_peer_manager().await;
+        let global_ctx = peer_mgr.get_global_ctx();
+
+        assert!(matches!(
+            UdpNatType::EasySymmetric(NatType::SymmetricEasyInc, true).get_punch_hole_method(
+                UdpNatType::HardSymmetric(NatType::Symmetric),
+                global_ctx.clone(),
+            ),
+            UdpPunchClientMethod::SymToCone
+        ));
+
+        assert!(matches!(
+            UdpNatType::HardSymmetric(NatType::Symmetric)
+                .get_punch_hole_method(UdpNatType::HardSymmetric(NatType::Symmetric), global_ctx,),
+            UdpPunchClientMethod::SymToCone
+        ));
+    }
+
+    #[tokio::test]
+    async fn disable_symmetric_hole_punching_still_blocks_sym_to_sym() {
+        let peer_mgr = create_mock_peer_manager().await;
+        let global_ctx = peer_mgr.get_global_ctx();
+        let mut flags = global_ctx.get_flags();
+        flags.disable_sym_hole_punching = true;
+        global_ctx.set_flags(flags);
+
+        assert!(matches!(
+            UdpNatType::HardSymmetric(NatType::Symmetric).get_punch_hole_method(
+                UdpNatType::HardSymmetric(NatType::Symmetric),
+                global_ctx.clone(),
+            ),
+            UdpPunchClientMethod::None
+        ));
+
+        assert!(matches!(
+            UdpNatType::EasySymmetric(NatType::SymmetricEasyInc, true)
+                .get_punch_hole_method(UdpNatType::Cone(NatType::PortRestricted), global_ctx,),
+            UdpPunchClientMethod::ConeToCone
+        ));
     }
 
     #[rstest::rstest]

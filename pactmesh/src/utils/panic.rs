@@ -38,9 +38,9 @@ pub fn setup_panic_handler() {
         let thread = std::thread::current();
         let thread = thread.name().unwrap_or("<unnamed>");
 
-        let tmp_path = std::env::temp_dir().join("easytier-panic.log");
+        let tmp_path = std::env::temp_dir().join("pactmesh-panic.log");
         let candidate_path = [
-            std::path::PathBuf::from_str("easytier-panic.log").ok(),
+            std::path::PathBuf::from_str("pactmesh-panic.log").ok(),
             Some(tmp_path),
         ];
         let mut file = None;

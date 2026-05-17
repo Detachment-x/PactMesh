@@ -597,7 +597,11 @@ impl DirectConnectorManagerData {
             }
         }
 
-        Ok(())
+        Err(anyhow::anyhow!(
+            "direct connect to peer {} finished all listeners without a direct connection",
+            dst_peer_id
+        )
+        .into())
     }
 
     #[tracing::instrument(skip(self))]
@@ -892,9 +896,13 @@ mod tests {
             .interface_ipv4s
             .push("127.0.0.1".parse::<std::net::Ipv4Addr>().unwrap().into());
 
-        data.do_try_direct_connect_internal(1, ip_list.clone())
-            .await
-            .unwrap();
+        let ret = data
+            .do_try_direct_connect_internal(1, ip_list.clone())
+            .await;
+        assert!(
+            ret.is_err(),
+            "unreachable listener should not report success"
+        );
 
         assert!(
             data.dst_listener_blacklist

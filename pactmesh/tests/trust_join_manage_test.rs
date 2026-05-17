@@ -117,6 +117,21 @@ fn member_cert_for_request(root: &TrustDomainRoot, jr: &JoinRequest) -> MemberCe
     .sign(root)
 }
 
+fn network_state_with_member(root: &TrustDomainRoot, cert: &MemberCert) -> SignedNetworkState {
+    let mut state = network_state(root).details;
+    state.version = state.version.saturating_add(1);
+    state
+        .payload
+        .member_cert_index
+        .push(pactmesh::trust::MemberCertIndexEntry {
+            fingerprint: cert.fingerprint(),
+            device_label: cert.details.device_label.clone(),
+            issued_at: cert.details.not_before,
+            expires_at: cert.details.expires_at,
+        });
+    state.sign(root)
+}
+
 async fn submit(instance: &Instance, jr: &JoinRequest) {
     let api = instance.get_api_rpc_service();
     api.get_trust_join_manage_service()
@@ -239,6 +254,7 @@ async fn test_approve_join_request_via_rpc_signs_and_returns_cert() {
                 network_local_id: NETWORK_LOCAL_ID.to_owned(),
                 applicant_pk: jr.applicant_pk.0.to_vec(),
                 member_cert_cbor: None,
+                network_state_cbor: None,
             },
         )
         .await
@@ -299,6 +315,7 @@ async fn test_approve_join_request_accepts_cli_signed_cert_without_daemon_root_k
                 network_local_id: NETWORK_LOCAL_ID.to_owned(),
                 applicant_pk: jr.applicant_pk.0.to_vec(),
                 member_cert_cbor: Some(to_canonical_cbor(&supplied_cert)),
+                network_state_cbor: None,
             },
         )
         .await
@@ -335,6 +352,52 @@ async fn test_approve_join_request_accepts_cli_signed_cert_without_daemon_root_k
 }
 
 #[tokio::test]
+async fn test_approve_join_request_applies_supplied_network_state_to_root_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = TrustDomainRoot::generate();
+    write_root_files(dir.path(), &root);
+    let instance = root_metadata_only_instance(dir.path(), &root);
+    let jr = join_request(&root);
+    submit(&instance, &jr).await;
+
+    let supplied_cert = member_cert_for_request(&root, &jr);
+    let supplied_state = network_state_with_member(&root, &supplied_cert);
+    let api = instance.get_api_rpc_service();
+    api.get_trust_join_manage_service()
+        .approve_join_request(
+            BaseController::default(),
+            ApproveJoinRequestRequest {
+                instance: None,
+                trust_domain_id: root.id().0.to_vec(),
+                network_local_id: NETWORK_LOCAL_ID.to_owned(),
+                applicant_pk: jr.applicant_pk.0.to_vec(),
+                member_cert_cbor: Some(to_canonical_cbor(&supplied_cert)),
+                network_state_cbor: Some(to_canonical_cbor(&supplied_state)),
+            },
+        )
+        .await
+        .unwrap();
+
+    let fetched = api
+        .get_trust_join_manage_service()
+        .fetch_pending_member_cert(
+            BaseController::default(),
+            FetchPendingMemberCertRequest {
+                instance: None,
+                trust_domain_id: root.id().0.to_vec(),
+                network_local_id: NETWORK_LOCAL_ID.to_owned(),
+                applicant_pk: jr.applicant_pk.0.to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+    let fetched_state: SignedNetworkState = from_cbor(&fetched.network_state_cbor).unwrap();
+    assert_eq!(fetched_state, supplied_state);
+    assert_eq!(fetched_state.details.version, 2);
+    assert_eq!(fetched_state.details.payload.member_cert_index.len(), 1);
+}
+
+#[tokio::test]
 async fn test_approve_join_request_without_daemon_root_key_rejects_daemon_signing() {
     let dir = tempfile::tempdir().unwrap();
     let root = TrustDomainRoot::generate();
@@ -354,6 +417,7 @@ async fn test_approve_join_request_without_daemon_root_key_rejects_daemon_signin
                 network_local_id: NETWORK_LOCAL_ID.to_owned(),
                 applicant_pk: jr.applicant_pk.0.to_vec(),
                 member_cert_cbor: None,
+                network_state_cbor: None,
             },
         )
         .await
@@ -383,6 +447,7 @@ async fn test_approve_join_request_unknown_applicant_returns_error() {
                 network_local_id: NETWORK_LOCAL_ID.to_owned(),
                 applicant_pk: vec![0xAB; 32],
                 member_cert_cbor: None,
+                network_state_cbor: None,
             },
         )
         .await

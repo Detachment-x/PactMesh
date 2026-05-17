@@ -274,5 +274,5 @@ core_clap:
 
 core_app:
   panic_backtrace_save:
-    en: "backtrace saved to easytier-panic.log"
-    zh-CN: "回溯信息已保存到easytier-panic.log"
+    en: "backtrace saved to pactmesh-panic.log"
+    zh-CN: "回溯信息已保存到pactmesh-panic.log"

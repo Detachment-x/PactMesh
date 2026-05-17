@@ -169,7 +169,7 @@ enum SubCommand {
     Credential(CredentialArgs),
     #[command(about = "export/import trust-domain bootstrap bundles")]
     Bootstrap(BootstrapArgs),
-    #[command(about = "guided local testing and diagnostics")]
+    #[command(about = "deprecated no-TTY test fallback; prefer 'pactmesh tui'")]
     Lab(LabArgs),
     #[command(about = "manage privateNetwork trust domains")]
     Trust(TrustArgs),
@@ -457,7 +457,7 @@ struct LabArgs {
 
 #[derive(Subcommand, Debug)]
 enum LabSubCommand {
-    #[command(about = "interactive command generator for manual tests")]
+    #[command(about = "deprecated command generator for manual tests")]
     Wizard,
     #[command(about = "check local test environment and key files")]
     Doctor {
@@ -475,12 +475,12 @@ enum LabSubCommand {
         #[arg(long, help = "daemon log file to scan")]
         log: Option<PathBuf>,
     },
-    #[command(about = "run guided test steps")]
+    #[command(about = "run no-TTY fallback test steps")]
     Run {
         #[command(subcommand)]
         command: LabRunSubCommand,
     },
-    #[command(about = "approve a pending join request interactively")]
+    #[command(about = "fallback approval command; prefer TUI Joins tab")]
     Approve {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1124,6 +1124,8 @@ enum ServiceSubCommand {
     Start,
     #[command(about = "stop pactmesh-core system service")]
     Stop,
+    #[command(about = "restart pactmesh-core system service")]
+    Restart,
 }
 
 #[derive(Args, Debug)]
@@ -5090,14 +5092,31 @@ fn write_signed_network_state(
     original_pem: String,
     root: &TrustDomainRoot,
 ) -> Result<u64, Error> {
+    let next_state = sign_next_network_state(original_state, root);
+    write_pre_signed_network_state(
+        network_dir,
+        original_state.details.version,
+        original_pem,
+        &next_state,
+    )
+}
+
+fn sign_next_network_state(
+    original_state: &pactmesh::trust::SignedNetworkState,
+    root: &TrustDomainRoot,
+) -> pactmesh::trust::SignedNetworkState {
     let mut next_state = original_state.details.clone();
-    let next_version = next_state.version.saturating_add(1);
-    next_state.version = next_version;
-    let next_state = next_state.sign(root);
-    let backup_path = network_dir.join(format!(
-        "network_state.v{}.cbor.pem",
-        original_state.details.version
-    ));
+    next_state.version = next_state.version.saturating_add(1);
+    next_state.sign(root)
+}
+
+fn write_pre_signed_network_state(
+    network_dir: &std::path::Path,
+    previous_version: u64,
+    original_pem: String,
+    next_state: &pactmesh::trust::SignedNetworkState,
+) -> Result<u64, Error> {
+    let backup_path = network_dir.join(format!("network_state.v{}.cbor.pem", previous_version));
     std::fs::write(&backup_path, original_pem)
         .with_context(|| format!("failed to write {}", backup_path.display()))?;
     std::fs::write(
@@ -5110,7 +5129,7 @@ fn write_signed_network_state(
             network_dir.join("network_state.cbor.pem").display()
         )
     })?;
-    Ok(next_version)
+    Ok(next_state.details.version)
 }
 
 fn load_network_state_for_edit(
@@ -5800,33 +5819,15 @@ async fn handle_trust_approve(
     }
     .sign(&root);
 
-    let client = handler.get_trust_join_manage_client().await?;
-    let response = client
-        .approve_join_request(
-            BaseController::default(),
-            ApproveJoinRequestRequest {
-                instance: Some(handler.instance_selector.clone()),
-                trust_domain_id: td_id_bytes.to_vec(),
-                network_local_id: network_local_id.clone(),
-                applicant_pk: applicant_pk_bytes.to_vec(),
-                member_cert_cbor: Some(to_canonical_cbor(&cert)),
-            },
-        )
-        .await
-        .context("daemon refused to approve join request")?;
-
-    let cert: pactmesh::trust::MemberCert = from_cbor(&response.member_cert_cbor)
-        .context("daemon returned invalid member cert CBOR")?;
     let fingerprint = cert.fingerprint();
-
     let already_indexed = state
         .details
         .payload
         .member_cert_index
         .iter()
         .any(|entry| entry.fingerprint == fingerprint);
-    let new_version = if already_indexed {
-        state.details.version
+    let next_state = if already_indexed {
+        None
     } else {
         state
             .details
@@ -5838,7 +5839,40 @@ async fn handle_trust_approve(
                 issued_at: cert.details.not_before,
                 expires_at: cert.details.expires_at,
             });
-        write_signed_network_state(&network_dir, &state, original_pem, &root)?
+        Some(sign_next_network_state(&state, &root))
+    };
+
+    let client = handler.get_trust_join_manage_client().await?;
+    let response = client
+        .approve_join_request(
+            BaseController::default(),
+            ApproveJoinRequestRequest {
+                instance: Some(handler.instance_selector.clone()),
+                trust_domain_id: td_id_bytes.to_vec(),
+                network_local_id: network_local_id.clone(),
+                applicant_pk: applicant_pk_bytes.to_vec(),
+                member_cert_cbor: Some(to_canonical_cbor(&cert)),
+                network_state_cbor: next_state.as_ref().map(to_canonical_cbor),
+            },
+        )
+        .await
+        .context("daemon refused to approve join request")?;
+
+    let cert: pactmesh::trust::MemberCert = from_cbor(&response.member_cert_cbor)
+        .context("daemon returned invalid member cert CBOR")?;
+    if cert.fingerprint() != fingerprint {
+        anyhow::bail!("daemon returned a different member cert than the signed approval");
+    }
+
+    let new_version = if let Some(next_state) = next_state {
+        write_pre_signed_network_state(
+            &network_dir,
+            state.details.version,
+            original_pem,
+            &next_state,
+        )?
+    } else {
+        state.details.version
     };
 
     let cert_dir = network_dir.join("member_certs");
@@ -6803,6 +6837,15 @@ async fn main() -> Result<(), Error> {
                 ServiceSubCommand::Stop => {
                     service.stop()?;
                 }
+                ServiceSubCommand::Restart => match service.status()? {
+                    ServiceStatus::Running | ServiceStatus::Stopped(_) => {
+                        let _ = service.stop();
+                        service.start()?;
+                    }
+                    ServiceStatus::NotInstalled => {
+                        anyhow::bail!("Service is not installed");
+                    }
+                },
             }
         }
         SubCommand::Proxy => {

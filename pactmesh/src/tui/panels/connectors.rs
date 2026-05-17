@@ -1,7 +1,7 @@
 //! Connectors tab：列出 daemon 已配置的 outbound connector + 状态。
 //!
 //! v0 PR-3 仅展示。proto 中 `ConnectorManageRpc` 当前只有 `ListConnector`，没有
-//! Add/Remove/Reconnect；重连留给 PR-4 的 `:!systemctl restart pactmesh-core`。
+//! Add/Remove/Reconnect；当前 TUI 提供 `:daemon restart` 做整 daemon 重启 fallback。
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};

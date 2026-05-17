@@ -118,6 +118,7 @@ message ApproveJoinRequestRequest {
   string network_local_id = 3;
   bytes applicant_pk = 4;
   optional bytes member_cert_cbor = 5;
+  optional bytes network_state_cbor = 6;
 }
 
 message ApproveJoinRequestResponse {

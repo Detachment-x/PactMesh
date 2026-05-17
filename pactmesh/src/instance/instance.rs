@@ -69,8 +69,8 @@ use crate::proto::rpc_types;
 use crate::proto::rpc_types::controller::BaseController;
 use crate::rpc_service::InstanceRpcService;
 use crate::trust::{
-    MemberCert, NetworkLocalId, TrustDomainId, TrustDomainPool, TrustDomainRoot,
-    config_sync_service::ConfigSyncService, from_cbor, join_dedup::JoinDedup,
+    MemberCert, NetworkLocalId, SignedNetworkState, TrustDomainId, TrustDomainPool,
+    TrustDomainRoot, config_sync_service::ConfigSyncService, from_cbor, join_dedup::JoinDedup,
     join_forward_service::JoinForwardService, pending_cert_queue::PendingCertQueue,
     to_canonical_cbor,
 };
@@ -1866,6 +1866,47 @@ impl Instance {
                         })?
                     }
                 };
+                if let Some(network_state_cbor) = request.network_state_cbor.as_ref() {
+                    let state: SignedNetworkState =
+                        from_cbor(network_state_cbor).map_err(|err| {
+                            rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                                "invalid network_state_cbor: {err}"
+                            ))
+                        })?;
+                    if state.details.trust_domain_id != td_id
+                        || state.details.network_local_id != network_local_id
+                    {
+                        return Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                            "network_state_cbor does not match approve target"
+                        )));
+                    }
+                    if !state
+                        .details
+                        .payload
+                        .member_cert_index
+                        .iter()
+                        .any(|entry| entry.fingerprint == cert.fingerprint())
+                    {
+                        return Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                            "network_state_cbor does not include approved member cert"
+                        )));
+                    }
+                    let config_sync = self.config_sync_service.as_ref().ok_or_else(|| {
+                        rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                            "config-sync service is not available"
+                        ))
+                    })?;
+                    config_sync
+                        .trust_pool
+                        .write()
+                        .await
+                        .apply_network_state(state)
+                        .map_err(|err| {
+                            rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                                "failed to apply approved network_state: {err}"
+                            ))
+                        })?;
+                }
                 Ok(ApproveJoinRequestResponse {
                     member_cert_cbor: to_canonical_cbor(&cert),
                 })

@@ -158,18 +158,16 @@ impl UdpNatType {
             }
         } else if self.is_easy_sym() {
             if other.is_hard_sym() {
-                return UdpPunchClientMethod::None;
+                return UdpPunchClientMethod::SymToCone;
             } else if other.is_easy_sym() {
                 return UdpPunchClientMethod::EasySymToEasySym;
             } else {
                 return UdpPunchClientMethod::SymToCone;
             }
         } else if self.is_hard_sym() {
-            if other.is_sym() {
-                return UdpPunchClientMethod::None;
-            } else {
-                return UdpPunchClientMethod::SymToCone;
-            }
+            // Hard symmetric peers can still be punched by the randomized symmetric flow.
+            // The client-side task backoff, blacklist, and per-peer RPC lock bound retries.
+            return UdpPunchClientMethod::SymToCone;
         }
 
         unreachable!("invalid nat type");
@@ -299,15 +297,18 @@ impl UdpSocketArray {
         Ok(())
     }
 
+    pub fn sockets(&self) -> Vec<Arc<UdpSocket>> {
+        self.sockets
+            .iter()
+            .map(|socket| socket.value().clone())
+            .collect()
+    }
+
     #[instrument(err)]
     pub async fn send_with_all(&self, data: &[u8], addr: SocketAddr) -> Result<(), anyhow::Error> {
         tracing::info!(?addr, "sending hole punching packet");
 
-        let sockets = self
-            .sockets
-            .iter()
-            .map(|s| s.value().clone())
-            .collect::<Vec<_>>();
+        let sockets = self.sockets();
 
         for socket in sockets.iter() {
             for _ in 0..3 {

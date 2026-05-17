@@ -82,6 +82,29 @@ pub async fn approve_join(
     }
     .sign(&root);
 
+    let fingerprint = cert.fingerprint();
+    let already = state
+        .details
+        .payload
+        .member_cert_index
+        .iter()
+        .any(|e| e.fingerprint == fingerprint);
+    let next_state = if already {
+        None
+    } else {
+        state
+            .details
+            .payload
+            .member_cert_index
+            .push(MemberCertIndexEntry {
+                fingerprint,
+                device_label: cert.details.device_label.clone(),
+                issued_at: cert.details.not_before,
+                expires_at: cert.details.expires_at,
+            });
+        Some(sign_next_state(&state, &root))
+    };
+
     let client = {
         let mut g = rpc.lock().await;
         g.scoped_client::<TrustJoinManageRpcClientFactory<BaseController>>(String::new())
@@ -97,6 +120,7 @@ pub async fn approve_join(
                 network_local_id: row.network_local_id.clone(),
                 applicant_pk: row.applicant_pk.clone(),
                 member_cert_cbor: Some(to_canonical_cbor(&cert)),
+                network_state_cbor: next_state.as_ref().map(to_canonical_cbor),
             },
         )
         .await
@@ -104,29 +128,15 @@ pub async fn approve_join(
 
     let issued: MemberCert = from_cbor(&response.member_cert_cbor)
         .context("daemon returned invalid member cert CBOR")?;
-    let fingerprint = issued.fingerprint();
     let device_label = issued.details.device_label.clone();
+    if issued.fingerprint() != fingerprint {
+        anyhow::bail!("daemon returned a different member cert than the signed approval");
+    }
 
-    let already = state
-        .details
-        .payload
-        .member_cert_index
-        .iter()
-        .any(|e| e.fingerprint == fingerprint);
-    let new_version = if already {
-        state.details.version
+    let new_version = if let Some(next_state) = next_state {
+        write_signed_state(&network_dir, &next_state, original_pem)?
     } else {
-        state
-            .details
-            .payload
-            .member_cert_index
-            .push(MemberCertIndexEntry {
-                fingerprint,
-                device_label: device_label.clone(),
-                issued_at: issued.details.not_before,
-                expires_at: issued.details.expires_at,
-            });
-        write_signed_state(&network_dir, &state, original_pem, &root)?
+        state.details.version
     };
 
     let cert_dir = network_dir.join("member_certs");
@@ -147,18 +157,20 @@ fn write_signed_state(
     network_dir: &Path,
     state: &SignedNetworkState,
     original_pem: String,
-    root: &TrustDomainRoot,
 ) -> Result<u64> {
-    let mut next = state.details.clone();
-    let next_version = next.version.saturating_add(1);
-    next.version = next_version;
-    let next = next.sign(root);
-    let backup = network_dir.join(format!("network_state.v{}.cbor.pem", state.details.version));
+    let previous_version = state.details.version.saturating_sub(1);
+    let backup = network_dir.join(format!("network_state.v{}.cbor.pem", previous_version));
     std::fs::write(&backup, original_pem)
         .with_context(|| format!("failed to write {}", backup.display()))?;
-    std::fs::write(network_dir.join("network_state.cbor.pem"), next.to_pem())
+    std::fs::write(network_dir.join("network_state.cbor.pem"), state.to_pem())
         .with_context(|| "failed to write network_state.cbor.pem")?;
-    Ok(next_version)
+    Ok(state.details.version)
+}
+
+fn sign_next_state(state: &SignedNetworkState, root: &TrustDomainRoot) -> SignedNetworkState {
+    let mut next = state.details.clone();
+    next.version = next.version.saturating_add(1);
+    next.sign(root)
 }
 
 fn now_unix_secs() -> u64 {
