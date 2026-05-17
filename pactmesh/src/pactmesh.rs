@@ -864,6 +864,10 @@ enum TrustSubCommand {
         #[command(subcommand)]
         command: TrustPeerHintSubCommand,
     },
+    Admin {
+        #[command(subcommand)]
+        command: TrustAdminSubCommand,
+    },
     Acl {
         #[command(subcommand)]
         command: TrustAclSubCommand,
@@ -1030,6 +1034,55 @@ enum TrustPeerHintSubCommand {
             help = "file containing the root key passphrase (management password)"
         )]
         passphrase_file: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TrustAdminSubCommand {
+    Add {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(help = "device id or unique prefix", allow_hyphen_values = true)]
+        device_id: String,
+        #[arg(long, help = "admin label; defaults to the member device label")]
+        label: Option<String>,
+        #[arg(
+            long = "capability",
+            action = ArgAction::Append,
+            help = "admin capability: approve_join,revoke_member,disable_member,edit_acl,rotate_admins,all"
+        )]
+        capabilities: Vec<String>,
+        #[arg(long, help = "unix timestamp when grant expires")]
+        expires_at: Option<u64>,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
+        passphrase_file: Option<PathBuf>,
+    },
+    List {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(long, help = "include revoked local grant files")]
+        include_revoked: bool,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+    },
+    Revoke {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(help = "device id or unique prefix", allow_hyphen_values = true)]
+        device_id: String,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
     },
 }
 
@@ -4365,6 +4418,239 @@ fn handle_trust_show_device(
     Ok(())
 }
 
+struct TrustAdminAddOptions {
+    trust_domain_id: String,
+    network_local_id: String,
+    device_id: String,
+    label: Option<String>,
+    capabilities: Vec<String>,
+    expires_at: Option<u64>,
+    json: bool,
+    passphrase_file: Option<PathBuf>,
+}
+
+fn admin_grants_dir(network_dir: &std::path::Path) -> PathBuf {
+    network_dir.join("admin_grants")
+}
+
+fn revoked_admin_grants_dir(network_dir: &std::path::Path) -> PathBuf {
+    admin_grants_dir(network_dir).join("revoked")
+}
+
+fn parse_admin_capabilities(
+    values: &[String],
+) -> Result<pactmesh::trust::AdminCapabilities, Error> {
+    if values.is_empty() {
+        return Ok(pactmesh::trust::AdminCapabilities::approve_only());
+    }
+    let mut caps = pactmesh::trust::AdminCapabilities {
+        approve_join: false,
+        revoke_member: false,
+        disable_member: false,
+        edit_acl: false,
+        rotate_admins: false,
+    };
+    for value in values {
+        for item in value
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        {
+            match item {
+                "all" => return Ok(pactmesh::trust::AdminCapabilities::all()),
+                "approve_join" | "approve" => caps.approve_join = true,
+                "revoke_member" | "revoke" => caps.revoke_member = true,
+                "disable_member" | "disable" => caps.disable_member = true,
+                "edit_acl" | "acl" => caps.edit_acl = true,
+                "rotate_admins" | "admin" => caps.rotate_admins = true,
+                other => anyhow::bail!("unknown admin capability: {other}"),
+            }
+        }
+    }
+    Ok(caps)
+}
+
+fn render_admin_capabilities(caps: &pactmesh::trust::AdminCapabilities) -> String {
+    let mut out = Vec::new();
+    if caps.approve_join {
+        out.push("approve_join");
+    }
+    if caps.revoke_member {
+        out.push("revoke_member");
+    }
+    if caps.disable_member {
+        out.push("disable_member");
+    }
+    if caps.edit_acl {
+        out.push("edit_acl");
+    }
+    if caps.rotate_admins {
+        out.push("rotate_admins");
+    }
+    if out.is_empty() {
+        "none".to_owned()
+    } else {
+        out.join(",")
+    }
+}
+
+fn handle_trust_admin_add(options: TrustAdminAddOptions) -> Result<(), Error> {
+    let (network_dir, _pem, state) =
+        load_network_state_for_edit(&options.trust_domain_id, &options.network_local_id)?;
+    let rows = collect_member_list_rows(&network_dir, &state, &options.network_local_id);
+    let row = resolve_device_view(rows, &options.device_id)?;
+    let member_fp = parse_member_cert_fingerprint(&row.fingerprint)?;
+    let certs = read_member_cert_bodies(&network_dir);
+    let cert = certs
+        .get(&member_fp)
+        .ok_or_else(|| anyhow::anyhow!("member cert body not found for {}", row.fingerprint))?;
+    let root = unlock_domain_root(&options.trust_domain_id, options.passphrase_file)?;
+    let now = now_unix_secs();
+    let grant = pactmesh::trust::UnsignedAdminGrant {
+        trust_domain_id: root.id(),
+        admin_device_pk: cert.details.device_pk,
+        admin_label: options.label.unwrap_or(row.device_label),
+        not_before: now,
+        expires_at: options.expires_at.unwrap_or(now + 365 * 24 * 60 * 60),
+        capabilities: parse_admin_capabilities(&options.capabilities)?,
+    }
+    .sign(&root);
+
+    let dir = admin_grants_dir(&network_dir);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{}.pem", row.device_id));
+    std::fs::write(&path, grant.to_pem())?;
+
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "device_id": row.device_id,
+                "path": path,
+                "admin_label": grant.details.admin_label,
+                "expires_at": grant.details.expires_at,
+                "capabilities": render_admin_capabilities(&grant.details.capabilities),
+            }))?
+        );
+    } else {
+        println!(
+            "admin grant written: {} device={} capabilities={} expires_at={}",
+            path.display(),
+            row.device_id,
+            render_admin_capabilities(&grant.details.capabilities),
+            grant.details.expires_at
+        );
+    }
+    Ok(())
+}
+
+fn handle_trust_admin_list(
+    trust_domain_id: String,
+    network_local_id: String,
+    include_revoked: bool,
+    json: bool,
+) -> Result<(), Error> {
+    let (network_dir, _pem, _state) =
+        load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
+    let mut rows = Vec::new();
+    collect_admin_grants(&admin_grants_dir(&network_dir), false, &mut rows)?;
+    if include_revoked {
+        collect_admin_grants(&revoked_admin_grants_dir(&network_dir), true, &mut rows)?;
+    }
+    rows.sort_by(|left, right| left["device_id"].as_str().cmp(&right["device_id"].as_str()));
+    if json {
+        println!("{}", serde_json::to_string(&rows)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("(no admin grants)");
+        return Ok(());
+    }
+    println!("device_id	label	expires_at	status	capabilities	path");
+    for row in rows {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            row["device_id"].as_str().unwrap_or(""),
+            row["admin_label"].as_str().unwrap_or(""),
+            row["expires_at"].as_u64().unwrap_or_default(),
+            row["status"].as_str().unwrap_or(""),
+            row["capabilities"].as_str().unwrap_or(""),
+            row["path"].as_str().unwrap_or(""),
+        );
+    }
+    Ok(())
+}
+
+fn collect_admin_grants(
+    dir: &std::path::Path,
+    revoked: bool,
+    rows: &mut Vec<serde_json::Value>,
+) -> Result<(), Error> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("pem") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)?;
+        let grant = pactmesh::trust::AdminGrant::from_pem(&text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let device_id = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("unknown")
+            .to_owned();
+        rows.push(serde_json::json!({
+            "device_id": device_id,
+            "admin_label": grant.details.admin_label,
+            "expires_at": grant.details.expires_at,
+            "status": if revoked { "revoked" } else { "active" },
+            "capabilities": render_admin_capabilities(&grant.details.capabilities),
+            "path": path,
+        }));
+    }
+    Ok(())
+}
+
+fn handle_trust_admin_revoke(
+    trust_domain_id: String,
+    network_local_id: String,
+    device_id: String,
+    json: bool,
+) -> Result<(), Error> {
+    let (network_dir, _pem, state) =
+        load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
+    let rows = collect_member_list_rows(&network_dir, &state, &network_local_id);
+    let row = resolve_device_view(rows, &device_id)?;
+    let src = admin_grants_dir(&network_dir).join(format!("{}.pem", row.device_id));
+    if !src.is_file() {
+        anyhow::bail!("admin grant not found for device {}", row.device_id);
+    }
+    let dst_dir = revoked_admin_grants_dir(&network_dir);
+    std::fs::create_dir_all(&dst_dir)?;
+    let dst = dst_dir.join(format!("{}.pem", row.device_id));
+    std::fs::rename(&src, &dst)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "device_id": row.device_id,
+                "status": "revoked",
+                "path": dst,
+            }))?
+        );
+    } else {
+        println!(
+            "admin grant revoked: {} -> {}",
+            src.display(),
+            dst.display()
+        );
+    }
+    Ok(())
+}
+
 fn resolve_device_view(
     rows: Vec<pactmesh::trust::DeviceView>,
     device_id: &str,
@@ -7334,6 +7620,44 @@ async fn main() -> Result<(), Error> {
                     json,
                     passphrase_file,
                 })?,
+            },
+            TrustSubCommand::Admin { command } => match command {
+                TrustAdminSubCommand::Add {
+                    trust_domain_id,
+                    network_local_id,
+                    device_id,
+                    label,
+                    capabilities,
+                    expires_at,
+                    json,
+                    passphrase_file,
+                } => handle_trust_admin_add(TrustAdminAddOptions {
+                    trust_domain_id,
+                    network_local_id,
+                    device_id,
+                    label,
+                    capabilities,
+                    expires_at,
+                    json,
+                    passphrase_file,
+                })?,
+                TrustAdminSubCommand::List {
+                    trust_domain_id,
+                    network_local_id,
+                    include_revoked,
+                    json,
+                } => handle_trust_admin_list(
+                    trust_domain_id,
+                    network_local_id,
+                    include_revoked,
+                    json,
+                )?,
+                TrustAdminSubCommand::Revoke {
+                    trust_domain_id,
+                    network_local_id,
+                    device_id,
+                    json,
+                } => handle_trust_admin_revoke(trust_domain_id, network_local_id, device_id, json)?,
             },
             TrustSubCommand::Acl { command } => match command {
                 TrustAclSubCommand::Explain {
