@@ -1,4 +1,8 @@
-use std::{net::IpAddr, ops::Deref, sync::Arc};
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    ops::Deref,
+    sync::Arc,
+};
 
 #[cfg(target_os = "windows")]
 use network_interface::{
@@ -17,6 +21,42 @@ use crate::proto::peer_rpc::GetIpListResponse;
 use super::{netns::NetNS, stun::StunInfoCollectorTrait};
 
 pub const CACHED_IP_LIST_TIMEOUT_SEC: u64 = 60;
+
+fn is_usable_interface_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    if ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || ip.is_documentation()
+    {
+        return false;
+    }
+
+    // 100.64.0.0/10 is CGNAT space and 198.18.0.0/15 is benchmark/fake-ip
+    // space. They are valid addresses syntactically, but using them as bind
+    // candidates poisons outbound connector selection on proxy-heavy systems.
+    if octets[0] == 100 && (octets[1] & 0b1100_0000) == 64 {
+        return false;
+    }
+    if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
+        return false;
+    }
+
+    true
+}
+
+fn is_usable_interface_ipv6(ip: Ipv6Addr) -> bool {
+    !(ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() || ip.is_unicast_link_local())
+}
+
+fn is_usable_interface_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_usable_interface_ipv4(ip),
+        IpAddr::V6(ip) => is_usable_interface_ipv6(ip),
+    }
+}
 
 struct InterfaceFilter {
     iface: NetworkInterface,
@@ -165,7 +205,7 @@ impl InterfaceFilter {
                 .ips
                 .iter()
                 .map(|ip| ip.ip())
-                .any(|ip| !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast())
+                .any(is_usable_interface_ip)
             && self.iface.mac.map(|mac| !mac.is_zero()).unwrap_or(false)
     }
 }
@@ -380,7 +420,7 @@ impl IPCollector {
             for ip in iface.ips {
                 let ip: std::net::IpAddr = ip.ip();
                 if let std::net::IpAddr::V4(v4) = ip {
-                    if ip.is_loopback() || ip.is_multicast() {
+                    if !is_usable_interface_ipv4(v4) {
                         continue;
                     }
                     ret.interface_ipv4s.push(v4.into());
@@ -394,7 +434,7 @@ impl IPCollector {
             for ip in iface.ips {
                 let ip: std::net::IpAddr = ip.ip();
                 if let std::net::IpAddr::V6(v6) = ip {
-                    if v6.is_multicast() || v6.is_loopback() || v6.is_unicast_link_local() {
+                    if !is_usable_interface_ipv6(v6) {
                         continue;
                     }
                     ret.interface_ipv6s.push(v6.into());
@@ -404,18 +444,51 @@ impl IPCollector {
 
         if let Ok(v4_addr) = local_ipv4().await {
             tracing::trace!("got local ipv4: {}", v4_addr);
-            if !ret.interface_ipv4s.contains(&v4_addr.into()) {
+            if is_usable_interface_ipv4(v4_addr) && !ret.interface_ipv4s.contains(&v4_addr.into()) {
                 ret.interface_ipv4s.push(v4_addr.into());
             }
         }
 
         if let Ok(v6_addr) = local_ipv6().await {
             tracing::trace!("got local ipv6: {}", v6_addr);
-            if !ret.interface_ipv6s.contains(&v6_addr.into()) {
+            if is_usable_interface_ipv6(v6_addr) && !ret.interface_ipv6s.contains(&v6_addr.into()) {
                 ret.interface_ipv6s.push(v6_addr.into());
             }
         }
 
         ret
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_usable_interface_ipv4_filter() {
+        assert!(is_usable_interface_ipv4("192.168.1.10".parse().unwrap()));
+        assert!(is_usable_interface_ipv4("10.0.0.100".parse().unwrap()));
+        assert!(is_usable_interface_ipv4("172.16.0.2".parse().unwrap()));
+        assert!(is_usable_interface_ipv4("8.8.8.8".parse().unwrap()));
+
+        assert!(!is_usable_interface_ipv4("198.18.0.1".parse().unwrap()));
+        assert!(!is_usable_interface_ipv4("198.19.255.255".parse().unwrap()));
+        assert!(!is_usable_interface_ipv4("100.64.0.1".parse().unwrap()));
+        assert!(!is_usable_interface_ipv4("127.0.0.1".parse().unwrap()));
+        assert!(!is_usable_interface_ipv4("169.254.1.1".parse().unwrap()));
+        assert!(!is_usable_interface_ipv4("192.0.2.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_usable_interface_ipv6_filter() {
+        assert!(is_usable_interface_ipv6("fd00::1".parse().unwrap()));
+        assert!(is_usable_interface_ipv6(
+            "2001:4860:4860::8888".parse().unwrap()
+        ));
+
+        assert!(!is_usable_interface_ipv6("::".parse().unwrap()));
+        assert!(!is_usable_interface_ipv6("::1".parse().unwrap()));
+        assert!(!is_usable_interface_ipv6("fe80::1".parse().unwrap()));
+        assert!(!is_usable_interface_ipv6("ff02::1".parse().unwrap()));
     }
 }
