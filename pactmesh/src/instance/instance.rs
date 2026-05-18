@@ -1071,11 +1071,11 @@ impl Instance {
         Sha256::digest(global_ctx.get_id().as_bytes()).into()
     }
 
-    fn start_config_sync_client(&mut self) {
+    async fn start_config_sync_client(&mut self) {
         let Some(trust_pool) = self.peer_manager.get_trust_pool() else {
             return;
         };
-        let Some(trust_ctx) = self.global_ctx.trust_context_blocking() else {
+        let Some(trust_ctx) = self.global_ctx.get_trust_context().await else {
             return;
         };
         let mut client = ConfigSyncClient::new(
@@ -1408,7 +1408,7 @@ impl Instance {
         self.listener_manager.lock().await.run().await?;
         self.run_join_admission_servers().await?;
         self.peer_manager.run().await?;
-        self.start_config_sync_client();
+        self.start_config_sync_client().await;
 
         #[cfg(feature = "tun")]
         {
