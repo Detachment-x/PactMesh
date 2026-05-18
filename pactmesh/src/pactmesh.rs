@@ -21,6 +21,7 @@ use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, builder::Boolish
 use ed25519_dalek::VerifyingKey;
 use humansize::format_size;
 use pactmesh::ShellType;
+use pnet::ipnetwork::IpNetwork as IpNet;
 use rust_i18n::t;
 use service_manager::*;
 use tabled::settings::{Disable, Modify, Style, Width, location::ByColumnName, object::Columns};
@@ -857,6 +858,10 @@ enum TrustSubCommand {
         )]
         passphrase_file: Option<PathBuf>,
     },
+    Capability {
+        #[command(subcommand)]
+        command: TrustCapabilitySubCommand,
+    },
     Tag {
         #[command(subcommand)]
         command: TrustTagSubCommand,
@@ -952,6 +957,35 @@ enum TrustSubCommand {
         network_local_id: Option<String>,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TrustCapabilitySubCommand {
+    Set {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(help = "member-cert fingerprint", allow_hyphen_values = true)]
+        fingerprint: String,
+        #[arg(long, help = "set can_relay_data")]
+        relay_data: Option<bool>,
+        #[arg(long, help = "set can_relay_control")]
+        relay_control: Option<bool>,
+        #[arg(long = "proxy-subnet", action = ArgAction::Append, help = "replace can_proxy_subnet with this CIDR; repeatable")]
+        proxy_subnet: Vec<IpNet>,
+        #[arg(long, help = "clear all proxy-subnet capabilities")]
+        clear_proxy_subnet: bool,
+        #[arg(long, help = "audit note for superseding old cert")]
+        note: Option<String>,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
+        passphrase_file: Option<PathBuf>,
     },
 }
 
@@ -4475,14 +4509,7 @@ fn handle_trust_rename_device(
         });
     replace_member_index_entry(&mut state, old_fp, &new_cert);
 
-    let cert_dir = network_dir.join("member_certs");
-    std::fs::create_dir_all(&cert_dir)
-        .with_context(|| format!("failed to create {}", cert_dir.display()))?;
-    std::fs::write(
-        cert_dir.join(format!("{}.pem", new_cert.fingerprint())),
-        new_cert.to_pem(),
-    )
-    .context("failed to write renamed member cert")?;
+    write_reissued_member_cert(&network_dir, &new_cert)?;
 
     let old_version = state.details.version;
     let new_version = write_signed_network_state(&network_dir, &state, original_pem, &root)?;
@@ -4510,6 +4537,152 @@ fn handle_trust_rename_device(
         );
     }
     Ok(())
+}
+
+fn write_reissued_member_cert(
+    network_dir: &std::path::Path,
+    cert: &pactmesh::trust::MemberCert,
+) -> Result<(), Error> {
+    let cert_dir = network_dir.join("member_certs");
+    std::fs::create_dir_all(&cert_dir)
+        .with_context(|| format!("failed to create {}", cert_dir.display()))?;
+    std::fs::write(
+        cert_dir.join(format!("{}.pem", cert.fingerprint())),
+        cert.to_pem(),
+    )
+    .context("failed to write reissued member cert")
+}
+
+fn handle_trust_capability_set(options: TrustCapabilitySetOptions) -> Result<(), Error> {
+    let (network_dir, original_pem, mut state) =
+        load_network_state_for_edit(&options.trust_domain_id, &options.network_local_id)?;
+    let old_fp = parse_member_cert_fingerprint(&options.fingerprint)?;
+    if !state
+        .details
+        .payload
+        .member_cert_index
+        .iter()
+        .any(|entry| entry.fingerprint == old_fp)
+    {
+        anyhow::bail!("fingerprint not found in member_cert_index");
+    }
+    if member_status(&old_fp, &state) == "revoked" {
+        anyhow::bail!("fingerprint is revoked");
+    }
+    if options.clear_proxy_subnet && !options.proxy_subnet.is_empty() {
+        anyhow::bail!("--clear-proxy-subnet cannot be combined with --proxy-subnet");
+    }
+    let no_change_requested = options.relay_data.is_none()
+        && options.relay_control.is_none()
+        && !options.clear_proxy_subnet
+        && options.proxy_subnet.is_empty();
+    if no_change_requested {
+        anyhow::bail!("no capability change requested");
+    }
+
+    let certs = read_member_cert_bodies(&network_dir);
+    let old_cert = certs
+        .get(&old_fp)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("member cert body not found; cannot update capabilities"))?;
+
+    let mut capabilities = old_cert.details.capabilities.clone();
+    if let Some(relay_data) = options.relay_data {
+        capabilities.can_relay_data = relay_data;
+    }
+    if let Some(relay_control) = options.relay_control {
+        capabilities.can_relay_control = relay_control;
+    }
+    if options.clear_proxy_subnet {
+        capabilities.can_proxy_subnet.clear();
+    } else if !options.proxy_subnet.is_empty() {
+        capabilities.can_proxy_subnet = options.proxy_subnet;
+        capabilities
+            .can_proxy_subnet
+            .sort_by_key(|net| net.to_string());
+        capabilities.can_proxy_subnet.dedup();
+    }
+
+    if capabilities == old_cert.details.capabilities {
+        if options.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "fingerprint": old_fp.to_string(),
+                    "old_version": state.details.version,
+                    "new_version": state.details.version,
+                    "status": "unchanged",
+                })
+            );
+        } else {
+            println!(
+                "capabilities unchanged for {}",
+                old_fp.to_string().chars().take(8).collect::<String>()
+            );
+        }
+        return Ok(());
+    }
+
+    let root = unlock_domain_root(&options.trust_domain_id, options.passphrase_file)?;
+    let mut new_details = old_cert.details.clone();
+    new_details.capabilities = capabilities;
+    new_details.network_state_version_ref = state.details.version.saturating_add(1);
+    let new_cert = new_details.sign(&root);
+    let new_fp = new_cert.fingerprint();
+    state
+        .details
+        .payload
+        .revoked_certs
+        .push(pactmesh::trust::RevokedCert {
+            cert_fingerprint: old_fp,
+            revoked_at: now_unix_secs(),
+            reason_code: RevocationReason::Superseded,
+            reason_note: options.note,
+        });
+    replace_member_index_entry(&mut state, old_fp, &new_cert);
+    write_reissued_member_cert(&network_dir, &new_cert)?;
+
+    let old_version = state.details.version;
+    let new_version = write_signed_network_state(&network_dir, &state, original_pem, &root)?;
+    if options.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "old_fingerprint": old_fp.to_string(),
+                "new_fingerprint": new_fp.to_string(),
+                "old_version": old_version,
+                "new_version": new_version,
+                "status": "capability-updated",
+                "capabilities": {
+                    "relay_data": new_cert.details.capabilities.can_relay_data,
+                    "relay_control": new_cert.details.capabilities.can_relay_control,
+                    "proxy_subnet": new_cert.details.capabilities.can_proxy_subnet.iter().map(|net| net.to_string()).collect::<Vec<_>>(),
+                }
+            })
+        );
+    } else {
+        println!(
+            "Updated capabilities for {}; old cert revoked as superseded. version {} -> {}",
+            old_fp.to_string().chars().take(8).collect::<String>(),
+            old_version,
+            new_version
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct TrustCapabilitySetOptions {
+    trust_domain_id: String,
+    network_local_id: String,
+    fingerprint: String,
+    relay_data: Option<bool>,
+    relay_control: Option<bool>,
+    proxy_subnet: Vec<IpNet>,
+    clear_proxy_subnet: bool,
+    note: Option<String>,
+    json: bool,
+    passphrase_file: Option<PathBuf>,
 }
 
 fn handle_trust_tag_list(
@@ -5124,14 +5297,7 @@ fn handle_trust_hostname_update(
         });
     replace_member_index_entry(&mut state, old_fp, &new_cert);
 
-    let cert_dir = network_dir.join("member_certs");
-    std::fs::create_dir_all(&cert_dir)
-        .with_context(|| format!("failed to create {}", cert_dir.display()))?;
-    std::fs::write(
-        cert_dir.join(format!("{}.pem", new_cert.fingerprint())),
-        new_cert.to_pem(),
-    )
-    .context("failed to write reissued member cert")?;
+    write_reissued_member_cert(&network_dir, &new_cert)?;
 
     let old_version = state.details.version;
     let new_version = write_signed_network_state(&network_dir, &state, original_pem, &root)?;
@@ -7312,6 +7478,31 @@ async fn main() -> Result<(), Error> {
                 json,
                 passphrase_file,
             )?,
+            TrustSubCommand::Capability { command } => match command {
+                TrustCapabilitySubCommand::Set {
+                    trust_domain_id,
+                    network_local_id,
+                    fingerprint,
+                    relay_data,
+                    relay_control,
+                    proxy_subnet,
+                    clear_proxy_subnet,
+                    note,
+                    json,
+                    passphrase_file,
+                } => handle_trust_capability_set(TrustCapabilitySetOptions {
+                    trust_domain_id,
+                    network_local_id,
+                    fingerprint,
+                    relay_data,
+                    relay_control,
+                    proxy_subnet,
+                    clear_proxy_subnet,
+                    note,
+                    json,
+                    passphrase_file,
+                })?,
+            },
             TrustSubCommand::Tag { command } => match command {
                 TrustTagSubCommand::List {
                     trust_domain_id,
