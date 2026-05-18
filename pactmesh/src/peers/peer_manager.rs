@@ -202,6 +202,7 @@ pub(crate) struct TrustAclPeerIdentity {
     pub(crate) device_fingerprint: DeviceFingerprint,
     pub(crate) member_cert_fingerprint: MemberCertFingerprint,
     pub(crate) can_relay_data: bool,
+    pub(crate) can_relay_control: bool,
     pub(crate) proxy_cidrs: Vec<Cidr>,
 }
 
@@ -497,6 +498,7 @@ impl PeerManager {
             device_fingerprint: Self::device_fingerprint_from_member_cert(&cert),
             member_cert_fingerprint: cert.fingerprint(),
             can_relay_data: cert.details.capabilities.can_relay_data,
+            can_relay_control: cert.details.capabilities.can_relay_control,
             proxy_cidrs: Self::proxy_cidrs_from_cert(&cert),
         };
         self.peer_trust_acl_identities.insert(peer_id, identity);
@@ -716,6 +718,7 @@ impl PeerManager {
             device_fingerprint: Self::device_fingerprint_from_member_cert(&trust_ctx.member_cert),
             member_cert_fingerprint: trust_ctx.member_cert.fingerprint(),
             can_relay_data: trust_ctx.member_cert.details.capabilities.can_relay_data,
+            can_relay_control: trust_ctx.member_cert.details.capabilities.can_relay_control,
             proxy_cidrs: Self::proxy_cidrs_from_cert(&trust_ctx.member_cert),
         };
 
@@ -1761,13 +1764,24 @@ impl PeerManager {
             foreign_network_client.send_msg(msg, dst_peer_id).await
         } else if let Some(gateway) = peers.get_gateway_peer_id(dst_peer_id, policy.clone()).await {
             let relay_allowed = identities
-                .and_then(|identities| identities.get(&gateway).map(|entry| entry.can_relay_data))
+                .and_then(|identities| {
+                    identities.get(&gateway).map(|entry| {
+                        if packet_type == PacketType::Data as u8 {
+                            entry.can_relay_data
+                        } else {
+                            entry.can_relay_control
+                        }
+                    })
+                })
                 .unwrap_or(true);
             if !relay_allowed {
-                tracing::debug!(?gateway, ?dst_peer_id, "trust capability denied relay data");
-                Err(Error::RouteError(Some(
-                    "relay data capability denied".to_string(),
-                )))
+                let capability = if packet_type == PacketType::Data as u8 {
+                    "relay data capability denied"
+                } else {
+                    "relay control capability denied"
+                };
+                tracing::debug!(?gateway, ?dst_peer_id, %capability, "trust capability denied relay");
+                Err(Error::RouteError(Some(capability.to_string())))
             } else if peers.has_peer(gateway) || foreign_network_client.has_next_hop(gateway) {
                 relay_peer_map.send_msg(msg, dst_peer_id, policy).await
             } else {
@@ -2493,6 +2507,7 @@ mod tests {
             device_fingerprint,
             member_cert_fingerprint: MemberCertFingerprint(device_fingerprint.0),
             can_relay_data: true,
+            can_relay_control: true,
             proxy_cidrs,
         }
     }
@@ -3100,8 +3115,10 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
-    async fn send_msg_internal_denies_data_relay_without_trust_capability() {
+    async fn send_msg_internal_with_gateway_capability(
+        packet_type: PacketType,
+        configure_identity: impl FnOnce(&mut TrustAclPeerIdentity),
+    ) -> Result<(), Error> {
         struct GatewayRoute {
             dst_peer_id: PeerId,
             gateway_peer_id: PeerId,
@@ -3167,13 +3184,13 @@ mod tests {
 
         let identities = Arc::new(dashmap::DashMap::new());
         let mut gateway_identity = test_trust_identity(fp(2), Vec::new());
-        gateway_identity.can_relay_data = false;
+        configure_identity(&mut gateway_identity);
         identities.insert(gateway_peer_id, gateway_identity);
 
-        let mut pkt = ZCPacket::new_with_payload(b"blocked-forward-data");
-        pkt.fill_peer_manager_hdr(peer_mgr.my_peer_id(), dst_peer_id, PacketType::Data as u8);
+        let mut pkt = ZCPacket::new_with_payload(b"blocked-forward");
+        pkt.fill_peer_manager_hdr(peer_mgr.my_peer_id(), dst_peer_id, packet_type as u8);
 
-        let result = PeerManager::send_msg_internal(
+        PeerManager::send_msg_internal(
             &peer_mgr.peers,
             &peer_mgr.foreign_network_client,
             &peer_mgr.relay_peer_map,
@@ -3182,11 +3199,32 @@ mod tests {
             pkt,
             dst_peer_id,
         )
+        .await
+    }
+
+    #[tokio::test]
+    async fn send_msg_internal_denies_data_relay_without_trust_capability() {
+        let result = send_msg_internal_with_gateway_capability(PacketType::Data, |identity| {
+            identity.can_relay_data = false;
+        })
         .await;
 
         assert!(
             matches!(result, Err(Error::RouteError(Some(ref reason))) if reason == "relay data capability denied"),
             "gateway without can_relay_data must not forward business traffic: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_msg_internal_denies_control_relay_without_trust_capability() {
+        let result = send_msg_internal_with_gateway_capability(PacketType::RpcReq, |identity| {
+            identity.can_relay_control = false;
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(Error::RouteError(Some(ref reason))) if reason == "relay control capability denied"),
+            "gateway without can_relay_control must not forward control traffic: {result:?}"
         );
     }
 
