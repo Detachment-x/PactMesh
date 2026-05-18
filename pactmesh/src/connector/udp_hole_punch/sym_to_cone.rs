@@ -321,9 +321,11 @@ impl PunchSymToConeHoleClient {
         tid: u32,
     ) {
         let Some(inc) = my_nat_info.get_inc_of_easy_sym() else {
+            tracing::debug!(?my_nat_info, "skip predictable punch for non-easy-symmetric NAT");
             return;
         };
         let Some((base_port_num, max_port_num)) = base_port_for_easy_sym else {
+            tracing::debug!(?my_nat_info, "skip predictable punch without easy-symmetric port mapping");
             return;
         };
         let req = SendPunchPacketEasySymRequest {
@@ -345,7 +347,7 @@ impl PunchSymToConeHoleClient {
                 req,
             )
             .await;
-        tracing::debug!(?ret, "send punch packet for easy sym return");
+        tracing::info!(?ret, "send punch packet for easy sym return");
     }
 
     async fn remote_send_hole_punch_packet_random<
@@ -365,7 +367,7 @@ impl PunchSymToConeHoleClient {
             round,
             port_index,
         };
-        tracing::debug!(?req, "send punch packet for hard sym start");
+        tracing::info!(?req, "send punch packet for hard sym start");
         match rpc_stub
             .send_punch_packet_hard_sym(
                 BaseController {
@@ -381,7 +383,10 @@ impl PunchSymToConeHoleClient {
                 tracing::error!(?e, "failed to send punch packet for hard sym");
                 None
             }
-            Ok(resp) => Some(resp.next_port_index),
+            Ok(resp) => {
+                tracing::info!(?resp, "send punch packet for hard sym return");
+                Some(resp.next_port_index)
+            }
         }
     }
 
@@ -481,7 +486,10 @@ impl PunchSymToConeHoleClient {
             .select_punch_listener(
                 BaseController::default(),
                 SelectPunchListenerRequest {
-                    force_new: false,
+                    // Symmetric NAT attempts are sensitive to stale mapped listener ports.
+                    // Use a fresh remote listener each round when possible so the follow-up
+                    // RPC cannot target a listener that has already aged out or been rotated.
+                    force_new: round > 0,
                     prefer_port_mapping: true,
                 },
             )
@@ -551,7 +559,7 @@ impl PunchSymToConeHoleClient {
             .await?;
 
             let task_ret = punch_task.await;
-            tracing::debug!(?ret_tunnel, ?task_ret, "predictable punch task got result");
+            tracing::info!(?ret_tunnel, ?task_ret, "predictable punch task got result");
             if let Some(tunnel) = ret_tunnel {
                 return Ok(Some(tunnel));
             }
@@ -578,7 +586,7 @@ impl PunchSymToConeHoleClient {
         .await?;
 
         let punch_task_result = punch_task.await;
-        tracing::debug!(?punch_task_result, ?ret_tunnel, "punch task got result");
+        tracing::info!(?punch_task_result, ?ret_tunnel, "punch task got result");
 
         if let Ok(Some(next_port_idx)) = punch_task_result {
             *last_port_idx = next_port_idx as usize;
