@@ -66,6 +66,7 @@ message ExitNodePatch {
 message PatchConfigRequest {
   InstanceConfigPatch patch = 1;
   api.instance.InstanceIdentifier instance = 2;
+  optional bytes network_state_cbor = 3;
 }
 
 message PatchConfigResponse {}

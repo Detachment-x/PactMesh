@@ -1736,6 +1736,8 @@ impl Instance {
         pub struct ConfigRpcService {
             patcher: InstanceConfigPatcher,
             global_ctx: Weak<GlobalCtx>,
+            config_sync_service: Option<Arc<ConfigSyncService>>,
+            peer_manager: Arc<PeerManager>,
         }
 
         #[async_trait::async_trait]
@@ -1747,11 +1749,42 @@ impl Instance {
                 _: Self::Controller,
                 request: PatchConfigRequest,
             ) -> crate::proto::rpc_types::error::Result<PatchConfigResponse> {
-                let Some(patch) = request.patch else {
-                    return Ok(PatchConfigResponse::default());
-                };
-
-                self.patcher.apply_patch(patch).await?;
+                if let Some(patch) = request.patch {
+                    self.patcher.apply_patch(patch).await?;
+                }
+                if let Some(network_state_cbor) = request.network_state_cbor.as_ref() {
+                    let state: SignedNetworkState = from_cbor(network_state_cbor).map_err(|err| {
+                        rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                            "invalid network_state_cbor: {err}"
+                        ))
+                    })?;
+                    let config_sync = self.config_sync_service.as_ref().ok_or_else(|| {
+                        rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                            "config-sync service is not available"
+                        ))
+                    })?;
+                    config_sync
+                        .trust_pool
+                        .write()
+                        .await
+                        .apply_network_state(state.clone())
+                        .map_err(|err| {
+                            rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                                "failed to apply network_state: {err}"
+                            ))
+                        })?;
+                    if let Some(global_ctx) = self.global_ctx.upgrade() {
+                        global_ctx.set_trust_data_keys_from_network_state(&state);
+                        if let Err(err) =
+                            Instance::refresh_runtime_trust_state(&self.peer_manager, &global_ctx)
+                                .await
+                        {
+                            return Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                                "failed to refresh runtime trust state: {err}"
+                            )));
+                        }
+                    }
+                }
                 Ok(PatchConfigResponse::default())
             }
 
@@ -1771,6 +1804,8 @@ impl Instance {
         ConfigRpcService {
             patcher: self.get_config_patcher(),
             global_ctx: Arc::downgrade(&self.global_ctx),
+            config_sync_service: self.config_sync_service.clone(),
+            peer_manager: self.peer_manager.clone(),
         }
     }
 

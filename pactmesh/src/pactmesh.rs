@@ -1993,6 +1993,7 @@ impl<'a> CommandHandler<'a> {
                 }],
                 ..Default::default()
             }),
+            network_state_cbor: None,
         };
         let _response = client
             .patch_config(BaseController::default(), request)
@@ -2464,10 +2465,30 @@ impl<'a> CommandHandler<'a> {
                 }],
                 ..Default::default()
             }),
+            network_state_cbor: None,
         };
         let _response = client
             .patch_config(BaseController::default(), request)
             .await?;
+        Ok(())
+    }
+
+    async fn apply_network_state_to_daemon(
+        &self,
+        state: &pactmesh::trust::SignedNetworkState,
+    ) -> Result<(), Error> {
+        let client = self.get_config_client().await?;
+        client
+            .patch_config(
+                BaseController::default(),
+                PatchConfigRequest {
+                    instance: Some(self.instance_selector.clone()),
+                    patch: None,
+                    network_state_cbor: Some(to_canonical_cbor(state)),
+                },
+            )
+            .await
+            .with_context(|| "failed to apply network_state to running daemon")?;
         Ok(())
     }
 
@@ -2527,6 +2548,7 @@ impl<'a> CommandHandler<'a> {
                 }],
                 ..Default::default()
             }),
+            network_state_cbor: None,
         };
 
         client
@@ -2631,6 +2653,7 @@ impl<'a> CommandHandler<'a> {
                 }),
                 ..Default::default()
             }),
+            network_state_cbor: None,
         };
 
         client
@@ -2688,6 +2711,7 @@ impl<'a> CommandHandler<'a> {
                 }),
                 ..Default::default()
             }),
+            network_state_cbor: None,
         };
 
         client
@@ -3361,6 +3385,7 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             json,
             passphrase_file,
         } => handle_lab_member_toggle(
+            handler,
             trust_domain_id,
             network_local_id,
             device,
@@ -3369,7 +3394,8 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             note,
             json,
             passphrase_file,
-        ),
+        )
+        .await,
         LabSubCommand::Enable {
             trust_domain_id,
             network_local_id,
@@ -3377,6 +3403,7 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             json,
             passphrase_file,
         } => handle_lab_member_toggle(
+            handler,
             trust_domain_id,
             network_local_id,
             device,
@@ -3385,7 +3412,8 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             None,
             json,
             passphrase_file,
-        ),
+        )
+        .await,
         LabSubCommand::Commands {
             role,
             network_local_id,
@@ -4292,7 +4320,8 @@ fn ssh_capture(host: &str, command: &str) -> Result<String, Error> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn handle_lab_member_toggle(
+async fn handle_lab_member_toggle(
+    handler: &CommandHandler<'_>,
     trust_domain_id: String,
     network_local_id: String,
     device: Option<String>,
@@ -4346,6 +4375,7 @@ fn handle_lab_member_toggle(
     let row = resolve_device_or_fingerprint(rows, &selector)?;
     if disable {
         handle_trust_disable(
+            Some(handler),
             trust_domain_id,
             network_local_id,
             row.fingerprint,
@@ -4354,14 +4384,17 @@ fn handle_lab_member_toggle(
             json,
             passphrase_file,
         )
+        .await
     } else {
         handle_trust_enable(
+            Some(handler),
             trust_domain_id,
             network_local_id,
             row.fingerprint,
             json,
             passphrase_file,
         )
+        .await
     }
 }
 
@@ -6152,7 +6185,8 @@ fn unlock_domain_root(
     Ok(root)
 }
 
-fn handle_trust_disable(
+async fn handle_trust_disable(
+    handler: Option<&CommandHandler<'_>>,
     trust_domain_id: String,
     network_local_id: String,
     fingerprint: String,
@@ -6204,8 +6238,20 @@ fn handle_trust_disable(
             reason_note: note,
         });
     let old_version = original_state.details.version;
-    let new_version =
-        write_signed_network_state(&network_dir, &original_state, original_pem, &root)?;
+    let next_state = sign_next_network_state(&original_state, &root);
+    let new_version = write_pre_signed_network_state(
+        &network_dir,
+        old_version,
+        original_pem,
+        &next_state,
+    )?;
+    if let Some(handler) = handler {
+        if let Err(err) = handler.apply_network_state_to_daemon(&next_state).await {
+            eprintln!(
+                "warning: network_state written to disk but not hot-loaded into running daemon: {err:#}"
+            );
+        }
+    }
 
     if json {
         println!(
@@ -6226,7 +6272,8 @@ fn handle_trust_disable(
     Ok(())
 }
 
-fn handle_trust_enable(
+async fn handle_trust_enable(
+    handler: Option<&CommandHandler<'_>>,
     trust_domain_id: String,
     network_local_id: String,
     fingerprint: String,
@@ -6257,8 +6304,20 @@ fn handle_trust_enable(
 
     let root = unlock_domain_root(&trust_domain_id, passphrase_file)?;
     let old_version = original_state.details.version;
-    let new_version =
-        write_signed_network_state(&network_dir, &original_state, original_pem, &root)?;
+    let next_state = sign_next_network_state(&original_state, &root);
+    let new_version = write_pre_signed_network_state(
+        &network_dir,
+        old_version,
+        original_pem,
+        &next_state,
+    )?;
+    if let Some(handler) = handler {
+        if let Err(err) = handler.apply_network_state_to_daemon(&next_state).await {
+            eprintln!(
+                "warning: network_state written to disk but not hot-loaded into running daemon: {err:#}"
+            );
+        }
+    }
 
     if json {
         println!(
@@ -8160,6 +8219,7 @@ async fn main() -> Result<(), Error> {
                 passphrase_file,
             } => {
                 handle_trust_disable(
+                    Some(&handler),
                     trust_domain_id,
                     network_local_id,
                     fingerprint,
@@ -8167,7 +8227,8 @@ async fn main() -> Result<(), Error> {
                     note,
                     json,
                     passphrase_file,
-                )?;
+                )
+                .await?;
             }
             TrustSubCommand::Enable {
                 trust_domain_id,
@@ -8177,12 +8238,14 @@ async fn main() -> Result<(), Error> {
                 passphrase_file,
             } => {
                 handle_trust_enable(
+                    Some(&handler),
                     trust_domain_id,
                     network_local_id,
                     fingerprint,
                     json,
                     passphrase_file,
-                )?;
+                )
+                .await?;
             }
             TrustSubCommand::ListMembers {
                 trust_domain_id,

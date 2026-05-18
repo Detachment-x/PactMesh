@@ -3,7 +3,7 @@ use pactmesh::{
     instance::instance::Instance,
     proto::{
         api::config::{
-            ApproveJoinRequestRequest, FetchPendingMemberCertRequest,
+            ApproveJoinRequestRequest, FetchPendingMemberCertRequest, PatchConfigRequest,
             ListPendingJoinRequestsRequest, RejectJoinRequestRequest, SubmitJoinRequestRequest,
         },
         rpc_types::controller::BaseController,
@@ -395,6 +395,41 @@ async fn test_approve_join_request_applies_supplied_network_state_to_root_daemon
     assert_eq!(fetched_state, supplied_state);
     assert_eq!(fetched_state.details.version, 2);
     assert_eq!(fetched_state.details.payload.member_cert_index.len(), 1);
+}
+
+#[tokio::test]
+async fn test_patch_config_applies_supplied_network_state_to_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = TrustDomainRoot::generate();
+    write_root_files(dir.path(), &root);
+    let instance = root_metadata_only_instance(dir.path(), &root);
+    let jr = join_request(&root);
+    let supplied_cert = member_cert_for_request(&root, &jr);
+    let supplied_state = network_state_with_member(&root, &supplied_cert);
+    let api = instance.get_api_rpc_service();
+
+    api.get_config_service()
+        .patch_config(
+            BaseController::default(),
+            PatchConfigRequest {
+                instance: None,
+                patch: None,
+                network_state_cbor: Some(to_canonical_cbor(&supplied_state)),
+            },
+        )
+        .await
+        .unwrap();
+
+    let cached = instance
+        .get_config_sync_service()
+        .unwrap()
+        .trust_pool
+        .read()
+        .await
+        .network_state(&root.id(), &NetworkLocalId::try_from_str(NETWORK_LOCAL_ID).unwrap())
+        .cloned()
+        .unwrap();
+    assert_eq!(cached, supplied_state);
 }
 
 #[tokio::test]
