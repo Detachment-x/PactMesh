@@ -48,6 +48,16 @@ impl RelayGrantTable {
             .find(|entry| &entry.foreign_root_pk == td && entry.expires_at > now)
             .map(|entry| &entry.capabilities)
     }
+
+    pub fn permits_data_relay(&self, td: &TrustDomainId, now: u64) -> bool {
+        self.permits(td, now)
+            .is_some_and(|capabilities| capabilities.can_relay_data)
+    }
+
+    pub fn permits_holepunch_assist(&self, td: &TrustDomainId, now: u64) -> bool {
+        self.permits(td, now)
+            .is_some_and(|capabilities| capabilities.can_assist_holepunch)
+    }
 }
 
 /// Proof a session-initiator presents to a borrowed relay.
@@ -81,8 +91,11 @@ impl BorrowedRelayResolver {
         relay_grants: &RelayGrantTable,
         now: u64,
     ) -> Result<TrustDomainId, BorrowedRelayError> {
-        if relay_grants.permits(&proof.trust_domain_id, now).is_none() {
-            return Err(BorrowedRelayError::NotServing(proof.trust_domain_id));
+        if !relay_grants.permits_data_relay(&proof.trust_domain_id, now) {
+            return Err(BorrowedRelayError::CapabilityDenied {
+                trust_domain_id: proof.trust_domain_id,
+                capability: "can_relay_data",
+            });
         }
         if proof.member_cert.details.expires_at <= now {
             return Err(BorrowedRelayError::Expired);
@@ -149,4 +162,53 @@ pub enum BorrowedRelayError {
     Expired,
     /// Borrowed proof timestamp skew exceeds the allowed window.
     BadTimestamp,
+    /// The relay serves this trust domain, but not for the requested capability.
+    CapabilityDenied {
+        trust_domain_id: TrustDomainId,
+        capability: &'static str,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn td(byte: u8) -> TrustDomainId {
+        TrustDomainId([byte; 32])
+    }
+
+    fn table(can_relay_data: bool, can_assist_holepunch: bool, expires_at: u64) -> RelayGrantTable {
+        RelayGrantTable::from_entries(vec![RelayGrantEntry {
+            foreign_root_pk: td(7),
+            capabilities: RelayCapabilities {
+                can_relay_data,
+                can_assist_holepunch,
+            },
+            expires_at,
+        }])
+    }
+
+    #[test]
+    fn relay_grant_checks_data_relay_capability() {
+        let grants = table(false, true, 100);
+
+        assert!(!grants.permits_data_relay(&td(7), 50));
+        assert!(grants.permits_holepunch_assist(&td(7), 50));
+    }
+
+    #[test]
+    fn relay_grant_checks_holepunch_assist_capability() {
+        let grants = table(true, false, 100);
+
+        assert!(grants.permits_data_relay(&td(7), 50));
+        assert!(!grants.permits_holepunch_assist(&td(7), 50));
+    }
+
+    #[test]
+    fn relay_grant_capabilities_expire_together() {
+        let grants = table(true, true, 100);
+
+        assert!(!grants.permits_data_relay(&td(7), 100));
+        assert!(!grants.permits_holepunch_assist(&td(7), 100));
+    }
 }

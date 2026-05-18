@@ -792,13 +792,12 @@ impl ForeignNetworkManager {
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock after epoch")
                 .as_secs();
-            if self
+            if !self
                 .relay_grants
-                .permits(&proof.trust_domain_id, now_unix)
-                .is_none()
+                .permits_data_relay(&proof.trust_domain_id, now_unix)
             {
                 return Err(anyhow::anyhow!(
-                    "borrowed_proof from trust_domain {} not permitted by relay grants",
+                    "borrowed_proof from trust_domain {} is not permitted for can_relay_data",
                     proof.trust_domain_id
                 )
                 .into());

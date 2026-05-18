@@ -835,6 +835,8 @@ enum TrustSubCommand {
         config: PathBuf,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
+        #[arg(long, help = "show runtime enforcement notes for each capability")]
+        explain: bool,
     },
     ShowDevice {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
@@ -4253,13 +4255,15 @@ struct ExternalTrustRow {
     role: &'static str,
     can_relay_data: bool,
     can_assist_holepunch: bool,
+    data_relay_enforcement: &'static str,
+    holepunch_assist_enforcement: &'static str,
     expires_at: u64,
     foreign_trust_domain_meta_pem: String,
     foreign_network_state_pem: String,
     foreign_bootstrap_cbor: String,
 }
 
-fn handle_trust_list_external(config: PathBuf, json: bool) -> Result<(), Error> {
+fn handle_trust_list_external(config: PathBuf, json: bool, explain: bool) -> Result<(), Error> {
     let cfg = TomlConfigLoader::new(&config)?;
     let Some(trust_domain) = cfg.get_trust_domain() else {
         if json {
@@ -4278,6 +4282,8 @@ fn handle_trust_list_external(config: PathBuf, json: bool) -> Result<(), Error> 
             role: "external",
             can_relay_data: entry.can_relay_data,
             can_assist_holepunch: entry.can_assist_holepunch,
+            data_relay_enforcement: "enforced for borrowed relay sessions",
+            holepunch_assist_enforcement: "grant parsed; no cross-trust holepunch assist path currently uses it",
             expires_at: entry.expires_at,
             foreign_trust_domain_meta_pem: entry
                 .foreign_trust_domain_meta_pem
@@ -4302,22 +4308,44 @@ fn handle_trust_list_external(config: PathBuf, json: bool) -> Result<(), Error> 
         println!("(no external trust domains)");
         return Ok(());
     }
-    println!(
-        "foreign_root_pk	role	relay_data	assist_holepunch	expires_at	meta_pem	network_state_pem	bootstrap"
-    );
+    if explain {
+        println!(
+            "foreign_root_pk	role	relay_data	assist_holepunch	data_relay_enforcement	holepunch_assist_enforcement	expires_at	meta_pem	network_state_pem	bootstrap"
+        );
+    } else {
+        println!(
+            "foreign_root_pk	role	relay_data	assist_holepunch	expires_at	meta_pem	network_state_pem	bootstrap"
+        );
+    }
     for row in rows {
         let root_prefix = row.foreign_root_pk_hex.chars().take(12).collect::<String>();
-        println!(
-            "{}	{}	{}	{}	{}	{}	{}	{}",
-            root_prefix,
-            row.role,
-            row.can_relay_data,
-            row.can_assist_holepunch,
-            row.expires_at,
-            row.foreign_trust_domain_meta_pem,
-            row.foreign_network_state_pem,
-            row.foreign_bootstrap_cbor
-        );
+        if explain {
+            println!(
+                "{}	{}	{}	{}	{}	{}	{}	{}	{}	{}",
+                root_prefix,
+                row.role,
+                row.can_relay_data,
+                row.can_assist_holepunch,
+                row.data_relay_enforcement,
+                row.holepunch_assist_enforcement,
+                row.expires_at,
+                row.foreign_trust_domain_meta_pem,
+                row.foreign_network_state_pem,
+                row.foreign_bootstrap_cbor
+            );
+        } else {
+            println!(
+                "{}	{}	{}	{}	{}	{}	{}	{}",
+                root_prefix,
+                row.role,
+                row.can_relay_data,
+                row.can_assist_holepunch,
+                row.expires_at,
+                row.foreign_trust_domain_meta_pem,
+                row.foreign_network_state_pem,
+                row.foreign_bootstrap_cbor
+            );
+        }
     }
     Ok(())
 }
@@ -7535,8 +7563,12 @@ async fn main() -> Result<(), Error> {
             } => {
                 handle_trust_list_members(trust_domain_id, network_local_id, include, json)?;
             }
-            TrustSubCommand::ListExternal { config, json } => {
-                handle_trust_list_external(config, json)?;
+            TrustSubCommand::ListExternal {
+                config,
+                json,
+                explain,
+            } => {
+                handle_trust_list_external(config, json, explain)?;
             }
             TrustSubCommand::ShowDevice {
                 trust_domain_id,
