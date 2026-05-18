@@ -30,6 +30,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use pactmesh::trust::config_sync_client::ConfigSyncClient;
 use pactmesh::trust::config_sync_service::ConfigSyncService;
+use pactmesh::trust::{TRUST_DOMAIN_META_PEM_LABEL, trust_domain_meta_path, unwrap_armored};
 use pactmesh::{connector::manual::recovery_candidate_urls_for_diagnostics, trust::PeerHint};
 
 const NETWORK_NAME: &str = "config-sync-test";
@@ -460,6 +461,47 @@ async fn test_config_sync_persists_network_state_and_connector_can_read_hint() {
     let updated = guard
         .network_state(&root.id(), &cert.details.network_local_id)
         .unwrap();
+    assert_eq!(updated.details.version, 2);
+}
+
+#[tokio::test]
+async fn test_config_sync_persists_trust_domain_meta() {
+    let root = TrustDomainRoot::generate();
+    let sk_self = SignKey::generate();
+    let cert = sample_member_cert(&root, &sk_self, "device-a", 1);
+    let state = sample_network_state(&root, &cert, 1);
+    let server_meta = sample_trust_domain_meta(&root, 2);
+    let client_meta = sample_trust_domain_meta(&root, 1);
+    let server_pool = build_pool(&root, Some(state.clone()), Some(server_meta.clone()));
+    let client_pool = build_pool(&root, Some(state), Some(client_meta));
+    let service = ConfigSyncService::new(server_pool, NETWORK_NAME.to_owned());
+    let (server_mgr, client_mgr, server_id, client_id) = rpc_mgr_pair();
+    service.register(&server_mgr);
+    let dir = tempfile::tempdir().unwrap();
+
+    let client = ConfigSyncClient::new(
+        client_mgr,
+        client_id,
+        client_pool.clone(),
+        NETWORK_NAME.to_owned(),
+    )
+    .with_known_peers(vec![server_id])
+    .with_caller_member_cert(&cert)
+    .with_network_state_persist_domain_dir(dir.path().to_path_buf());
+
+    client.sync_once(false).await.unwrap();
+
+    let path = trust_domain_meta_path(dir.path());
+    let payload = unwrap_armored(
+        &std::fs::read_to_string(path).unwrap(),
+        TRUST_DOMAIN_META_PEM_LABEL,
+    )
+    .unwrap();
+    let persisted: SignedTrustDomainMeta = from_cbor(&payload).unwrap();
+    assert_eq!(persisted, server_meta);
+
+    let guard = client_pool.read().await;
+    let updated = guard.trust_domain_meta(&root.id()).unwrap();
     assert_eq!(updated.details.version, 2);
 }
 

@@ -47,6 +47,8 @@ mod relay_grant_test;
 mod revocation_test;
 #[path = "trust/services_wired_test.rs"]
 mod services_wired_test;
+#[path = "trust/trust_domain_meta_receiver_test.rs"]
+mod trust_domain_meta_receiver_test;
 #[path = "trust/trust_domain_meta_test.rs"]
 mod trust_domain_meta_test;
 #[path = "trust/trust_pool_foreign_test.rs"]

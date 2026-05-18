@@ -1095,7 +1095,14 @@ impl Instance {
                 let peer_manager = peer_manager.clone();
                 let global_ctx = global_ctx.clone();
                 tokio::spawn(async move {
-                    peer_manager.enforce_current_trust_state().await;
+                    if let Err(err) =
+                        Self::refresh_runtime_trust_state(&peer_manager, &global_ctx).await
+                    {
+                        tracing::warn!(
+                            ?err,
+                            "failed to refresh runtime trust state after config sync"
+                        );
+                    }
                     if let Some(trust_ctx) = global_ctx.get_trust_context().await
                         && let Some(trust_pool) = peer_manager.get_trust_pool()
                         && let Some(state) = trust_pool
@@ -1109,6 +1116,18 @@ impl Instance {
                 });
             },
         )));
+    }
+
+    async fn refresh_runtime_trust_state(
+        peer_manager: &Arc<PeerManager>,
+        global_ctx: &ArcGlobalCtx,
+    ) -> Result<(), Error> {
+        peer_manager.enforce_current_trust_state().await;
+        global_ctx
+            .get_acl_filter()
+            .reload_rules(AclRuleBuilder::build(global_ctx)?.as_ref());
+        peer_manager.get_route().refresh_acl_groups().await;
+        Ok(())
     }
 
     pub fn get_config_sync_service(&self) -> Option<Arc<ConfigSyncService>> {

@@ -49,6 +49,12 @@ impl RelayGrantTable {
             .map(|entry| &entry.capabilities)
     }
 
+    pub fn has_active_grant(&self, td: &TrustDomainId, now: u64) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| &entry.foreign_root_pk == td && entry.expires_at > now)
+    }
+
     pub fn permits_data_relay(&self, td: &TrustDomainId, now: u64) -> bool {
         self.permits(td, now)
             .is_some_and(|capabilities| capabilities.can_relay_data)
@@ -91,6 +97,9 @@ impl BorrowedRelayResolver {
         relay_grants: &RelayGrantTable,
         now: u64,
     ) -> Result<TrustDomainId, BorrowedRelayError> {
+        if !relay_grants.has_active_grant(&proof.trust_domain_id, now) {
+            return Err(BorrowedRelayError::NotServing(proof.trust_domain_id));
+        }
         if !relay_grants.permits_data_relay(&proof.trust_domain_id, now) {
             return Err(BorrowedRelayError::CapabilityDenied {
                 trust_domain_id: proof.trust_domain_id,

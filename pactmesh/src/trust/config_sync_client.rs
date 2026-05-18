@@ -15,7 +15,8 @@ use crate::{
     },
     trust::{
         MemberCert, NetworkLocalId, SignedNetworkState, SignedTrustDomainMeta, TrustDomainId,
-        TrustDomainPool, from_cbor, receive_network_state, to_canonical_cbor,
+        TrustDomainPool, from_cbor, receive_network_state, receive_trust_domain_meta,
+        to_canonical_cbor,
     },
 };
 
@@ -270,8 +271,18 @@ impl ConfigSyncClient {
             }
             Some(config_resource_selector::Selector::TrustDomainMetaId(_)) => {
                 let meta: SignedTrustDomainMeta = from_cbor(&response.payload_cbor)?;
-                let mut pool = self.trust_pool.write().await;
-                let _ = pool.apply_trust_domain_meta(meta);
+                let trust_domain_id = parse_trust_domain_id(match selector.selector.as_ref() {
+                    Some(config_resource_selector::Selector::TrustDomainMetaId(id)) => id,
+                    _ => unreachable!("selector branch already matched trust_domain_meta"),
+                })?;
+                receive_trust_domain_meta(
+                    &self.trust_pool,
+                    &trust_domain_id,
+                    meta,
+                    self.network_state_persist_domain_dir.as_deref(),
+                    format!("config-sync:{peer_id}"),
+                )
+                .await?;
             }
             Some(config_resource_selector::Selector::PendingCertFor(_)) | None => {}
         }

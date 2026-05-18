@@ -36,6 +36,7 @@ pub mod pool;
 pub mod relay_borrow;
 pub mod revocation;
 pub mod trust_domain_meta;
+pub mod trust_domain_meta_receiver;
 pub mod types;
 pub mod wire;
 
@@ -76,6 +77,10 @@ pub use relay_borrow::{
 pub use revocation::{DisabledCert, RevocationReason, RevokedCert};
 pub use trust_domain_meta::{
     ActiveRelay, RelayCapabilities, SignedTrustDomainMeta, UnsignedTrustDomainMeta,
+};
+pub use trust_domain_meta_receiver::{
+    TRUST_DOMAIN_META_PEM_LABEL, TrustDomainMetaReceiveError, TrustDomainMetaReceiveReport,
+    receive_trust_domain_meta, trust_domain_meta_path,
 };
 pub use types::{
     MemberCertFingerprint, NetworkLocalId, NetworkLocalIdError, TrustDomainId, TrustError,
