@@ -34,6 +34,7 @@ use url::Url;
 
 use pactmesh::{
     common::{
+        config::TomlConfigLoader,
         config_dir::{pnw_config_dir, pnw_trust_domains_dir},
         constants::PACTMESH_VERSION,
         stun::{StunInfoCollector, StunInfoCollectorTrait},
@@ -826,6 +827,12 @@ enum TrustSubCommand {
             help = "member status filter"
         )]
         include: MemberIncludeArg,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+    },
+    ListExternal {
+        #[arg(long, help = "pactmesh-core TOML config file to inspect")]
+        config: PathBuf,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
     },
@@ -4240,6 +4247,81 @@ fn include_member_status(include: &MemberIncludeArg, status: &str) -> bool {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct ExternalTrustRow {
+    foreign_root_pk_hex: String,
+    role: &'static str,
+    can_relay_data: bool,
+    can_assist_holepunch: bool,
+    expires_at: u64,
+    foreign_trust_domain_meta_pem: String,
+    foreign_network_state_pem: String,
+    foreign_bootstrap_cbor: String,
+}
+
+fn handle_trust_list_external(config: PathBuf, json: bool) -> Result<(), Error> {
+    let cfg = TomlConfigLoader::new(&config)?;
+    let Some(trust_domain) = cfg.get_trust_domain() else {
+        if json {
+            println!("[]");
+        } else {
+            println!("(no trust_domain configured)");
+        }
+        return Ok(());
+    };
+
+    let rows = trust_domain
+        .relay_serving
+        .into_iter()
+        .map(|entry| ExternalTrustRow {
+            foreign_root_pk_hex: entry.foreign_root_pk_hex,
+            role: "external",
+            can_relay_data: entry.can_relay_data,
+            can_assist_holepunch: entry.can_assist_holepunch,
+            expires_at: entry.expires_at,
+            foreign_trust_domain_meta_pem: entry
+                .foreign_trust_domain_meta_pem
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            foreign_network_state_pem: entry
+                .foreign_network_state_pem
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            foreign_bootstrap_cbor: entry
+                .foreign_bootstrap_cbor
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+
+    if json {
+        println!("{}", serde_json::to_string(&rows)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("(no external trust domains)");
+        return Ok(());
+    }
+    println!(
+        "foreign_root_pk	role	relay_data	assist_holepunch	expires_at	meta_pem	network_state_pem	bootstrap"
+    );
+    for row in rows {
+        let root_prefix = row.foreign_root_pk_hex.chars().take(12).collect::<String>();
+        println!(
+            "{}	{}	{}	{}	{}	{}	{}	{}",
+            root_prefix,
+            row.role,
+            row.can_relay_data,
+            row.can_assist_holepunch,
+            row.expires_at,
+            row.foreign_trust_domain_meta_pem,
+            row.foreign_network_state_pem,
+            row.foreign_bootstrap_cbor
+        );
+    }
+    Ok(())
+}
+
 fn handle_trust_list_members(
     trust_domain_id: String,
     network_local_id: String,
@@ -7452,6 +7534,9 @@ async fn main() -> Result<(), Error> {
                 json,
             } => {
                 handle_trust_list_members(trust_domain_id, network_local_id, include, json)?;
+            }
+            TrustSubCommand::ListExternal { config, json } => {
+                handle_trust_list_external(config, json)?;
             }
             TrustSubCommand::ShowDevice {
                 trust_domain_id,
