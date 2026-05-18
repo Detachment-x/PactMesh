@@ -39,6 +39,7 @@ use super::common::{PunchHoleServerCommon, UdpNatType, UdpSocketArray};
 
 const UDP_ARRAY_SIZE_FOR_HARD_SYM: usize = 84;
 const MAX_EASY_SYM_MAPPING_PROBES: usize = 32;
+const EASY_SYM_MAPPING_TIMEOUT_MS: u64 = 2500;
 
 fn easy_sym_predict_window(observed_span: u32) -> u32 {
     observed_span
@@ -529,9 +530,18 @@ impl PunchSymToConeHoleClient {
         defer! { udp_array.remove_intreast_tid(tid);}
 
         let port_index = *last_port_idx as u32;
-        let base_port_for_easy_sym = self
-            .get_base_port_for_easy_sym(my_nat_info, &udp_array)
-            .await;
+        let base_port_for_easy_sym = tokio::time::timeout(
+            Duration::from_millis(EASY_SYM_MAPPING_TIMEOUT_MS),
+            self.get_base_port_for_easy_sym(my_nat_info, &udp_array),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                timeout_ms = EASY_SYM_MAPPING_TIMEOUT_MS,
+                "easy symmetric port mapping timed out; falling back to random punch"
+            );
+            None
+        });
         udp_array
             .send_with_all(&packet, remote_mapped_addr.into())
             .await?;
