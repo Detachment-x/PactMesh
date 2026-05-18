@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Error};
+use anyhow::Error;
 use both_easy_sym::{PunchBothEasySymHoleClient, PunchBothEasySymHoleServer};
 use common::{PunchHoleServerCommon, UdpNatType, UdpPunchClientMethod};
 use cone::{PunchConeHoleClient, PunchConeHoleServer};
@@ -113,8 +113,8 @@ impl UdpHolePunchRpc for UdpHolePunchServer {
         input: SendPunchPacketHardSymRequest,
     ) -> rpc_types::error::Result<SendPunchPacketHardSymResponse> {
         let _locked = get_sym_punch_lock(self.common.get_peer_mgr().my_peer_id())
-            .try_lock_owned()
-            .with_context(|| "sym punch lock is busy")?;
+            .lock_owned()
+            .await;
         self.sym_to_cone_server
             .send_punch_packet_hard_sym(input)
             .await
@@ -126,8 +126,8 @@ impl UdpHolePunchRpc for UdpHolePunchServer {
         input: SendPunchPacketEasySymRequest,
     ) -> rpc_types::error::Result<Void> {
         let _locked = get_sym_punch_lock(self.common.get_peer_mgr().my_peer_id())
-            .try_lock_owned()
-            .with_context(|| "sym punch lock is busy")?;
+            .lock_owned()
+            .await;
         self.sym_to_cone_server
             .send_punch_packet_easy_sym(input)
             .await
@@ -141,8 +141,8 @@ impl UdpHolePunchRpc for UdpHolePunchServer {
         input: SendPunchPacketBothEasySymRequest,
     ) -> rpc_types::error::Result<SendPunchPacketBothEasySymResponse> {
         let _locked = get_sym_punch_lock(self.common.get_peer_mgr().my_peer_id())
-            .try_lock_owned()
-            .with_context(|| "sym punch lock is busy")?;
+            .lock_owned()
+            .await;
         self.both_easy_sym_server
             .send_punch_packet_both_easy_sym(input)
             .await
