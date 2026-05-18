@@ -514,6 +514,139 @@ enum LabSubCommand {
         )]
         bin_dir: Option<String>,
     },
+
+    #[command(
+        about = "run an SSH-driven three-node no-TUN regression test using existing trust files"
+    )]
+    RemoteRun {
+        #[arg(long, help = "SSH host for the public/root A node")]
+        a_host: String,
+        #[arg(long, help = "SSH host for the Windows/Linux C node")]
+        c_host: String,
+        #[arg(
+            long,
+            help = "trust-domain id used by existing test files",
+            allow_hyphen_values = true
+        )]
+        trust_domain_id: String,
+        #[arg(long, default_value = "office-net", help = "network-local id")]
+        network_local_id: String,
+        #[arg(
+            long,
+            default_value = "tcp://203.0.113.16:11010",
+            help = "seed URL used by B/C"
+        )]
+        seed: String,
+        #[arg(
+            long,
+            default_value = "target/release",
+            help = "local Linux release dir containing pactmesh and pactmesh-core"
+        )]
+        linux_bin_dir: PathBuf,
+        #[arg(
+            long,
+            help = "local Windows artifact dir containing pactmesh.exe and pactmesh-core.exe"
+        )]
+        windows_bin_dir: Option<PathBuf>,
+        #[arg(
+            long,
+            default_value = "/root/pactmesh-test-34addb4/bin",
+            help = "remote A bin dir"
+        )]
+        a_bin_dir: String,
+        #[arg(
+            long,
+            default_value = "/tmp/pactmesh-test-34addb4/bin",
+            help = "local B bin dir"
+        )]
+        b_bin_dir: String,
+        #[arg(
+            long,
+            default_value = "D:\\X.M.F\\temp\\2026.04.30-内网软件\\pactmesh-windows-x86_64",
+            help = "remote C bin dir"
+        )]
+        c_bin_dir: String,
+        #[arg(
+            long,
+            default_value = "/root/pactmesh-test-34addb4/run/xdg",
+            help = "remote A XDG_CONFIG_HOME"
+        )]
+        a_xdg: String,
+        #[arg(
+            long,
+            default_value = "/tmp/pactmesh-test-34addb4/run-b/xdg",
+            help = "local B XDG_CONFIG_HOME"
+        )]
+        b_xdg: String,
+        #[arg(
+            long,
+            default_value = "D:\\pactmesh-test-e8b014c\\xdg",
+            help = "remote C XDG_CONFIG_HOME"
+        )]
+        c_xdg: String,
+        #[arg(
+            long,
+            default_value = "/root/pactmesh-test-34addb4/run/logs/root-a.log",
+            help = "remote A log path"
+        )]
+        a_log: String,
+        #[arg(
+            long,
+            default_value = "/tmp/pactmesh-test-34addb4/run-b/logs/node-b.log",
+            help = "local B log path"
+        )]
+        b_log: String,
+        #[arg(
+            long,
+            default_value = "D:\\pactmesh-test-e8b014c\\win-c.log",
+            help = "remote C log path"
+        )]
+        c_log: String,
+        #[arg(long, default_value = "15889", help = "A RPC port")]
+        a_rpc: u16,
+        #[arg(long, default_value = "15890", help = "B RPC port")]
+        b_rpc: u16,
+        #[arg(long, default_value = "15891", help = "C RPC port")]
+        c_rpc: u16,
+        #[arg(long, default_value = "11010", help = "A listener port")]
+        a_listen: u16,
+        #[arg(long, default_value = "11020", help = "B listener port")]
+        b_listen: u16,
+        #[arg(long, default_value = "11030", help = "C listener port")]
+        c_listen: u16,
+        #[arg(
+            long,
+            default_value = "120",
+            help = "seconds to wait before collecting results"
+        )]
+        wait_secs: u64,
+        #[arg(
+            long,
+            default_value = "20",
+            help = "seconds between peer checks while waiting for B/C direct"
+        )]
+        poll_secs: u64,
+        #[arg(long, default_value = "false", help = "skip binary upload/copy")]
+        no_deploy: bool,
+        #[arg(
+            long,
+            default_value = "false",
+            help = "leave daemons running after collection"
+        )]
+        keep_running: bool,
+        #[arg(
+            long,
+            default_value = "LAPTOP",
+            help = "hostname substring B should see for C"
+        )]
+        b_expect_peer: String,
+        #[arg(
+            long,
+            default_value = "user",
+            help = "hostname substring C should see for B"
+        )]
+        c_expect_peer: String,
+    },
     #[command(about = "disable a member interactively")]
     Disable {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
@@ -3160,6 +3293,65 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
         LabSubCommand::RemoteCheck { hosts, bin_dir } => {
             handle_lab_remote_check(&hosts, bin_dir.as_deref())
         }
+        LabSubCommand::RemoteRun {
+            a_host,
+            c_host,
+            trust_domain_id,
+            network_local_id,
+            seed,
+            linux_bin_dir,
+            windows_bin_dir,
+            a_bin_dir,
+            b_bin_dir,
+            c_bin_dir,
+            a_xdg,
+            b_xdg,
+            c_xdg,
+            a_log,
+            b_log,
+            c_log,
+            a_rpc,
+            b_rpc,
+            c_rpc,
+            a_listen,
+            b_listen,
+            c_listen,
+            wait_secs,
+            poll_secs,
+            no_deploy,
+            keep_running,
+            b_expect_peer,
+            c_expect_peer,
+        } => handle_lab_remote_run(LabRemoteRunOptions {
+            a_host,
+            c_host,
+            trust_domain_id,
+            network_local_id,
+            seed,
+            linux_bin_dir,
+            windows_bin_dir,
+            a_bin_dir,
+            b_bin_dir,
+            c_bin_dir,
+            a_xdg,
+            b_xdg,
+            c_xdg,
+            a_log,
+            b_log,
+            c_log,
+            a_rpc,
+            b_rpc,
+            c_rpc,
+            a_listen,
+            b_listen,
+            c_listen,
+            wait_secs,
+            poll_secs,
+            no_deploy,
+            keep_running,
+            b_expect_peer,
+            c_expect_peer,
+        }),
         LabSubCommand::Disable {
             trust_domain_id,
             network_local_id,
@@ -3642,9 +3834,446 @@ fn handle_lab_remote_check(hosts: &[String], bin_dir: Option<&str>) -> Result<()
     Ok(())
 }
 
+#[derive(Debug)]
+struct LabRemoteRunOptions {
+    a_host: String,
+    c_host: String,
+    trust_domain_id: String,
+    network_local_id: String,
+    seed: String,
+    linux_bin_dir: PathBuf,
+    windows_bin_dir: Option<PathBuf>,
+    a_bin_dir: String,
+    b_bin_dir: String,
+    c_bin_dir: String,
+    a_xdg: String,
+    b_xdg: String,
+    c_xdg: String,
+    a_log: String,
+    b_log: String,
+    c_log: String,
+    a_rpc: u16,
+    b_rpc: u16,
+    c_rpc: u16,
+    a_listen: u16,
+    b_listen: u16,
+    c_listen: u16,
+    wait_secs: u64,
+    poll_secs: u64,
+    no_deploy: bool,
+    keep_running: bool,
+    b_expect_peer: String,
+    c_expect_peer: String,
+}
+
+fn handle_lab_remote_run(options: LabRemoteRunOptions) -> Result<(), Error> {
+    println!("remote-run: checking SSH reachability");
+    ssh_capture(&options.a_host, "echo ok")?;
+    ssh_capture(&options.c_host, "echo ok")?;
+
+    let result = (|| -> Result<(), Error> {
+        if !options.no_deploy {
+            remote_run_deploy(&options)?;
+        }
+        remote_run_stop(&options)?;
+        remote_run_start(&options)?;
+        println!(
+            "remote-run: waiting up to {}s for B/C direct route",
+            options.wait_secs
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(options.wait_secs);
+        let poll_interval = Duration::from_secs(options.poll_secs.max(1));
+        let (b, c) = loop {
+            std::thread::sleep(
+                poll_interval.min(deadline.saturating_duration_since(std::time::Instant::now())),
+            );
+            let b = remote_run_collect_linux(
+                "B",
+                None,
+                &options.b_bin_dir,
+                options.b_rpc,
+                &options.b_log,
+            )?;
+            let c = remote_run_collect_windows(&options)?;
+            let b_direct =
+                remote_run_assert_direct_quiet("B", &b.peer_json, &options.b_expect_peer);
+            let c_direct =
+                remote_run_assert_direct_quiet("C", &c.peer_json, &options.c_expect_peer);
+            if b_direct.is_ok() && c_direct.is_ok() {
+                break (b, c);
+            }
+            if std::time::Instant::now() >= deadline {
+                break (b, c);
+            }
+        };
+
+        let a = remote_run_collect_linux(
+            "A",
+            Some(&options.a_host),
+            &options.a_bin_dir,
+            options.a_rpc,
+            &options.a_log,
+        )?;
+
+        println!("\n== A ==\n{}", trim_remote_output(&a.explain, 4000));
+        println!("\n== B ==\n{}", trim_remote_output(&b.explain, 4000));
+        println!("\n== C ==\n{}", trim_remote_output(&c.explain, 4000));
+        println!("\n== key logs ==");
+        println!("A:\n{}", trim_remote_output(&a.logs, 2500));
+        println!("B:\n{}", trim_remote_output(&b.logs, 2500));
+        println!("C:\n{}", trim_remote_output(&c.logs, 2500));
+
+        remote_run_assert_direct("B", &b.peer_json, &options.b_expect_peer)?;
+        remote_run_assert_direct("C", &c.peer_json, &options.c_expect_peer)?;
+        println!("remote-run: PASS, B and C both report a direct/p2p route");
+        Ok(())
+    })();
+
+    if !options.keep_running {
+        if let Err(err) = remote_run_stop(&options) {
+            eprintln!("remote-run: cleanup failed: {err:#}");
+        }
+    }
+
+    result
+}
+
+#[derive(Debug)]
+struct RemoteNodeReport {
+    peer_json: String,
+    explain: String,
+    logs: String,
+}
+
+fn remote_run_deploy(options: &LabRemoteRunOptions) -> Result<(), Error> {
+    println!("remote-run: deploying binaries");
+    let local_pactmesh = options.linux_bin_dir.join("pactmesh");
+    let local_core = options.linux_bin_dir.join("pactmesh-core");
+    anyhow::ensure!(
+        local_pactmesh.exists(),
+        "missing {}",
+        local_pactmesh.display()
+    );
+    anyhow::ensure!(local_core.exists(), "missing {}", local_core.display());
+
+    ssh_capture(
+        &options.a_host,
+        &format!("mkdir -p {}", sh_quote(&options.a_bin_dir)),
+    )?;
+    run_status(
+        "scp linux binaries to A",
+        "scp",
+        &[
+            local_pactmesh.display().to_string(),
+            local_core.display().to_string(),
+            format!("{}:{}/", options.a_host, options.a_bin_dir),
+        ],
+    )?;
+
+    std::fs::create_dir_all(&options.b_bin_dir)
+        .with_context(|| format!("failed to create {}", options.b_bin_dir))?;
+    std::fs::copy(&local_pactmesh, format!("{}/pactmesh", options.b_bin_dir))
+        .context("failed to copy pactmesh to B bin dir")?;
+    std::fs::copy(&local_core, format!("{}/pactmesh-core", options.b_bin_dir))
+        .context("failed to copy pactmesh-core to B bin dir")?;
+
+    if let Some(windows_bin_dir) = &options.windows_bin_dir {
+        let win_pactmesh = windows_bin_dir.join("pactmesh.exe");
+        let win_core = windows_bin_dir.join("pactmesh-core.exe");
+        anyhow::ensure!(win_pactmesh.exists(), "missing {}", win_pactmesh.display());
+        anyhow::ensure!(win_core.exists(), "missing {}", win_core.display());
+        ssh_capture_powershell(
+            &options.c_host,
+            &format!(
+                "New-Item -ItemType Directory -Force {} | Out-Null",
+                ps_quote(&options.c_bin_dir)
+            ),
+        )?;
+        let c_scp_dir = options.c_bin_dir.replace('\\', "/");
+        run_status(
+            "scp windows binaries to C",
+            "scp",
+            &[
+                win_pactmesh.display().to_string(),
+                win_core.display().to_string(),
+                format!("{}:{}/", options.c_host, c_scp_dir),
+            ],
+        )?;
+    } else {
+        println!("remote-run: --windows-bin-dir omitted, reusing existing C binaries");
+    }
+    Ok(())
+}
+
+fn remote_run_stop(options: &LabRemoteRunOptions) -> Result<(), Error> {
+    println!("remote-run: stopping old daemons");
+    let _ = ssh_capture(&options.a_host, "pkill -f pactmesh-core || true");
+    let _ = run_status(
+        "stop B daemon",
+        "pkill",
+        &["-f".into(), "pactmesh-core".into()],
+    );
+    let _ = ssh_capture_powershell(
+        &options.c_host,
+        "Get-Process pactmesh-core -ErrorAction SilentlyContinue | Stop-Process -Force",
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    Ok(())
+}
+
+fn remote_run_start(options: &LabRemoteRunOptions) -> Result<(), Error> {
+    println!("remote-run: starting A/B/C daemons");
+    let a_trust_dir = format!(
+        "{}/privateNetwork/trust-domains/{}",
+        options.a_xdg, options.trust_domain_id
+    );
+    let a_log_dir = parent_path_unix(&options.a_log);
+    let a_script = format!(
+        r#"#!/bin/sh
+cd {a_bin}
+export XDG_CONFIG_HOME={a_xdg}
+exec ./pactmesh-core --network-name {net} --trust-domain-dir {trust} --network-local-id {net} --rpc-portal 127.0.0.1:{rpc} --listeners tcp://0.0.0.0:{listen} --listeners udp://0.0.0.0:{listen} --no-tun true --disable-ipv6 true --instance-name root-a --console-log-level debug --daemon
+"#,
+        a_bin = sh_quote(&options.a_bin_dir),
+        a_xdg = sh_quote(&options.a_xdg),
+        net = sh_quote(&options.network_local_id),
+        trust = sh_quote(&a_trust_dir),
+        rpc = options.a_rpc,
+        listen = options.a_listen,
+    );
+    let a_script_b64 = BASE64_STANDARD.encode(a_script.as_bytes());
+    let a_script_path = format!("{}/remote-run-root-a.sh", a_log_dir);
+    ssh_capture(
+        &options.a_host,
+        &format!(
+            "mkdir -p {a_log_dir} && rm -f {a_log} && printf %s {script_b64} | base64 -d > {script_path} && chmod +x {script_path} && (setsid -f sh {script_path} </dev/null > {a_log} 2>&1 &) && echo started",
+            a_log_dir = sh_quote(&a_log_dir),
+            a_log = sh_quote(&options.a_log),
+            script_b64 = sh_quote(&a_script_b64),
+            script_path = sh_quote(&a_script_path),
+        ),
+    )?;
+
+    std::fs::create_dir_all(parent_path_unix(&options.b_log))?;
+    let b_script = format!(
+        r#"#!/bin/sh
+cd {b_bin}
+export XDG_CONFIG_HOME={b_xdg}
+exec ./pactmesh-core --network-name {net} --network-local-id {net} --rpc-portal 127.0.0.1:{rpc} --listeners tcp://0.0.0.0:{listen} --listeners udp://0.0.0.0:{listen} --peers {seed} --no-tun true --disable-ipv6 true --instance-name node-b --console-log-level debug --daemon
+"#,
+        b_bin = sh_quote(&options.b_bin_dir),
+        b_xdg = sh_quote(&options.b_xdg),
+        net = sh_quote(&options.network_local_id),
+        rpc = options.b_rpc,
+        listen = options.b_listen,
+        seed = sh_quote(&options.seed),
+    );
+    let b_script_path = format!("{}/remote-run-node-b.sh", parent_path_unix(&options.b_log));
+    std::fs::write(&b_script_path, b_script)
+        .with_context(|| format!("failed to write {b_script_path}"))?;
+    let b_cmd = format!(
+        "rm -f {b_log} && setsid -f sh {script_path} </dev/null > {b_log} 2>&1 && echo started",
+        b_log = sh_quote(&options.b_log),
+        script_path = sh_quote(&b_script_path),
+    );
+    run_status("start B daemon", "sh", &["-c".into(), b_cmd])?;
+
+    let c_log_parent = parent_path_windows(&options.c_log);
+    let c_script = format!(
+        "$ErrorActionPreference='Stop'; New-Item -ItemType Directory -Force {log_parent} | Out-Null; Remove-Item {log} -Force -ErrorAction SilentlyContinue; Set-Location {bin}; $env:XDG_CONFIG_HOME={xdg}; $args=@('--network-name',{net},'--network-local-id',{net},'--rpc-portal','127.0.0.1:{rpc}','--listeners','tcp://0.0.0.0:{listen}','--listeners','udp://0.0.0.0:{listen}','--peers',{seed},'--no-tun','true','--disable-ipv6','true','--instance-name','win-c','--console-log-level','debug','--daemon'); Start-Process -WindowStyle Hidden -FilePath 'cmd.exe' -ArgumentList @('/c', '.\\pactmesh-core.exe ' + ($args -join ' ') + ' > ' + {log} + ' 2>&1');",
+        log_parent = ps_quote(&c_log_parent),
+        log = ps_quote(&options.c_log),
+        bin = ps_quote(&options.c_bin_dir),
+        xdg = ps_quote(&options.c_xdg),
+        net = ps_quote(&options.network_local_id),
+        rpc = options.c_rpc,
+        listen = options.c_listen,
+        seed = ps_quote(&options.seed),
+    );
+    ssh_capture_powershell(&options.c_host, &c_script)?;
+    Ok(())
+}
+
+fn remote_run_collect_linux(
+    label: &str,
+    host: Option<&str>,
+    bin_dir: &str,
+    rpc: u16,
+    log_path: &str,
+) -> Result<RemoteNodeReport, Error> {
+    let peer_cmd = format!(
+        "cd {bin} && ./pactmesh --rpc-portal 127.0.0.1:{rpc} -o json peer list",
+        bin = sh_quote(bin_dir),
+    );
+    let explain_cmd = format!(
+        "cd {bin} && ./pactmesh --rpc-portal 127.0.0.1:{rpc} lab peers explain",
+        bin = sh_quote(bin_dir),
+    );
+    let logs_cmd = format!(
+        "grep -Ei 'p2p|relay|hole punch|symmetric|direct|failed|error|warn' {log} | tail -120 || tail -120 {log}",
+        log = sh_quote(log_path),
+    );
+    let run = |cmd: &str| -> Result<String, Error> {
+        match host {
+            Some(h) => ssh_capture(h, cmd),
+            None => local_capture(cmd),
+        }
+    };
+    let peer_json =
+        run(&peer_cmd).with_context(|| format!("failed to collect {label} peer json"))?;
+    let explain =
+        run(&explain_cmd).with_context(|| format!("failed to collect {label} peer explain"))?;
+    let logs = run(&logs_cmd).unwrap_or_else(|err| format!("log collection failed: {err:#}"));
+    Ok(RemoteNodeReport {
+        peer_json,
+        explain,
+        logs,
+    })
+}
+
+fn remote_run_collect_windows(options: &LabRemoteRunOptions) -> Result<RemoteNodeReport, Error> {
+    let peer_script = format!(
+        "Set-Location {}; & .\\pactmesh.exe --rpc-portal 127.0.0.1:{} -o json peer list",
+        ps_quote(&options.c_bin_dir),
+        options.c_rpc,
+    );
+    let explain_script = format!(
+        "Set-Location {}; & .\\pactmesh.exe --rpc-portal 127.0.0.1:{} lab peers explain",
+        ps_quote(&options.c_bin_dir),
+        options.c_rpc,
+    );
+    let logs_script = format!(
+        "$log={}; if (Test-Path $log) {{ Select-String -Path $log -Pattern 'p2p|relay|hole punch|symmetric|direct|failed|error|warn' | Select-Object -Last 120 | ForEach-Object {{ $_.Line }} }}",
+        ps_quote(&options.c_log),
+    );
+    let peer_json = ssh_capture_powershell(&options.c_host, &peer_script)
+        .context("failed to collect C peer json")?;
+    let explain = ssh_capture_powershell(&options.c_host, &explain_script)
+        .context("failed to collect C peer explain")?;
+    let logs = ssh_capture_powershell(&options.c_host, &logs_script)
+        .unwrap_or_else(|err| format!("log collection failed: {err:#}"));
+    Ok(RemoteNodeReport {
+        peer_json,
+        explain,
+        logs,
+    })
+}
+
+fn remote_run_assert_direct(node: &str, peer_json: &str, expect_peer: &str) -> Result<(), Error> {
+    remote_run_assert_direct_quiet(node, peer_json, expect_peer)
+}
+
+fn remote_run_assert_direct_quiet(
+    node: &str,
+    peer_json: &str,
+    expect_peer: &str,
+) -> Result<(), Error> {
+    let peers: serde_json::Value = serde_json::from_str(peer_json)
+        .with_context(|| format!("{node} peer list did not return JSON"))?;
+    let rows = peers
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("{node} peer JSON is not an array"))?;
+    for row in rows {
+        let text = row.to_string().to_ascii_lowercase();
+        if !text.contains(&expect_peer.to_ascii_lowercase()) {
+            continue;
+        }
+        let cost = row.get("cost").and_then(|v| v.as_str()).unwrap_or_default();
+        let tunnel = row
+            .get("tunnel_proto")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let route = format!("{cost} {tunnel}").to_ascii_lowercase();
+        anyhow::ensure!(
+            route.contains("p2p") || route.contains("direct"),
+            "{node} sees {expect_peer}, but route is not direct/p2p: {route}"
+        );
+        anyhow::ensure!(
+            !route.contains("relay"),
+            "{node} sees {expect_peer}, but route still uses relay: {route}"
+        );
+        return Ok(());
+    }
+    anyhow::bail!("{node} did not find expected peer substring '{expect_peer}'")
+}
+
+fn ssh_capture_powershell(host: &str, script: &str) -> Result<String, Error> {
+    let mut bytes = Vec::with_capacity(script.len() * 2);
+    for unit in script.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    let encoded = BASE64_STANDARD.encode(bytes);
+    ssh_capture(
+        host,
+        &format!("powershell -NoProfile -EncodedCommand {encoded}"),
+    )
+}
+
+fn local_capture(command: &str) -> Result<String, Error> {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .with_context(|| format!("failed to run local command: {command}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "local command failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn run_status(label: &str, program: &str, args: &[String]) -> Result<(), Error> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run {label}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "{label} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn trim_remote_output(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.trim().to_string();
+    }
+    let mut tail: String = value.chars().rev().take(max_chars).collect();
+    tail = tail.chars().rev().collect();
+    format!("...\n{}", tail.trim())
+}
+
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn ps_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn parent_path_unix(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or(".")
+        .to_string()
+}
+
+fn parent_path_windows(path: &str) -> String {
+    path.rsplit_once('\\')
+        .map(|(parent, _)| parent)
+        .unwrap_or(".")
+        .to_string()
+}
+
 fn ssh_capture(host: &str, command: &str) -> Result<String, Error> {
-    let output = std::process::Command::new("ssh")
+    let output = std::process::Command::new("timeout")
         .args([
+            "30",
+            "ssh",
             "-o",
             "BatchMode=yes",
             "-o",

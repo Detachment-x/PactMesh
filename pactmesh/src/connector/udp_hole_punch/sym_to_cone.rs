@@ -322,11 +322,17 @@ impl PunchSymToConeHoleClient {
         tid: u32,
     ) {
         let Some(inc) = my_nat_info.get_inc_of_easy_sym() else {
-            tracing::debug!(?my_nat_info, "skip predictable punch for non-easy-symmetric NAT");
+            tracing::debug!(
+                ?my_nat_info,
+                "skip predictable punch for non-easy-symmetric NAT"
+            );
             return;
         };
         let Some((base_port_num, max_port_num)) = base_port_for_easy_sym else {
-            tracing::debug!(?my_nat_info, "skip predictable punch without easy-symmetric port mapping");
+            tracing::debug!(
+                ?my_nat_info,
+                "skip predictable punch without easy-symmetric port mapping"
+            );
             return;
         };
         let req = SendPunchPacketEasySymRequest {
