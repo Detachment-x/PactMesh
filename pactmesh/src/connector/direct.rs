@@ -14,7 +14,7 @@ use std::{
 use crate::{
     common::{
         PeerId, dns::socket_addrs, error::Error, global_ctx::ArcGlobalCtx,
-        stun::StunInfoCollectorTrait,
+        network::is_usable_interface_ipv4, stun::StunInfoCollectorTrait,
     },
     connector::udp_hole_punch::handle_rpc_result,
     peers::{
@@ -407,39 +407,45 @@ impl DirectConnectorManagerData {
                     // listener actually uses this port+protocol; otherwise the check
                     // can never return true.
                     let check_self = port_has_local_listener(s_addr.port());
-                    ip_list
+                    let candidate_ipv4s = ip_list
                         .interface_ipv4s
                         .iter()
                         .chain(ip_list.public_ipv4.iter())
-                        .for_each(|ip| {
-                            let sock_addr = SocketAddr::new(
-                                IpAddr::V4(std::net::Ipv4Addr::from(ip.addr)),
-                                s_addr.port(),
+                        .map(|ip| std::net::Ipv4Addr::from(ip.addr))
+                        .filter(|ip| is_usable_interface_ipv4(*ip))
+                        .collect::<HashSet<_>>();
+                    tracing::info!(
+                        ?listener,
+                        ?candidate_ipv4s,
+                        peer_id = dst_peer_id,
+                        "direct connect IPv4 candidates"
+                    );
+                    candidate_ipv4s.iter().for_each(|ip| {
+                        let sock_addr = SocketAddr::new(IpAddr::V4(*ip), s_addr.port());
+                        if check_self && self.global_ctx.should_deny_proxy(&sock_addr, is_udp) {
+                            tracing::debug!(
+                                ?ip,
+                                ?listener,
+                                "skip self-connection (0.0.0.0 expansion)"
                             );
-                            if check_self && self.global_ctx.should_deny_proxy(&sock_addr, is_udp) {
-                                tracing::debug!(
-                                    ?ip,
-                                    ?listener,
-                                    "skip self-connection (0.0.0.0 expansion)"
-                                );
-                                return;
-                            }
-                            let mut addr = (*listener).clone();
-                            if addr.set_host(Some(ip.to_string().as_str())).is_ok() {
-                                tasks.spawn(Self::try_connect_to_ip(
-                                    self.clone(),
-                                    dst_peer_id,
-                                    addr.to_string(),
-                                ));
-                            } else {
-                                tracing::error!(
-                                    ?ip,
-                                    ?listener,
-                                    ?dst_peer_id,
-                                    "failed to set host for interface ipv4"
-                                );
-                            }
-                        });
+                            return;
+                        }
+                        let mut addr = (*listener).clone();
+                        if addr.set_host(Some(ip.to_string().as_str())).is_ok() {
+                            tasks.spawn(Self::try_connect_to_ip(
+                                self.clone(),
+                                dst_peer_id,
+                                addr.to_string(),
+                            ));
+                        } else {
+                            tracing::error!(
+                                ?ip,
+                                ?listener,
+                                ?dst_peer_id,
+                                "failed to set host for interface/public ipv4"
+                            );
+                        }
+                    });
                 } else if !s_addr.ip().is_loopback() || TESTING.load(Ordering::Relaxed) {
                     if self
                         .global_ctx
@@ -579,13 +585,19 @@ impl DirectConnectorManagerData {
                 available_listeners.pop();
             }
 
+            let task_count = tasks.len();
             let ret = tasks.join_all().await;
-            tracing::debug!(
-                ?ret,
+            let ok_count = ret.iter().filter(|result| result.is_ok()).count();
+            let err_count = ret.len().saturating_sub(ok_count);
+            tracing::info!(
                 ?dst_peer_id,
                 ?cur_scheme,
                 ?listener_list,
-                "all tasks finished for current scheme"
+                task_count,
+                ok_count,
+                err_count,
+                errors = ?ret.iter().filter_map(|result| result.as_ref().err()).collect::<Vec<_>>(),
+                "direct connect scheme finished"
             );
 
             if self.peer_manager.has_directly_connected_conn(dst_peer_id) {

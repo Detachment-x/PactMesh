@@ -22,7 +22,7 @@ use super::{netns::NetNS, stun::StunInfoCollectorTrait};
 
 pub const CACHED_IP_LIST_TIMEOUT_SEC: u64 = 60;
 
-fn is_usable_interface_ipv4(ip: Ipv4Addr) -> bool {
+pub(crate) fn is_usable_interface_ipv4(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
     if ip.is_unspecified()
         || ip.is_loopback()
@@ -45,6 +45,10 @@ fn is_usable_interface_ipv4(ip: Ipv4Addr) -> bool {
     }
 
     true
+}
+
+fn ipv4_can_bind(ip: Ipv4Addr) -> bool {
+    std::net::UdpSocket::bind(std::net::SocketAddr::new(IpAddr::V4(ip), 0)).is_ok()
 }
 
 fn is_usable_interface_ipv6(ip: Ipv6Addr) -> bool {
@@ -421,6 +425,10 @@ impl IPCollector {
                 let ip: std::net::IpAddr = ip.ip();
                 if let std::net::IpAddr::V4(v4) = ip {
                     if !is_usable_interface_ipv4(v4) {
+                        continue;
+                    }
+                    if cfg!(target_os = "windows") && !ipv4_can_bind(v4) {
+                        tracing::debug!(%v4, "skip interface ipv4 that cannot be bound");
                         continue;
                     }
                     ret.interface_ipv4s.push(v4.into());
