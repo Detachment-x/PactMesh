@@ -199,7 +199,9 @@ pub struct PeerManager {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TrustAclPeerIdentity {
-    pub(crate) fingerprint: DeviceFingerprint,
+    pub(crate) device_fingerprint: DeviceFingerprint,
+    pub(crate) member_cert_fingerprint: MemberCertFingerprint,
+    pub(crate) can_relay_data: bool,
     pub(crate) proxy_cidrs: Vec<Cidr>,
 }
 
@@ -475,9 +477,7 @@ impl PeerManager {
     fn device_fingerprint_from_member_cert(cert: &MemberCert) -> DeviceFingerprint {
         use sha2::{Digest, Sha256};
 
-        DeviceFingerprint::new(
-            Sha256::digest(crate::trust::to_canonical_cbor(cert).as_slice()).into(),
-        )
+        DeviceFingerprint::new(Sha256::digest(cert.details.device_pk.as_bytes()).into())
     }
 
     fn proxy_cidrs_from_cert(cert: &MemberCert) -> Vec<Cidr> {
@@ -494,7 +494,9 @@ impl PeerManager {
             return;
         };
         let identity = TrustAclPeerIdentity {
-            fingerprint: Self::device_fingerprint_from_member_cert(&cert),
+            device_fingerprint: Self::device_fingerprint_from_member_cert(&cert),
+            member_cert_fingerprint: cert.fingerprint(),
+            can_relay_data: cert.details.capabilities.can_relay_data,
             proxy_cidrs: Self::proxy_cidrs_from_cert(&cert),
         };
         self.peer_trust_acl_identities.insert(peer_id, identity);
@@ -522,10 +524,10 @@ impl PeerManager {
             .unwrap_or_default()
             .as_secs();
         !state.details.payload.revoked_certs.iter().any(|revoked| {
-            revoked.cert_fingerprint == MemberCertFingerprint(identity.fingerprint.0)
+            revoked.cert_fingerprint == identity.member_cert_fingerprint
                 && revoked.is_active_at(now)
         }) && !state.details.payload.disabled_certs.iter().any(|disabled| {
-            disabled.cert_fingerprint == MemberCertFingerprint(identity.fingerprint.0)
+            disabled.cert_fingerprint == identity.member_cert_fingerprint
                 && disabled.is_active_at(now)
         })
     }
@@ -610,7 +612,7 @@ impl PeerManager {
                 .proxy_cidrs
                 .iter()
                 .copied()
-                .map(|cidr| (local.fingerprint, cidr)),
+                .map(|cidr| (local.device_fingerprint, cidr)),
         );
         for identity in identities.iter() {
             proxy_cidrs.extend(
@@ -618,7 +620,7 @@ impl PeerManager {
                     .proxy_cidrs
                     .iter()
                     .copied()
-                    .map(|cidr| (identity.fingerprint, cidr)),
+                    .map(|cidr| (identity.device_fingerprint, cidr)),
             );
         }
         proxy_cidrs
@@ -632,12 +634,12 @@ impl PeerManager {
         proxy_cidrs: &[(DeviceFingerprint, Cidr)],
     ) -> bool {
         let src_ctx = PeerMatchContext {
-            peer_fp: &src.fingerprint,
+            peer_fp: &src.device_fingerprint,
             tags: &policy.tags,
             proxy_cidrs,
         };
         let dst_ctx = PeerMatchContext {
-            peer_fp: &dst.fingerprint,
+            peer_fp: &dst.device_fingerprint,
             tags: &policy.tags,
             proxy_cidrs,
         };
@@ -711,7 +713,9 @@ impl PeerManager {
             return false;
         }
         let local = TrustAclPeerIdentity {
-            fingerprint: Self::device_fingerprint_from_member_cert(&trust_ctx.member_cert),
+            device_fingerprint: Self::device_fingerprint_from_member_cert(&trust_ctx.member_cert),
+            member_cert_fingerprint: trust_ctx.member_cert.fingerprint(),
+            can_relay_data: trust_ctx.member_cert.details.capabilities.can_relay_data,
             proxy_cidrs: Self::proxy_cidrs_from_cert(&trust_ctx.member_cert),
         };
 
@@ -1325,6 +1329,7 @@ impl PeerManager {
                         &foreign_client,
                         &relay_peer_map,
                         tx_metrics,
+                        Some(&peer_trust_acl_identities),
                         ret,
                         to_peer_id,
                     )
@@ -1725,6 +1730,7 @@ impl PeerManager {
             &self.foreign_network_client,
             &self.relay_peer_map,
             Some(&self.traffic_metrics),
+            Some(&self.peer_trust_acl_identities),
             msg,
             dst_peer_id,
         )
@@ -1741,6 +1747,7 @@ impl PeerManager {
         foreign_network_client: &Arc<ForeignNetworkClient>,
         relay_peer_map: &Arc<RelayPeerMap>,
         direct_tx_metrics: Option<&Arc<TrafficMetricRecorder>>,
+        identities: Option<&Arc<DashMap<PeerId, TrustAclPeerIdentity>>>,
         msg: ZCPacket,
         dst_peer_id: PeerId,
     ) -> Result<(), Error> {
@@ -1753,7 +1760,15 @@ impl PeerManager {
         } else if foreign_network_client.has_next_hop(dst_peer_id) {
             foreign_network_client.send_msg(msg, dst_peer_id).await
         } else if let Some(gateway) = peers.get_gateway_peer_id(dst_peer_id, policy.clone()).await {
-            if peers.has_peer(gateway) || foreign_network_client.has_next_hop(gateway) {
+            let relay_allowed = identities
+                .and_then(|identities| identities.get(&gateway).map(|entry| entry.can_relay_data))
+                .unwrap_or(true);
+            if !relay_allowed {
+                tracing::debug!(?gateway, ?dst_peer_id, "trust capability denied relay data");
+                Err(Error::RouteError(Some(
+                    "relay data capability denied".to_string(),
+                )))
+            } else if peers.has_peer(gateway) || foreign_network_client.has_next_hop(gateway) {
                 relay_peer_map.send_msg(msg, dst_peer_id, policy).await
             } else {
                 tracing::warn!(
@@ -1921,6 +1936,7 @@ impl PeerManager {
                 &self.foreign_network_client,
                 &self.relay_peer_map,
                 Some(&self.traffic_metrics),
+                Some(&self.peer_trust_acl_identities),
                 msg,
                 cur_to_peer_id,
             )
@@ -1939,7 +1955,7 @@ impl PeerManager {
 
         let mut allowed_dst_peers = Vec::new();
         for peer_id in dst_peers {
-            if Self::process_packet_with_trust_acl_for_peer(
+            if !Self::process_packet_with_trust_acl_for_peer(
                 &msg,
                 false,
                 Some(peer_id),
@@ -1949,8 +1965,9 @@ impl PeerManager {
             )
             .await
             {
-                allowed_dst_peers.push(peer_id);
+                continue;
             }
+            allowed_dst_peers.push(peer_id);
         }
         let dst_peers = allowed_dst_peers;
         if dst_peers.is_empty() {
@@ -2022,6 +2039,7 @@ impl PeerManager {
                 &self.foreign_network_client,
                 &self.relay_peer_map,
                 Some(&self.traffic_metrics),
+                Some(&self.peer_trust_acl_identities),
                 msg,
                 *peer_id,
             )
@@ -2389,13 +2407,17 @@ impl PeerManager {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeSet,
         fmt::Debug,
         sync::Arc,
         time::{Duration, Instant},
     };
 
+    use cidr::{Ipv4Cidr, Ipv6Cidr};
+
     use crate::{
         common::{
+            PeerId,
             config::Flags,
             global_ctx::{NetworkIdentity, tests::get_mock_global_ctx},
             stats_manager::{LabelSet, LabelType, MetricName},
@@ -2410,7 +2432,7 @@ mod tests {
             peer_conn::tests::set_secure_mode_cfg,
             peer_manager::RouteAlgoType,
             peer_rpc::tests::register_service,
-            route_trait::NextHopPolicy,
+            route_trait::{NextHopPolicy, Route},
             tests::{
                 connect_peer_manager, create_mock_peer_manager_with_name, wait_route_appear,
                 wait_route_appear_with_cost,
@@ -2421,8 +2443,9 @@ mod tests {
             peer_rpc::SecureAuthLevel,
         },
         trust::{
-            ACL_SCHEMA_VERSION, AclPolicy, AclRule, Action as TrustAclAction, DeviceFingerprint,
-            PortSpec, Proto as TrustAclProto, Selector, TagName, from_cbor, to_canonical_cbor,
+            ACL_SCHEMA_VERSION, AclPolicy, AclRule, Action as TrustAclAction, Cidr,
+            DeviceFingerprint, MemberCertFingerprint, PortSpec, Proto as TrustAclProto, Selector,
+            TagName, from_cbor, to_canonical_cbor,
         },
         tunnel::{
             TunnelConnector, TunnelListener,
@@ -2433,7 +2456,7 @@ mod tests {
         },
     };
 
-    use super::{PeerManager, TrustAclPeerIdentity};
+    use super::{Error, PeerManager, TrustAclPeerIdentity};
 
     async fn create_lazy_peer_manager() -> Arc<PeerManager> {
         let peer_mgr = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
@@ -2460,6 +2483,18 @@ mod tests {
 
     fn fp(byte: u8) -> DeviceFingerprint {
         DeviceFingerprint::new([byte; 32])
+    }
+
+    fn test_trust_identity(
+        device_fingerprint: DeviceFingerprint,
+        proxy_cidrs: Vec<Cidr>,
+    ) -> TrustAclPeerIdentity {
+        TrustAclPeerIdentity {
+            device_fingerprint,
+            member_cert_fingerprint: MemberCertFingerprint(device_fingerprint.0),
+            can_relay_data: true,
+            proxy_cidrs,
+        }
     }
 
     fn tag(name: &str) -> TagName {
@@ -2506,14 +2541,8 @@ mod tests {
         let packet =
             PeerManager::trust_acl_packet_tuple(&tcp_packet([10, 0, 0, 1], [10, 0, 0, 2], 22))
                 .unwrap();
-        let client = TrustAclPeerIdentity {
-            fingerprint: fp(1),
-            proxy_cidrs: Vec::new(),
-        };
-        let server = TrustAclPeerIdentity {
-            fingerprint: fp(2),
-            proxy_cidrs: Vec::new(),
-        };
+        let client = test_trust_identity(fp(1), Vec::new());
+        let server = test_trust_identity(fp(2), Vec::new());
 
         assert!(!PeerManager::trust_acl_decision(
             &policy,
@@ -2530,14 +2559,8 @@ mod tests {
         let packet =
             PeerManager::trust_acl_packet_tuple(&tcp_packet([10, 0, 0, 1], [10, 0, 0, 2], 80))
                 .unwrap();
-        let client = TrustAclPeerIdentity {
-            fingerprint: fp(1),
-            proxy_cidrs: Vec::new(),
-        };
-        let server = TrustAclPeerIdentity {
-            fingerprint: fp(2),
-            proxy_cidrs: Vec::new(),
-        };
+        let client = test_trust_identity(fp(1), Vec::new());
+        let server = test_trust_identity(fp(2), Vec::new());
 
         assert!(PeerManager::trust_acl_decision(
             &policy,
@@ -2677,6 +2700,7 @@ mod tests {
             &peer_mgr.foreign_network_client,
             &peer_mgr.relay_peer_map,
             Some(&peer_mgr.traffic_metrics),
+            None,
             pkt,
             dst_peer_id,
         )
@@ -2747,6 +2771,7 @@ mod tests {
             &peer_mgr.foreign_network_client,
             &peer_mgr.relay_peer_map,
             Some(&peer_mgr.traffic_metrics),
+            None,
             pkt,
             dst_peer_id,
         )
@@ -2834,6 +2859,7 @@ mod tests {
             &peer_mgr_a.foreign_network_client,
             &peer_mgr_a.relay_peer_map,
             Some(&peer_mgr_a.traffic_metrics),
+            None,
             pkt,
             peer_mgr_b.my_peer_id(),
         )
@@ -2902,6 +2928,7 @@ mod tests {
             &peer_mgr_a.foreign_network_client,
             &peer_mgr_a.relay_peer_map,
             Some(&peer_mgr_a.traffic_metrics),
+            None,
             pkt,
             peer_mgr_b.my_peer_id(),
         )
@@ -2978,6 +3005,7 @@ mod tests {
             &peer_mgr_a.foreign_network_client,
             &peer_mgr_a.relay_peer_map,
             Some(&peer_mgr_a.traffic_metrics),
+            None,
             pkt,
             peer_mgr_c.my_peer_id(),
         )
@@ -3043,6 +3071,7 @@ mod tests {
             &peer_mgr_a.foreign_network_client,
             &peer_mgr_a.relay_peer_map,
             Some(&peer_mgr_a.traffic_metrics),
+            None,
             pkt,
             peer_mgr_c.my_peer_id(),
         )
@@ -3069,6 +3098,96 @@ mod tests {
             Duration::from_secs(5),
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn send_msg_internal_denies_data_relay_without_trust_capability() {
+        struct GatewayRoute {
+            dst_peer_id: PeerId,
+            gateway_peer_id: PeerId,
+        }
+
+        #[async_trait::async_trait]
+        impl Route for GatewayRoute {
+            async fn open(
+                &self,
+                _interface: crate::peers::route_trait::RouteInterfaceBox,
+            ) -> Result<u8, ()> {
+                Ok(0)
+            }
+
+            async fn close(&self) {}
+
+            async fn get_next_hop(&self, peer_id: PeerId) -> Option<PeerId> {
+                (peer_id == self.dst_peer_id).then_some(self.gateway_peer_id)
+            }
+
+            async fn list_routes(&self) -> Vec<crate::proto::api::instance::Route> {
+                Vec::new()
+            }
+
+            async fn list_proxy_cidrs(&self) -> BTreeSet<Ipv4Cidr> {
+                BTreeSet::new()
+            }
+
+            async fn list_proxy_cidrs_v6(&self) -> BTreeSet<Ipv6Cidr> {
+                BTreeSet::new()
+            }
+
+            async fn get_peer_info(
+                &self,
+                _peer_id: PeerId,
+            ) -> Option<crate::proto::peer_rpc::RoutePeerInfo> {
+                None
+            }
+
+            async fn get_peer_info_last_update_time(&self) -> Instant {
+                Instant::now()
+            }
+
+            fn get_peer_groups(&self, _peer_id: PeerId) -> Arc<Vec<String>> {
+                Arc::new(Vec::new())
+            }
+        }
+
+        let (s, _r) = create_packet_recv_chan();
+        let peer_mgr = Arc::new(PeerManager::new(
+            RouteAlgoType::None,
+            get_mock_global_ctx(),
+            s,
+            None,
+        ));
+        let gateway_peer_id = peer_mgr.my_peer_id().wrapping_add(1);
+        let dst_peer_id = peer_mgr.my_peer_id().wrapping_add(2);
+        let route: crate::peers::route_trait::ArcRoute = Arc::new(Box::new(GatewayRoute {
+            dst_peer_id,
+            gateway_peer_id,
+        }));
+        peer_mgr.peers.add_route(route).await;
+
+        let identities = Arc::new(dashmap::DashMap::new());
+        let mut gateway_identity = test_trust_identity(fp(2), Vec::new());
+        gateway_identity.can_relay_data = false;
+        identities.insert(gateway_peer_id, gateway_identity);
+
+        let mut pkt = ZCPacket::new_with_payload(b"blocked-forward-data");
+        pkt.fill_peer_manager_hdr(peer_mgr.my_peer_id(), dst_peer_id, PacketType::Data as u8);
+
+        let result = PeerManager::send_msg_internal(
+            &peer_mgr.peers,
+            &peer_mgr.foreign_network_client,
+            &peer_mgr.relay_peer_map,
+            Some(&peer_mgr.traffic_metrics),
+            Some(&identities),
+            pkt,
+            dst_peer_id,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(Error::RouteError(Some(ref reason))) if reason == "relay data capability denied"),
+            "gateway without can_relay_data must not forward business traffic: {result:?}"
+        );
     }
 
     #[tokio::test]
