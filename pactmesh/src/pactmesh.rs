@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     ffi::OsString,
     future::Future,
     io::IsTerminal,
@@ -562,7 +562,7 @@ enum LabSubCommand {
         b_bin_dir: String,
         #[arg(
             long,
-            default_value = "D:\\X.M.F\\temp\\2026.04.30-内网软件\\pactmesh-windows-x86_64",
+            default_value = "D:\\pactmesh-fresh-test\\bin",
             help = "remote C bin dir"
         )]
         c_bin_dir: String,
@@ -646,6 +646,134 @@ enum LabSubCommand {
             help = "hostname substring C should see for B"
         )]
         c_expect_peer: String,
+    },
+    #[command(about = "run an SSH-driven three-node no-TUN test from a fresh trust domain")]
+    RemoteFreshRun {
+        #[arg(long, help = "SSH host for the public/root A node")]
+        a_host: String,
+        #[arg(long, help = "SSH host for the Windows/Linux C node")]
+        c_host: String,
+        #[arg(long, default_value = "office-net", help = "network-local id")]
+        network_local_id: String,
+        #[arg(long, default_value = "remote-fresh", help = "trust-domain label")]
+        domain_label: String,
+        #[arg(
+            long,
+            default_value = "pactmesh-lab-root-pass",
+            help = "temporary root management passphrase for this fresh lab"
+        )]
+        root_passphrase: String,
+        #[arg(
+            long,
+            default_value = "tcp://203.0.113.16:11010",
+            help = "public seed URL exported into the invite"
+        )]
+        seed: String,
+        #[arg(
+            long,
+            default_value = "target/release",
+            help = "local Linux release dir containing pactmesh and pactmesh-core"
+        )]
+        linux_bin_dir: PathBuf,
+        #[arg(
+            long,
+            help = "local Windows artifact dir containing pactmesh.exe and pactmesh-core.exe"
+        )]
+        windows_bin_dir: Option<PathBuf>,
+        #[arg(
+            long,
+            default_value = "/root/pactmesh-fresh-test/bin",
+            help = "remote A bin dir"
+        )]
+        a_bin_dir: String,
+        #[arg(
+            long,
+            default_value = "/tmp/pactmesh-fresh-test/bin",
+            help = "local B bin dir"
+        )]
+        b_bin_dir: String,
+        #[arg(
+            long,
+            default_value = "D:\\pactmesh-fresh-test\\bin",
+            help = "remote C bin dir"
+        )]
+        c_bin_dir: String,
+        #[arg(
+            long,
+            default_value = "/root/pactmesh-fresh-test/xdg",
+            help = "remote A XDG_CONFIG_HOME"
+        )]
+        a_xdg: String,
+        #[arg(
+            long,
+            default_value = "/tmp/pactmesh-fresh-test/xdg",
+            help = "local B XDG_CONFIG_HOME"
+        )]
+        b_xdg: String,
+        #[arg(
+            long,
+            default_value = "D:\\pactmesh-fresh-test\\xdg",
+            help = "remote C XDG_CONFIG_HOME"
+        )]
+        c_xdg: String,
+        #[arg(
+            long,
+            default_value = "/root/pactmesh-fresh-test/logs/root-a.log",
+            help = "remote A log path"
+        )]
+        a_log: String,
+        #[arg(
+            long,
+            default_value = "/tmp/pactmesh-fresh-test/logs/node-b.log",
+            help = "local B log path"
+        )]
+        b_log: String,
+        #[arg(
+            long,
+            default_value = "D:\\pactmesh-fresh-test\\logs\\win-c.log",
+            help = "remote C log path"
+        )]
+        c_log: String,
+        #[arg(long, default_value = "15889", help = "A RPC port")]
+        a_rpc: u16,
+        #[arg(long, default_value = "15890", help = "B RPC port")]
+        b_rpc: u16,
+        #[arg(long, default_value = "15891", help = "C RPC port")]
+        c_rpc: u16,
+        #[arg(long, default_value = "11010", help = "A listener port")]
+        a_listen: u16,
+        #[arg(long, default_value = "11020", help = "B listener port")]
+        b_listen: u16,
+        #[arg(long, default_value = "11030", help = "C listener port")]
+        c_listen: u16,
+        #[arg(long, default_value_t = 180, help = "join approval timeout in seconds")]
+        join_wait_secs: u64,
+        #[arg(
+            long,
+            default_value_t = 2,
+            help = "join approval poll interval in seconds"
+        )]
+        poll_secs: u64,
+        #[arg(
+            long,
+            default_value_t = 120,
+            help = "seconds to wait for peers/config propagation"
+        )]
+        wait_secs: u64,
+        #[arg(long, default_value = "false", help = "skip binary upload/copy")]
+        no_deploy: bool,
+        #[arg(
+            long,
+            default_value = "false",
+            help = "leave daemons running after collection"
+        )]
+        keep_running: bool,
+        #[arg(
+            long,
+            default_value = "false",
+            help = "fail if B and C do not report a direct/p2p route"
+        )]
+        require_bc_direct: bool,
     },
     #[command(about = "disable a member interactively")]
     Disable {
@@ -3376,6 +3504,67 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             b_expect_peer,
             c_expect_peer,
         }),
+        LabSubCommand::RemoteFreshRun {
+            a_host,
+            c_host,
+            network_local_id,
+            domain_label,
+            root_passphrase,
+            seed,
+            linux_bin_dir,
+            windows_bin_dir,
+            a_bin_dir,
+            b_bin_dir,
+            c_bin_dir,
+            a_xdg,
+            b_xdg,
+            c_xdg,
+            a_log,
+            b_log,
+            c_log,
+            a_rpc,
+            b_rpc,
+            c_rpc,
+            a_listen,
+            b_listen,
+            c_listen,
+            join_wait_secs,
+            poll_secs,
+            wait_secs,
+            no_deploy,
+            keep_running,
+            require_bc_direct,
+        } => handle_lab_remote_fresh_run(LabRemoteFreshRunOptions {
+            a_host,
+            c_host,
+            network_local_id,
+            domain_label,
+            root_passphrase,
+            seed,
+            linux_bin_dir,
+            windows_bin_dir,
+            a_bin_dir,
+            b_bin_dir,
+            c_bin_dir,
+            a_xdg,
+            b_xdg,
+            c_xdg,
+            a_log,
+            b_log,
+            c_log,
+            a_rpc,
+            b_rpc,
+            c_rpc,
+            a_listen,
+            b_listen,
+            c_listen,
+            join_wait_secs,
+            poll_secs,
+            wait_secs,
+            no_deploy,
+            keep_running,
+            require_bc_direct,
+        }),
         LabSubCommand::Disable {
             trust_domain_id,
             network_local_id,
@@ -3384,36 +3573,40 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             note,
             json,
             passphrase_file,
-        } => handle_lab_member_toggle(
-            handler,
-            trust_domain_id,
-            network_local_id,
-            device,
-            true,
-            until,
-            note,
-            json,
-            passphrase_file,
-        )
-        .await,
+        } => {
+            handle_lab_member_toggle(
+                handler,
+                trust_domain_id,
+                network_local_id,
+                device,
+                true,
+                until,
+                note,
+                json,
+                passphrase_file,
+            )
+            .await
+        }
         LabSubCommand::Enable {
             trust_domain_id,
             network_local_id,
             device,
             json,
             passphrase_file,
-        } => handle_lab_member_toggle(
-            handler,
-            trust_domain_id,
-            network_local_id,
-            device,
-            false,
-            None,
-            None,
-            json,
-            passphrase_file,
-        )
-        .await,
+        } => {
+            handle_lab_member_toggle(
+                handler,
+                trust_domain_id,
+                network_local_id,
+                device,
+                false,
+                None,
+                None,
+                json,
+                passphrase_file,
+            )
+            .await
+        }
         LabSubCommand::Commands {
             role,
             network_local_id,
@@ -3894,6 +4087,46 @@ struct LabRemoteRunOptions {
     c_expect_peer: String,
 }
 
+#[derive(Debug)]
+struct LabRemoteFreshRunOptions {
+    a_host: String,
+    c_host: String,
+    network_local_id: String,
+    domain_label: String,
+    root_passphrase: String,
+    seed: String,
+    linux_bin_dir: PathBuf,
+    windows_bin_dir: Option<PathBuf>,
+    a_bin_dir: String,
+    b_bin_dir: String,
+    c_bin_dir: String,
+    a_xdg: String,
+    b_xdg: String,
+    c_xdg: String,
+    a_log: String,
+    b_log: String,
+    c_log: String,
+    a_rpc: u16,
+    b_rpc: u16,
+    c_rpc: u16,
+    a_listen: u16,
+    b_listen: u16,
+    c_listen: u16,
+    join_wait_secs: u64,
+    poll_secs: u64,
+    wait_secs: u64,
+    no_deploy: bool,
+    keep_running: bool,
+    require_bc_direct: bool,
+}
+
+#[derive(Debug)]
+struct FreshRootSetup {
+    trust_domain_id: String,
+    invite: String,
+    root_passphrase_file: String,
+}
+
 fn handle_lab_remote_run(options: LabRemoteRunOptions) -> Result<(), Error> {
     println!("remote-run: checking SSH reachability");
     ssh_capture(&options.a_host, "echo ok")?;
@@ -3966,6 +4199,37 @@ fn handle_lab_remote_run(options: LabRemoteRunOptions) -> Result<(), Error> {
     result
 }
 
+fn handle_lab_remote_fresh_run(options: LabRemoteFreshRunOptions) -> Result<(), Error> {
+    println!("remote-fresh-run: checking SSH reachability");
+    ssh_capture(&options.a_host, "echo ok")?;
+    ssh_capture(&options.c_host, "echo ok")?;
+
+    let result = (|| -> Result<(), Error> {
+        remote_fresh_clean_state(&options)?;
+        if !options.no_deploy {
+            remote_fresh_deploy(&options)?;
+        }
+        let root = remote_fresh_setup_root(&options)?;
+        remote_fresh_start_root(&options, &root)?;
+        remote_fresh_join_node_b(&options, &root)?;
+        remote_fresh_join_node_c(&options, &root)?;
+        remote_fresh_approve_until_joined(&options, &root, &["node-b", "win-c"])?;
+        remote_fresh_start_joiners(&options, &root)?;
+        remote_fresh_wait_for_peers(&options, &root)?;
+        remote_fresh_verify_config_sync(&options, &root)?;
+        println!("remote-fresh-run: PASS fresh trust-domain bootstrap and config-sync checks");
+        Ok(())
+    })();
+
+    if !options.keep_running {
+        if let Err(err) = remote_fresh_stop(&options) {
+            eprintln!("remote-fresh-run: cleanup failed: {err:#}");
+        }
+    }
+
+    result
+}
+
 #[derive(Debug)]
 struct RemoteNodeReport {
     peer_json: String,
@@ -4018,17 +4282,81 @@ fn remote_run_deploy(options: &LabRemoteRunOptions) -> Result<(), Error> {
             ),
         )?;
         let c_scp_dir = options.c_bin_dir.replace('\\', "/");
-        run_status(
-            "scp windows binaries to C",
-            "scp",
-            &[
-                win_pactmesh.display().to_string(),
-                win_core.display().to_string(),
-                format!("{}:{}/", options.c_host, c_scp_dir),
-            ],
-        )?;
+        let mut scp_args = vec!["-r".to_owned()];
+        for entry in std::fs::read_dir(windows_bin_dir)
+            .with_context(|| format!("failed to read {}", windows_bin_dir.display()))?
+        {
+            let entry = entry.with_context(|| {
+                format!("failed to read entry under {}", windows_bin_dir.display())
+            })?;
+            scp_args.push(entry.path().display().to_string());
+        }
+        scp_args.push(format!("{}:{}/", options.c_host, c_scp_dir));
+        run_status("scp windows binaries to C", "scp", &scp_args)?;
     } else {
         println!("remote-run: --windows-bin-dir omitted, reusing existing C binaries");
+    }
+    Ok(())
+}
+
+fn remote_fresh_deploy(options: &LabRemoteFreshRunOptions) -> Result<(), Error> {
+    println!("remote-fresh-run: deploying binaries");
+    let local_pactmesh = options.linux_bin_dir.join("pactmesh");
+    let local_core = options.linux_bin_dir.join("pactmesh-core");
+    anyhow::ensure!(
+        local_pactmesh.exists(),
+        "missing {}",
+        local_pactmesh.display()
+    );
+    anyhow::ensure!(local_core.exists(), "missing {}", local_core.display());
+
+    ssh_capture(
+        &options.a_host,
+        &format!("mkdir -p {}", sh_quote(&options.a_bin_dir)),
+    )?;
+    run_status(
+        "scp linux binaries to A",
+        "scp",
+        &[
+            local_pactmesh.display().to_string(),
+            local_core.display().to_string(),
+            format!("{}:{}/", options.a_host, options.a_bin_dir),
+        ],
+    )?;
+
+    std::fs::create_dir_all(&options.b_bin_dir)
+        .with_context(|| format!("failed to create {}", options.b_bin_dir))?;
+    std::fs::copy(&local_pactmesh, format!("{}/pactmesh", options.b_bin_dir))
+        .context("failed to copy pactmesh to B bin dir")?;
+    std::fs::copy(&local_core, format!("{}/pactmesh-core", options.b_bin_dir))
+        .context("failed to copy pactmesh-core to B bin dir")?;
+
+    if let Some(windows_bin_dir) = &options.windows_bin_dir {
+        let win_pactmesh = windows_bin_dir.join("pactmesh.exe");
+        let win_core = windows_bin_dir.join("pactmesh-core.exe");
+        anyhow::ensure!(win_pactmesh.exists(), "missing {}", win_pactmesh.display());
+        anyhow::ensure!(win_core.exists(), "missing {}", win_core.display());
+        ssh_capture_powershell(
+            &options.c_host,
+            &format!(
+                "New-Item -ItemType Directory -Force {} | Out-Null",
+                ps_quote(&options.c_bin_dir)
+            ),
+        )?;
+        let c_scp_dir = options.c_bin_dir.replace('\\', "/");
+        let mut scp_args = vec!["-r".to_owned()];
+        for entry in std::fs::read_dir(windows_bin_dir)
+            .with_context(|| format!("failed to read {}", windows_bin_dir.display()))?
+        {
+            let entry = entry.with_context(|| {
+                format!("failed to read entry under {}", windows_bin_dir.display())
+            })?;
+            scp_args.push(entry.path().display().to_string());
+        }
+        scp_args.push(format!("{}:{}/", options.c_host, c_scp_dir));
+        run_status("scp windows binaries to C", "scp", &scp_args)?;
+    } else {
+        println!("remote-fresh-run: --windows-bin-dir omitted, reusing existing C binaries");
     }
     Ok(())
 }
@@ -4047,6 +4375,603 @@ fn remote_run_stop(options: &LabRemoteRunOptions) -> Result<(), Error> {
     );
     std::thread::sleep(Duration::from_secs(2));
     Ok(())
+}
+
+fn remote_fresh_stop(options: &LabRemoteFreshRunOptions) -> Result<(), Error> {
+    println!("remote-fresh-run: stopping daemons");
+    let c_accept_pid = format!("{}/win-c-accept-ssh.pid", parent_path_unix(&options.b_log));
+    let c_daemon_pid = format!("{}/win-c-daemon-ssh.pid", parent_path_unix(&options.b_log));
+    let _ = run_local_sh(&format!(
+        "for pidfile in {accept_pid} {daemon_pid}; do if [ -f \"$pidfile\" ]; then kill $(cat \"$pidfile\") 2>/dev/null || true; rm -f \"$pidfile\"; fi; done",
+        accept_pid = sh_quote(&c_accept_pid),
+        daemon_pid = sh_quote(&c_daemon_pid),
+    ));
+    let _ = ssh_capture(&options.a_host, "pkill -9 -x pactmesh-core || true");
+    let _ = run_status(
+        "stop local B daemon",
+        "pkill",
+        &["-9".into(), "-x".into(), "pactmesh-core".into()],
+    );
+    let _ = ssh_capture_powershell(
+        &options.c_host,
+        "$self=$PID; Get-CimInstance Win32_Process -Filter \"name = 'powershell.exe'\" | Where-Object { $_.ProcessId -ne $self -and $_.CommandLine -like '*win-c-accept.ps1*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; Get-Process pactmesh-core -ErrorAction SilentlyContinue | Stop-Process -Force",
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    Ok(())
+}
+
+fn remote_fresh_clean_state(options: &LabRemoteFreshRunOptions) -> Result<(), Error> {
+    println!("remote-fresh-run: cleaning previous fresh lab state");
+    remote_fresh_stop(options)?;
+    ssh_capture_sh(
+        &options.a_host,
+        &format!(
+            "rm -rf {} {}",
+            sh_quote(&options.a_xdg),
+            sh_quote(&parent_path_unix(&options.a_log))
+        ),
+    )?;
+    run_local_sh(&format!(
+        "rm -rf {} {}",
+        sh_quote(&options.b_xdg),
+        sh_quote(&parent_path_unix(&options.b_log))
+    ))?;
+    let _ = ssh_capture_powershell(
+        &options.c_host,
+        &format!(
+            "Remove-Item -Recurse -Force {} -ErrorAction SilentlyContinue",
+            ps_quote(&common_parent_path_windows(&options.c_xdg, &options.c_log)),
+        ),
+    );
+    Ok(())
+}
+
+fn remote_fresh_setup_root(options: &LabRemoteFreshRunOptions) -> Result<FreshRootSetup, Error> {
+    println!("remote-fresh-run: creating fresh trust domain on A");
+    let root_dir = parent_path_unix(&options.a_xdg);
+    let root_passphrase_file = format!("{root_dir}/root.pass");
+    let script = format!(
+        "set -e\n\
+         mkdir -p {root_dir} {a_xdg} {log_dir}\n\
+         printf '%s\\n' {passphrase} > {pass_file}\n\
+         chmod 600 {pass_file}\n\
+         export XDG_CONFIG_HOME={a_xdg}\n\
+         cd {a_bin}\n\
+         domain_json=$(./pactmesh trust create-domain --label {label} --passphrase-file {pass_file} --json)\n\
+         printf '%s\\n' \"$domain_json\"\n\
+         td=$(printf '%s' \"$domain_json\" | sed -n 's/.*\"trust_domain_id\":\"\\([^\"]*\\)\".*/\\1/p')\n\
+         if [ -z \"$td\" ]; then echo failed-to-parse-trust-domain >&2; exit 1; fi\n\
+         ./pactmesh trust create-network \"$td\" {network} --default-action accept --passphrase-file {pass_file} --json\n\
+         ./pactmesh trust bootstrap-self \"$td\" {network} --device-label root-a --passphrase-file {pass_file} --json\n\
+         ./pactmesh trust invite \"$td\" {network} --seed {seed} --format url\n",
+        root_dir = sh_quote(&root_dir),
+        a_xdg = sh_quote(&options.a_xdg),
+        log_dir = sh_quote(&parent_path_unix(&options.a_log)),
+        passphrase = sh_quote(&options.root_passphrase),
+        pass_file = sh_quote(&root_passphrase_file),
+        a_bin = sh_quote(&options.a_bin_dir),
+        label = sh_quote(&options.domain_label),
+        network = sh_quote(&options.network_local_id),
+        seed = sh_quote(&options.seed),
+    );
+    let output = ssh_capture_sh(&options.a_host, &script)?;
+    let trust_domain_id = parse_json_field(&output, "trust_domain_id")?;
+    let invite = output
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with("privatenetwork://"))
+        .map(|line| line.trim().to_owned())
+        .ok_or_else(|| anyhow::anyhow!("invite URL not found in root setup output: {output}"))?;
+    println!("remote-fresh-run: trust_domain_id={trust_domain_id}");
+    Ok(FreshRootSetup {
+        trust_domain_id,
+        invite,
+        root_passphrase_file,
+    })
+}
+
+fn wait_for_local_rpc(bin_dir: &str, rpc: u16, timeout_secs: u64) -> Result<(), Error> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        let cmd = format!(
+            "cd {} && ./pactmesh --rpc-portal 127.0.0.1:{} node >/dev/null",
+            sh_quote(bin_dir),
+            rpc,
+        );
+        if local_capture(&cmd).is_ok() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for local RPC 127.0.0.1:{rpc}");
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn wait_for_remote_rpc(
+    host: &str,
+    bin_dir: &str,
+    rpc: u16,
+    timeout_secs: u64,
+) -> Result<(), Error> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        let cmd = format!(
+            "cd {} && ./pactmesh --rpc-portal 127.0.0.1:{} node >/dev/null",
+            sh_quote(bin_dir),
+            rpc,
+        );
+        if ssh_capture(host, &cmd).is_ok() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for {host} RPC 127.0.0.1:{rpc}");
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn wait_for_windows_rpc(
+    host: &str,
+    bin_dir: &str,
+    rpc: u16,
+    timeout_secs: u64,
+) -> Result<(), Error> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        let script = format!(
+            "Set-Location {}; & .\\pactmesh.exe --rpc-portal 127.0.0.1:{} node | Out-Null",
+            ps_quote(bin_dir),
+            rpc,
+        );
+        if ssh_capture_powershell(host, &script).is_ok() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for {host} RPC 127.0.0.1:{rpc}");
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn remote_fresh_start_root(
+    options: &LabRemoteFreshRunOptions,
+    root: &FreshRootSetup,
+) -> Result<(), Error> {
+    println!("remote-fresh-run: starting A root daemon");
+    let trust_dir = format!(
+        "{}/privateNetwork/trust-domains/{}",
+        options.a_xdg, root.trust_domain_id
+    );
+    let script = format!(
+        "set -e\n\
+         mkdir -p {log_dir}\n\
+         rm -f {log}\n\
+         export XDG_CONFIG_HOME={xdg}\n\
+         cd {bin}\n\
+         setsid -f ./pactmesh-core --network-name {net} --trust-domain-dir {trust_dir} --network-local-id {net} --rpc-portal 127.0.0.1:{rpc} --listeners tcp://0.0.0.0:{listen} --listeners udp://0.0.0.0:{listen} --no-tun true --disable-ipv6 true --instance-name root-a --console-log-level debug --daemon > {log} 2>&1\n",
+        log_dir = sh_quote(&parent_path_unix(&options.a_log)),
+        log = sh_quote(&options.a_log),
+        xdg = sh_quote(&options.a_xdg),
+        bin = sh_quote(&options.a_bin_dir),
+        net = sh_quote(&options.network_local_id),
+        trust_dir = sh_quote(&trust_dir),
+        rpc = options.a_rpc,
+        listen = options.a_listen,
+    );
+    ssh_capture_sh(&options.a_host, &script)?;
+    wait_for_remote_rpc(&options.a_host, &options.a_bin_dir, options.a_rpc, 20)
+}
+
+fn remote_fresh_join_node_b(
+    options: &LabRemoteFreshRunOptions,
+    root: &FreshRootSetup,
+) -> Result<(), Error> {
+    println!("remote-fresh-run: submitting B join request");
+    let accept_log = format!("{}/node-b-accept.log", parent_path_unix(&options.b_log));
+    let accept_code = format!("{}/node-b-accept.code", parent_path_unix(&options.b_log));
+    let job = format!(
+        "mkdir -p {log_dir} {xdg}\n\
+         rm -f {accept_log} {accept_code}\n\
+         export XDG_CONFIG_HOME={xdg}\n\
+         cd {bin}\n\
+         ./pactmesh trust accept-invite {invite} --device-label node-b --online --wait-secs {wait_secs} --poll-secs {poll_secs} > {accept_log} 2>&1\n\
+         printf '%s\\n' \"$?\" > {accept_code}\n",
+        log_dir = sh_quote(&parent_path_unix(&options.b_log)),
+        xdg = sh_quote(&options.b_xdg),
+        accept_log = sh_quote(&accept_log),
+        accept_code = sh_quote(&accept_code),
+        bin = sh_quote(&options.b_bin_dir),
+        invite = sh_quote(&root.invite),
+        wait_secs = options.join_wait_secs,
+        poll_secs = options.poll_secs,
+    );
+    let script = format!(
+        "nohup sh -c {} >/dev/null 2>&1 < /dev/null &\n",
+        sh_quote(&job)
+    );
+    run_local_sh(&script)?;
+    Ok(())
+}
+
+fn remote_fresh_join_node_c(
+    options: &LabRemoteFreshRunOptions,
+    root: &FreshRootSetup,
+) -> Result<(), Error> {
+    println!("remote-fresh-run: submitting C join request");
+    let c_log_dir = parent_path_windows(&options.c_log);
+    let accept_log = format!("{}\\win-c-accept.log", c_log_dir);
+    let accept_code = format!("{}\\win-c-accept.code", c_log_dir);
+    let accept_script = format!(
+        "$ErrorActionPreference='Continue'\nNew-Item -ItemType Directory -Force {log_dir} | Out-Null\n'win-c accept started' | Set-Content -Path {accept_log}\n$env:XDG_CONFIG_HOME={xdg}\nSet-Location {bin}\n& .\\pactmesh.exe trust accept-invite {invite} --device-label win-c --online --wait-secs {wait_secs} --poll-secs {poll_secs} *>> {accept_log}\n$code=$LASTEXITCODE\n$code | Set-Content -Path {accept_code}\nexit $code\n",
+        log_dir = ps_quote(&c_log_dir),
+        xdg = ps_quote(&options.c_xdg),
+        bin = ps_quote(&options.c_bin_dir),
+        invite = ps_quote(&root.invite),
+        wait_secs = options.join_wait_secs,
+        poll_secs = options.poll_secs,
+        accept_log = ps_quote(&accept_log),
+        accept_code = ps_quote(&accept_code),
+    );
+    let ssh_log = format!("{}/win-c-accept-ssh.log", parent_path_unix(&options.b_log));
+    let ssh_pid = format!("{}/win-c-accept-ssh.pid", parent_path_unix(&options.b_log));
+    let command = powershell_encoded_command(&accept_script);
+    let timeout_secs = options.join_wait_secs.saturating_add(60).max(60);
+    let local_script = format!(
+        "mkdir -p {log_dir}\nrm -f {ssh_log} {ssh_pid}\nnohup timeout {timeout_secs} ssh -o BatchMode=yes -o ConnectTimeout=8 {host} {command} > {ssh_log} 2>&1 < /dev/null &\necho $! > {ssh_pid}\n",
+        log_dir = sh_quote(&parent_path_unix(&options.b_log)),
+        ssh_log = sh_quote(&ssh_log),
+        ssh_pid = sh_quote(&ssh_pid),
+        timeout_secs = timeout_secs,
+        host = sh_quote(&options.c_host),
+        command = sh_quote(&command),
+    );
+    run_local_sh(&local_script)?;
+    Ok(())
+}
+
+fn remote_fresh_pending_rows(
+    options: &LabRemoteFreshRunOptions,
+    root: &FreshRootSetup,
+) -> Result<Vec<serde_json::Value>, Error> {
+    let script = format!(
+        "set -e\nexport XDG_CONFIG_HOME={xdg}\ncd {bin}\n./pactmesh --rpc-portal 127.0.0.1:{rpc} trust list-pending {td} --network-local-id {net} --json\n",
+        xdg = sh_quote(&options.a_xdg),
+        bin = sh_quote(&options.a_bin_dir),
+        rpc = options.a_rpc,
+        td = sh_quote(&root.trust_domain_id),
+        net = sh_quote(&options.network_local_id),
+    );
+    let output = ssh_capture_sh(&options.a_host, &script)?;
+    let value: serde_json::Value = serde_json::from_str(output.trim())
+        .with_context(|| format!("failed to parse pending JSON: {output}"))?;
+    Ok(value.as_array().cloned().unwrap_or_default())
+}
+
+fn remote_fresh_approve_until_joined(
+    options: &LabRemoteFreshRunOptions,
+    root: &FreshRootSetup,
+    labels: &[&str],
+) -> Result<(), Error> {
+    println!("remote-fresh-run: approving B/C join requests");
+    let mut approved = HashSet::new();
+    let wanted = labels.iter().copied().collect::<HashSet<_>>();
+    let deadline = std::time::Instant::now() + Duration::from_secs(options.join_wait_secs);
+    loop {
+        for row in remote_fresh_pending_rows(options, root)? {
+            let Some(label) = row.get("device_label").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            if !wanted.contains(label) || approved.contains(label) {
+                continue;
+            }
+            let Some(device_id) = row.get("device_id").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let script = format!(
+                "set -e\nexport XDG_CONFIG_HOME={xdg}\ncd {bin}\n./pactmesh --rpc-portal 127.0.0.1:{rpc} trust approve {td} {net} {device_id} --passphrase-file {pass_file} --json\n",
+                xdg = sh_quote(&options.a_xdg),
+                bin = sh_quote(&options.a_bin_dir),
+                rpc = options.a_rpc,
+                td = sh_quote(&root.trust_domain_id),
+                net = sh_quote(&options.network_local_id),
+                device_id = sh_quote(device_id),
+                pass_file = sh_quote(&root.root_passphrase_file),
+            );
+            let output = ssh_capture_sh(&options.a_host, &script)?;
+            println!("remote-fresh-run: approved {label}: {}", output.trim());
+            approved.insert(label.to_owned());
+        }
+        if approved.len() == labels.len() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out approving join requests; approved {:?}, wanted {:?}",
+                approved,
+                labels
+            );
+        }
+        std::thread::sleep(Duration::from_secs(options.poll_secs.max(1)));
+    }
+
+    remote_fresh_wait_for_accepts(options)
+}
+
+fn remote_fresh_wait_for_accepts(options: &LabRemoteFreshRunOptions) -> Result<(), Error> {
+    println!("remote-fresh-run: waiting for B/C accept-invite completion");
+    let deadline = std::time::Instant::now() + Duration::from_secs(options.join_wait_secs);
+    let b_code = format!("{}/node-b-accept.code", parent_path_unix(&options.b_log));
+    let c_code = format!("{}\\win-c-accept.code", parent_path_windows(&options.c_log));
+    loop {
+        let b_done = std::fs::read_to_string(&b_code)
+            .ok()
+            .map(|value| value.trim() == "0")
+            .unwrap_or(false);
+        let c_done = ssh_capture_powershell(
+            &options.c_host,
+            &format!(
+                "if (Test-Path {}) {{ Get-Content {} -Raw }}",
+                ps_quote(&c_code),
+                ps_quote(&c_code)
+            ),
+        )
+        .ok()
+        .map(|value| value.trim() == "0")
+        .unwrap_or(false);
+        if b_done && c_done {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            let b_log = std::fs::read_to_string(format!(
+                "{}/node-b-accept.log",
+                parent_path_unix(&options.b_log)
+            ))
+            .unwrap_or_default();
+            let c_log = ssh_capture_powershell(
+                &options.c_host,
+                &format!(
+                    "if (Test-Path {}) {{ Get-Content {} -Raw }}",
+                    ps_quote(&format!(
+                        "{}\\win-c-accept.log",
+                        parent_path_windows(&options.c_log)
+                    )),
+                    ps_quote(&format!(
+                        "{}\\win-c-accept.log",
+                        parent_path_windows(&options.c_log)
+                    )),
+                ),
+            )
+            .unwrap_or_default();
+            anyhow::bail!(
+                "timed out waiting for accept-invite completion\nB accept log:\n{}\nC accept log:\n{}",
+                trim_remote_output(&b_log, 2000),
+                trim_remote_output(&c_log, 2000)
+            );
+        }
+        std::thread::sleep(Duration::from_secs(options.poll_secs.max(1)));
+    }
+}
+
+fn remote_fresh_start_joiners(
+    options: &LabRemoteFreshRunOptions,
+    root: &FreshRootSetup,
+) -> Result<(), Error> {
+    println!("remote-fresh-run: starting B/C daemons");
+    std::fs::create_dir_all(parent_path_unix(&options.b_log))?;
+    let b_script = format!(
+        "set -e\n\
+         rm -f {log}\n\
+         export XDG_CONFIG_HOME={xdg}\n\
+         cd {bin}\n\
+         setsid -f ./pactmesh-core --network-name {net} --network-local-id {net} --rpc-portal 127.0.0.1:{rpc} --listeners tcp://0.0.0.0:{listen} --listeners udp://0.0.0.0:{listen} --peers {seed} --no-tun true --disable-ipv6 true --instance-name node-b --console-log-level debug --daemon > {log} 2>&1\n",
+        log = sh_quote(&options.b_log),
+        xdg = sh_quote(&options.b_xdg),
+        bin = sh_quote(&options.b_bin_dir),
+        net = sh_quote(&options.network_local_id),
+        rpc = options.b_rpc,
+        listen = options.b_listen,
+        seed = sh_quote(&options.seed),
+    );
+    run_local_sh(&b_script)?;
+    wait_for_local_rpc(&options.b_bin_dir, options.b_rpc, 20)?;
+
+    let c_script = format!(
+        "$ErrorActionPreference='Continue'\nNew-Item -ItemType Directory -Force {log_dir} | Out-Null\nRemove-Item -Force {log} -ErrorAction SilentlyContinue\n$env:XDG_CONFIG_HOME={xdg}\nSet-Location {bin}\n& .\\pactmesh-core.exe --network-name {net} --network-local-id {net} --rpc-portal 127.0.0.1:{rpc} --listeners tcp://0.0.0.0:{listen} --listeners udp://0.0.0.0:{listen} --peers {seed} --no-tun true --disable-ipv6 true --instance-name win-c --console-log-level debug --daemon *> {log}\n$LASTEXITCODE | Add-Content -Path {log}\n",
+        log_dir = ps_quote(&parent_path_windows(&options.c_log)),
+        log = ps_quote(&options.c_log),
+        xdg = ps_quote(&options.c_xdg),
+        bin = ps_quote(&options.c_bin_dir),
+        net = ps_quote(&options.network_local_id),
+        rpc = options.c_rpc,
+        listen = options.c_listen,
+        seed = ps_quote(&options.seed),
+    );
+    let c_daemon_ssh_log = format!("{}/win-c-daemon-ssh.log", parent_path_unix(&options.b_log));
+    let c_daemon_ssh_pid = format!("{}/win-c-daemon-ssh.pid", parent_path_unix(&options.b_log));
+    let command = powershell_encoded_command(&c_script);
+    let local_script = format!(
+        "mkdir -p {log_dir}\nrm -f {ssh_log} {ssh_pid}\nnohup ssh -o BatchMode=yes -o ConnectTimeout=8 {host} {command} > {ssh_log} 2>&1 < /dev/null &\necho $! > {ssh_pid}\n",
+        log_dir = sh_quote(&parent_path_unix(&options.b_log)),
+        ssh_log = sh_quote(&c_daemon_ssh_log),
+        ssh_pid = sh_quote(&c_daemon_ssh_pid),
+        host = sh_quote(&options.c_host),
+        command = sh_quote(&command),
+    );
+    run_local_sh(&local_script)?;
+    wait_for_windows_rpc(&options.c_host, &options.c_bin_dir, options.c_rpc, 30)?;
+
+    let _ = root;
+    Ok(())
+}
+
+fn remote_fresh_wait_for_peers(
+    options: &LabRemoteFreshRunOptions,
+    _root: &FreshRootSetup,
+) -> Result<(), Error> {
+    println!(
+        "remote-fresh-run: waiting up to {}s for peer visibility",
+        options.wait_secs
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(options.wait_secs);
+    loop {
+        let b =
+            remote_run_collect_linux("B", None, &options.b_bin_dir, options.b_rpc, &options.b_log)?;
+        let c = remote_fresh_collect_windows(options)?;
+        let last_b = b.explain;
+        let last_c = c.explain;
+        let b_sees_c = b.peer_json.to_ascii_lowercase().contains("laptop")
+            || b.peer_json.to_ascii_lowercase().contains("win-c");
+        let c_sees_b = c.peer_json.to_ascii_lowercase().contains("user")
+            || c.peer_json.to_ascii_lowercase().contains("node-b");
+        let b_direct = remote_run_assert_direct_quiet("B", &b.peer_json, "LAPTOP")
+            .or_else(|_| remote_run_assert_direct_quiet("B", &b.peer_json, "win-c"));
+        let c_direct = remote_run_assert_direct_quiet("C", &c.peer_json, "user")
+            .or_else(|_| remote_run_assert_direct_quiet("C", &c.peer_json, "node-b"));
+        if b_sees_c && c_sees_b {
+            println!("\n== B ==\n{}", trim_remote_output(&last_b, 4000));
+            println!("\n== C ==\n{}", trim_remote_output(&last_c, 4000));
+            if options.require_bc_direct {
+                b_direct?;
+                c_direct?;
+            } else if b_direct.is_err() || c_direct.is_err() {
+                println!(
+                    "remote-fresh-run: B/C visible but not direct; continuing because --require-bc-direct=false"
+                );
+            }
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out waiting for B/C peer visibility\nlast B:\n{}\nlast C:\n{}",
+                trim_remote_output(&last_b, 4000),
+                trim_remote_output(&last_c, 4000)
+            );
+        }
+        std::thread::sleep(Duration::from_secs(options.poll_secs.max(1)));
+    }
+}
+
+fn remote_fresh_collect_windows(
+    options: &LabRemoteFreshRunOptions,
+) -> Result<RemoteNodeReport, Error> {
+    let compat = LabRemoteRunOptions {
+        a_host: options.a_host.clone(),
+        c_host: options.c_host.clone(),
+        trust_domain_id: String::new(),
+        network_local_id: options.network_local_id.clone(),
+        seed: options.seed.clone(),
+        linux_bin_dir: options.linux_bin_dir.clone(),
+        windows_bin_dir: options.windows_bin_dir.clone(),
+        a_bin_dir: options.a_bin_dir.clone(),
+        b_bin_dir: options.b_bin_dir.clone(),
+        c_bin_dir: options.c_bin_dir.clone(),
+        a_xdg: options.a_xdg.clone(),
+        b_xdg: options.b_xdg.clone(),
+        c_xdg: options.c_xdg.clone(),
+        a_log: options.a_log.clone(),
+        b_log: options.b_log.clone(),
+        c_log: options.c_log.clone(),
+        a_rpc: options.a_rpc,
+        b_rpc: options.b_rpc,
+        c_rpc: options.c_rpc,
+        a_listen: options.a_listen,
+        b_listen: options.b_listen,
+        c_listen: options.c_listen,
+        wait_secs: options.wait_secs,
+        poll_secs: options.poll_secs,
+        no_deploy: options.no_deploy,
+        keep_running: options.keep_running,
+        b_expect_peer: "LAPTOP".to_owned(),
+        c_expect_peer: "user".to_owned(),
+    };
+    remote_run_collect_windows(&compat)
+}
+
+fn remote_fresh_c_members(
+    options: &LabRemoteFreshRunOptions,
+    root: &FreshRootSetup,
+) -> Result<Vec<serde_json::Value>, Error> {
+    let script = format!(
+        "$env:XDG_CONFIG_HOME={xdg}; Set-Location {bin}; & .\\pactmesh.exe --rpc-portal 127.0.0.1:{rpc} trust list-members {td} {net} --include all --json",
+        xdg = ps_quote(&options.c_xdg),
+        bin = ps_quote(&options.c_bin_dir),
+        rpc = options.c_rpc,
+        td = ps_quote(&root.trust_domain_id),
+        net = ps_quote(&options.network_local_id),
+    );
+    let output = ssh_capture_powershell(&options.c_host, &script)?;
+    let value: serde_json::Value = serde_json::from_str(output.trim())
+        .with_context(|| format!("failed to parse C members JSON: {output}"))?;
+    Ok(value.as_array().cloned().unwrap_or_default())
+}
+
+fn remote_fresh_wait_for_c_member_status(
+    options: &LabRemoteFreshRunOptions,
+    root: &FreshRootSetup,
+    label: &str,
+    status: &str,
+) -> Result<(), Error> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(options.wait_secs);
+    loop {
+        let rows = remote_fresh_c_members(options, root)?;
+        if rows.iter().any(|row| {
+            row.get("device_label").and_then(|value| value.as_str()) == Some(label)
+                && row.get("status").and_then(|value| value.as_str()) == Some(status)
+        }) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out waiting for C to see {label} as {status}; last rows={}",
+                serde_json::to_string(&rows).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(Duration::from_secs(options.poll_secs.max(1)));
+    }
+}
+
+fn remote_fresh_verify_config_sync(
+    options: &LabRemoteFreshRunOptions,
+    root: &FreshRootSetup,
+) -> Result<(), Error> {
+    println!("remote-fresh-run: verifying disable/enable config-sync to C");
+    let b_fp = remote_fresh_c_members(options, root)?
+        .into_iter()
+        .find(|row| row.get("device_label").and_then(|value| value.as_str()) == Some("node-b"))
+        .and_then(|row| {
+            row.get("fingerprint")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| anyhow::anyhow!("C member list does not contain node-b"))?;
+    let disable = format!(
+        "set -e\nexport XDG_CONFIG_HOME={xdg}\ncd {bin}\n./pactmesh --rpc-portal 127.0.0.1:{rpc} trust disable {td} {net} {fp} --note remote-fresh-run --passphrase-file {pass_file} --json\n",
+        xdg = sh_quote(&options.a_xdg),
+        bin = sh_quote(&options.a_bin_dir),
+        rpc = options.a_rpc,
+        td = sh_quote(&root.trust_domain_id),
+        net = sh_quote(&options.network_local_id),
+        fp = sh_quote(&b_fp),
+        pass_file = sh_quote(&root.root_passphrase_file),
+    );
+    let out = ssh_capture_sh(&options.a_host, &disable)?;
+    println!("remote-fresh-run: disable node-b: {}", out.trim());
+    remote_fresh_wait_for_c_member_status(options, root, "node-b", "disabled")?;
+
+    let enable = format!(
+        "set -e\nexport XDG_CONFIG_HOME={xdg}\ncd {bin}\n./pactmesh --rpc-portal 127.0.0.1:{rpc} trust enable {td} {net} {fp} --passphrase-file {pass_file} --json\n",
+        xdg = sh_quote(&options.a_xdg),
+        bin = sh_quote(&options.a_bin_dir),
+        rpc = options.a_rpc,
+        td = sh_quote(&root.trust_domain_id),
+        net = sh_quote(&options.network_local_id),
+        fp = sh_quote(&b_fp),
+        pass_file = sh_quote(&root.root_passphrase_file),
+    );
+    let out = ssh_capture_sh(&options.a_host, &enable)?;
+    println!("remote-fresh-run: enable node-b: {}", out.trim());
+    remote_fresh_wait_for_c_member_status(options, root, "node-b", "active")
 }
 
 fn remote_run_start(options: &LabRemoteRunOptions) -> Result<(), Error> {
@@ -4226,15 +5151,51 @@ fn remote_run_assert_direct_quiet(
 }
 
 fn ssh_capture_powershell(host: &str, script: &str) -> Result<String, Error> {
+    ssh_capture(host, &powershell_encoded_command(script))
+}
+
+fn powershell_encoded_command(script: &str) -> String {
+    let script = format!(
+        "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; {}",
+        script
+    );
     let mut bytes = Vec::with_capacity(script.len() * 2);
     for unit in script.encode_utf16() {
         bytes.extend_from_slice(&unit.to_le_bytes());
     }
     let encoded = BASE64_STANDARD.encode(bytes);
+    format!("powershell -NoProfile -EncodedCommand {encoded}")
+}
+
+fn ssh_capture_sh(host: &str, script: &str) -> Result<String, Error> {
+    let encoded = BASE64_STANDARD.encode(script.as_bytes());
     ssh_capture(
         host,
-        &format!("powershell -NoProfile -EncodedCommand {encoded}"),
+        &format!("printf %s {} | base64 -d | sh", sh_quote(&encoded)),
     )
+}
+
+fn run_local_sh(script: &str) -> Result<String, Error> {
+    let encoded = BASE64_STANDARD.encode(script.as_bytes());
+    local_capture(&format!(
+        "printf %s {} | base64 -d | sh",
+        sh_quote(&encoded)
+    ))
+}
+
+fn parse_json_field(output: &str, field: &str) -> Result<String, Error> {
+    for line in output.lines().rev() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('{') {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(trimmed)
+            .with_context(|| format!("failed to parse JSON line: {trimmed}"))?;
+        if let Some(text) = value.get(field).and_then(|value| value.as_str()) {
+            return Ok(text.to_owned());
+        }
+    }
+    anyhow::bail!("field '{field}' not found in JSON output: {output}")
 }
 
 fn local_capture(command: &str) -> Result<String, Error> {
@@ -4295,6 +5256,24 @@ fn parent_path_windows(path: &str) -> String {
         .map(|(parent, _)| parent)
         .unwrap_or(".")
         .to_string()
+}
+
+fn common_parent_path_windows(left: &str, right: &str) -> String {
+    let left_parts = left.split('\\').collect::<Vec<_>>();
+    let right_parts = right.split('\\').collect::<Vec<_>>();
+    let mut common = Vec::new();
+    for (left, right) in left_parts.iter().zip(right_parts.iter()) {
+        if left.eq_ignore_ascii_case(right) {
+            common.push(*left);
+        } else {
+            break;
+        }
+    }
+    if common.is_empty() {
+        parent_path_windows(left)
+    } else {
+        common.join("\\")
+    }
 }
 
 fn ssh_capture(host: &str, command: &str) -> Result<String, Error> {
@@ -6239,12 +7218,8 @@ async fn handle_trust_disable(
         });
     let old_version = original_state.details.version;
     let next_state = sign_next_network_state(&original_state, &root);
-    let new_version = write_pre_signed_network_state(
-        &network_dir,
-        old_version,
-        original_pem,
-        &next_state,
-    )?;
+    let new_version =
+        write_pre_signed_network_state(&network_dir, old_version, original_pem, &next_state)?;
     if let Some(handler) = handler {
         if let Err(err) = handler.apply_network_state_to_daemon(&next_state).await {
             eprintln!(
@@ -6305,12 +7280,8 @@ async fn handle_trust_enable(
     let root = unlock_domain_root(&trust_domain_id, passphrase_file)?;
     let old_version = original_state.details.version;
     let next_state = sign_next_network_state(&original_state, &root);
-    let new_version = write_pre_signed_network_state(
-        &network_dir,
-        old_version,
-        original_pem,
-        &next_state,
-    )?;
+    let new_version =
+        write_pre_signed_network_state(&network_dir, old_version, original_pem, &next_state)?;
     if let Some(handler) = handler {
         if let Err(err) = handler.apply_network_state_to_daemon(&next_state).await {
             eprintln!(

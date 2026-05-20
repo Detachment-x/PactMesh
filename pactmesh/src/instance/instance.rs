@@ -1753,11 +1753,12 @@ impl Instance {
                     self.patcher.apply_patch(patch).await?;
                 }
                 if let Some(network_state_cbor) = request.network_state_cbor.as_ref() {
-                    let state: SignedNetworkState = from_cbor(network_state_cbor).map_err(|err| {
-                        rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
-                            "invalid network_state_cbor: {err}"
-                        ))
-                    })?;
+                    let state: SignedNetworkState =
+                        from_cbor(network_state_cbor).map_err(|err| {
+                            rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                                "invalid network_state_cbor: {err}"
+                            ))
+                        })?;
                     let config_sync = self.config_sync_service.as_ref().ok_or_else(|| {
                         rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
                             "config-sync service is not available"

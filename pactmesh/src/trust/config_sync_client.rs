@@ -131,7 +131,7 @@ impl ConfigSyncClient {
                     self.network_name.clone(),
                 );
 
-            let response = stub
+            let response = match stub
                 .query_config_version(
                     BaseController::default(),
                     QueryConfigVersionRequest {
@@ -139,13 +139,32 @@ impl ConfigSyncClient {
                     },
                 )
                 .await
-                .with_context(|| format!("query_config_version failed for peer {peer_id}"))?;
+                .with_context(|| format!("query_config_version failed for peer {peer_id}"))
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    tracing::warn!(peer_id, ?err, "config-sync query failed; continuing");
+                    continue;
+                }
+            };
 
             for version in response.versions {
-                if self.should_fetch(&version, force_full_sync).await?
+                let should_fetch = match self.should_fetch(&version, force_full_sync).await {
+                    Ok(should_fetch) => should_fetch,
+                    Err(err) => {
+                        tracing::warn!(
+                            peer_id,
+                            ?err,
+                            "config-sync version check failed; continuing"
+                        );
+                        continue;
+                    }
+                };
+                if should_fetch
                     && let Some(selector) = version.selector
+                    && let Err(err) = self.fetch_and_apply(peer_id, selector).await
                 {
-                    let _ = self.fetch_and_apply(peer_id, selector).await;
+                    tracing::warn!(peer_id, ?err, "config-sync fetch/apply failed; continuing");
                 }
             }
         }

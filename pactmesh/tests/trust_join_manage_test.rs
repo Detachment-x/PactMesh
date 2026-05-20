@@ -3,8 +3,9 @@ use pactmesh::{
     instance::instance::Instance,
     proto::{
         api::config::{
-            ApproveJoinRequestRequest, FetchPendingMemberCertRequest, PatchConfigRequest,
-            ListPendingJoinRequestsRequest, RejectJoinRequestRequest, SubmitJoinRequestRequest,
+            ApproveJoinRequestRequest, FetchPendingMemberCertRequest,
+            ListPendingJoinRequestsRequest, PatchConfigRequest, RejectJoinRequestRequest,
+            SubmitJoinRequestRequest,
         },
         rpc_types::controller::BaseController,
     },
@@ -426,7 +427,10 @@ async fn test_patch_config_applies_supplied_network_state_to_daemon() {
         .trust_pool
         .read()
         .await
-        .network_state(&root.id(), &NetworkLocalId::try_from_str(NETWORK_LOCAL_ID).unwrap())
+        .network_state(
+            &root.id(),
+            &NetworkLocalId::try_from_str(NETWORK_LOCAL_ID).unwrap(),
+        )
         .cloned()
         .unwrap();
     assert_eq!(cached, supplied_state);

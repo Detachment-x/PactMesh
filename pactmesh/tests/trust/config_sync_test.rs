@@ -1,4 +1,4 @@
-use std::{pin::Pin, sync::Arc, time::Duration};
+use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
 
 use ed25519_dalek::VerifyingKey;
 use futures::{SinkExt, StreamExt};
@@ -26,7 +26,7 @@ use pactmesh::{
 use pnet::ipnetwork::IpNetwork as IpNet;
 use serial_test::serial;
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 
 use pactmesh::trust::config_sync_client::ConfigSyncClient;
 use pactmesh::trust::config_sync_service::ConfigSyncService;
@@ -234,6 +234,70 @@ fn rpc_mgr_pair() -> (Arc<PeerRpcManager>, Arc<PeerRpcManager>, PeerId, PeerId) 
     (server_mgr, client_mgr, server_id, client_id)
 }
 
+struct MeshBus {
+    senders: HashMap<PeerId, mpsc::UnboundedSender<ZCPacket>>,
+}
+
+struct MeshTransport {
+    bus: Arc<Mutex<MeshBus>>,
+    receiver: Arc<Mutex<mpsc::UnboundedReceiver<ZCPacket>>>,
+    my_peer_id: PeerId,
+}
+
+#[async_trait::async_trait]
+impl PeerRpcManagerTransport for MeshTransport {
+    fn my_peer_id(&self) -> PeerId {
+        self.my_peer_id
+    }
+
+    async fn send(&self, msg: ZCPacket, dst_peer_id: PeerId) -> Result<(), CommonError> {
+        let sender = self.bus.lock().await.senders.get(&dst_peer_id).cloned();
+        let Some(sender) = sender else {
+            return Err(CommonError::PeerNoConnectionError(dst_peer_id));
+        };
+        sender
+            .send(msg)
+            .map_err(|_| CommonError::PeerNoConnectionError(dst_peer_id))
+    }
+
+    async fn recv(&self) -> Result<ZCPacket, CommonError> {
+        self.receiver
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or(CommonError::NotFound)
+    }
+}
+
+fn rpc_mgr_mesh(count: usize) -> Vec<(Arc<PeerRpcManager>, PeerId)> {
+    let mut receivers = Vec::new();
+    let mut senders = HashMap::new();
+    let mut peer_ids = Vec::new();
+    for _ in 0..count {
+        let peer_id = new_peer_id();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        senders.insert(peer_id, sender);
+        receivers.push(receiver);
+        peer_ids.push(peer_id);
+    }
+    let bus = Arc::new(Mutex::new(MeshBus { senders }));
+
+    receivers
+        .into_iter()
+        .zip(peer_ids)
+        .map(|(receiver, peer_id)| {
+            let mgr = Arc::new(PeerRpcManager::new(MeshTransport {
+                bus: bus.clone(),
+                receiver: Arc::new(Mutex::new(receiver)),
+                my_peer_id: peer_id,
+            }));
+            mgr.run();
+            (mgr, peer_id)
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn test_query_returns_local_versions() {
     let root = TrustDomainRoot::generate();
@@ -401,6 +465,40 @@ async fn test_pull_loop_advances_local_version() {
     let handle = client.pull_loop();
     tokio::time::sleep(Duration::from_millis(120)).await;
     handle.abort();
+
+    let guard = client_pool.read().await;
+    let updated = guard
+        .network_state(&root.id(), &cert.details.network_local_id)
+        .unwrap();
+    assert_eq!(updated.details.version, 2);
+}
+
+#[tokio::test]
+async fn test_sync_once_continues_after_peer_query_error() {
+    let root = TrustDomainRoot::generate();
+    let sk_self = SignKey::generate();
+    let cert = sample_member_cert(&root, &sk_self, "device-a", 1);
+    let server_state = sample_network_state(&root, &cert, 2);
+    let client_state = sample_network_state(&root, &cert, 1);
+    let server_pool = build_pool(&root, Some(server_state), None);
+    let client_pool = build_pool(&root, Some(client_state), None);
+    let service = ConfigSyncService::new(server_pool, NETWORK_NAME.to_owned());
+    let peers = rpc_mgr_mesh(3);
+    let (good_mgr, good_id) = (peers[0].0.clone(), peers[0].1);
+    let (_bad_mgr, bad_id) = (peers[1].0.clone(), peers[1].1);
+    let (client_mgr, client_id) = (peers[2].0.clone(), peers[2].1);
+    service.register(&good_mgr);
+
+    let client = ConfigSyncClient::new(
+        client_mgr,
+        client_id,
+        client_pool.clone(),
+        NETWORK_NAME.to_owned(),
+    )
+    .with_known_peers(vec![bad_id, good_id])
+    .with_caller_member_cert(&cert);
+
+    client.sync_once(false).await.unwrap();
 
     let guard = client_pool.read().await;
     let updated = guard
