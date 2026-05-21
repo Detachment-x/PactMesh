@@ -562,7 +562,7 @@ enum LabSubCommand {
         b_bin_dir: String,
         #[arg(
             long,
-            default_value = "D:\\pactmesh-fresh-test\\bin",
+            default_value = "M:\\workarea\\testPactMesh\\bin",
             help = "remote C bin dir"
         )]
         c_bin_dir: String,
@@ -694,7 +694,7 @@ enum LabSubCommand {
         b_bin_dir: String,
         #[arg(
             long,
-            default_value = "D:\\pactmesh-fresh-test\\bin",
+            default_value = "M:\\workarea\\testPactMesh\\bin",
             help = "remote C bin dir"
         )]
         c_bin_dir: String,
@@ -712,7 +712,7 @@ enum LabSubCommand {
         b_xdg: String,
         #[arg(
             long,
-            default_value = "D:\\pactmesh-fresh-test\\xdg",
+            default_value = "M:\\workarea\\testPactMesh\\xdg",
             help = "remote C XDG_CONFIG_HOME"
         )]
         c_xdg: String,
@@ -730,7 +730,7 @@ enum LabSubCommand {
         b_log: String,
         #[arg(
             long,
-            default_value = "D:\\pactmesh-fresh-test\\logs\\win-c.log",
+            default_value = "M:\\workarea\\testPactMesh\\logs\\win-c.log",
             help = "remote C log path"
         )]
         c_log: String,
