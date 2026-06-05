@@ -1005,9 +1005,14 @@ enum TrustSubCommand {
         passphrase_file: Option<PathBuf>,
         #[arg(
             long,
-            help = "submit to the running daemon and poll for the approved member cert"
+            help = "deprecated: online submission is the default now; kept for compatibility"
         )]
         online: bool,
+        #[arg(
+            long,
+            help = "write the join request to disk only, skip daemon submission (air-gapped/manual approval)"
+        )]
+        offline: bool,
         #[arg(
             long,
             default_value_t = 3600,
@@ -7548,9 +7553,11 @@ async fn handle_trust_accept_invite(
         return Ok(());
     }
 
-    println!("Prepared join request at {}", join_path.display());
+    println!("Prepared offline join request at {}", join_path.display());
     println!("Device key stored at {}", device_dir.display());
-    println!("Submit this join request with --online when a daemon is running (T-134b).");
+    println!(
+        "Offline mode: transfer this file to a root operator for approval, then import the returned member cert. Omit --offline to submit automatically."
+    );
     Ok(())
 }
 
@@ -9150,7 +9157,8 @@ async fn main() -> Result<(), Error> {
                 device_label,
                 hint,
                 passphrase_file,
-                online,
+                online: _,
+                offline,
                 wait_secs,
                 poll_secs,
             } => {
@@ -9161,7 +9169,7 @@ async fn main() -> Result<(), Error> {
                         device_label,
                         hint,
                         passphrase_file,
-                        online,
+                        online: !offline,
                         wait_secs,
                         poll_secs,
                     },
