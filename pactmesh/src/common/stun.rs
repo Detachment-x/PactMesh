@@ -446,13 +446,26 @@ pub enum StunTransport {
     Tcp,
 }
 
+// Largest per-destination external-port spread (one socket, different STUN
+// servers) still treated as a near-endpoint-independent "easy" symmetric NAT.
+const SYMMETRIC_PORT_SPREAD_MAX: u16 = 15;
+// Fresh-socket probes for the easy/hard symmetric split, and the minimum that
+// must succeed: one nearby sample is not enough to trust port prediction.
+const EXTRA_BIND_SAMPLES: usize = 3;
+const EXTRA_BIND_MIN_SAMPLES: usize = 2;
+// Largest per-socket port step still considered predictable.
+const EXTRA_BIND_STEP_MAX: i32 = 100;
+
 #[derive(Debug, Clone)]
 pub struct StunNatTypeDetectResult {
     transport: StunTransport,
     source_addr: SocketAddr,
     stun_resps: Vec<BindRequestResponse>,
-    // if we are easy symmetric nat, we need to test with another port to check inc or dec
-    extra_bind_test: Option<BindRequestResponse>,
+    // If the per-destination spread is small we probe extra fresh sockets to tell
+    // whether the NAT allocates ports predictably (easy) or randomly (hard). One
+    // sample is not enough: a new socket landing nearby is normal even for hard
+    // NATs, so we keep several and require a consistent monotonic step.
+    extra_bind_tests: Vec<BindRequestResponse>,
 }
 
 impl StunNatTypeDetectResult {
@@ -465,7 +478,7 @@ impl StunNatTypeDetectResult {
             transport,
             source_addr,
             stun_resps,
-            extra_bind_test: None,
+            extra_bind_tests: vec![],
         }
     }
 
@@ -551,31 +564,75 @@ impl StunNatTypeDetectResult {
         } else if !self.stun_resps.is_empty() {
             if self.public_ips().len() != 1
                 || self.usable_stun_resp_count() <= 1
-                || self.max_port() - self.min_port() > 15
+                || self.max_port().saturating_sub(self.min_port()) > SYMMETRIC_PORT_SPREAD_MAX
             {
                 NatType::Symmetric
-            } else if let Some(extra_bind_mapped) = self
-                .extra_bind_test
-                .as_ref()
-                .and_then(|extra| extra.mapped_socket_addr)
-            {
-                let extra_port = extra_bind_mapped.port();
-
-                let max_port_diff = extra_port.saturating_sub(self.max_port());
-                let min_port_diff = self.min_port().saturating_sub(extra_port);
-                if max_port_diff != 0 && max_port_diff < 100 {
-                    NatType::SymmetricEasyInc
-                } else if min_port_diff != 0 && min_port_diff < 100 {
-                    NatType::SymmetricEasyDec
-                } else {
-                    NatType::Symmetric
-                }
             } else {
-                NatType::Symmetric
+                self.classify_easy_symmetric()
             }
         } else {
             NatType::Unknown
         }
+    }
+
+    // The small-spread symmetric regime where the easy/hard split depends on the
+    // extra fresh-socket probes; outside it the verdict needs no probing.
+    fn needs_extra_bind_probe(&self) -> bool {
+        !self.is_cone()
+            && !self.stun_resps.is_empty()
+            && self.public_ips().len() == 1
+            && self.usable_stun_resp_count() > 1
+            && self.max_port().saturating_sub(self.min_port()) <= SYMMETRIC_PORT_SPREAD_MAX
+    }
+
+    // Decide easy-inc / easy-dec / hard from the extra probes. Allocation order is
+    // [original window edge, sample1, sample2, ...]; a predictable NAT steps by a
+    // small, consistent amount per new socket, so a single nearby sample (normal
+    // even for hard NATs) is not enough.
+    fn classify_easy_symmetric(&self) -> NatType {
+        let samples: Vec<u16> = self
+            .extra_bind_tests
+            .iter()
+            .filter_map(|b| b.mapped_socket_addr.map(|a| a.port()))
+            .collect();
+        if samples.len() < EXTRA_BIND_MIN_SAMPLES {
+            return NatType::Symmetric;
+        }
+
+        let mut inc = vec![self.max_port()];
+        inc.extend(&samples);
+        if Self::is_consistent_step(&inc, true) {
+            return NatType::SymmetricEasyInc;
+        }
+
+        let mut dec = vec![self.min_port()];
+        dec.extend(&samples);
+        if Self::is_consistent_step(&dec, false) {
+            return NatType::SymmetricEasyDec;
+        }
+
+        NatType::Symmetric
+    }
+
+    // True when every consecutive step has the expected sign and stays within a
+    // small, self-consistent band (max step <= 4x the min step) so the next port
+    // is actually predictable.
+    fn is_consistent_step(seq: &[u16], inc: bool) -> bool {
+        let mut min_d = i32::MAX;
+        let mut max_d = 0;
+        for w in seq.windows(2) {
+            let d = if inc {
+                w[1] as i32 - w[0] as i32
+            } else {
+                w[0] as i32 - w[1] as i32
+            };
+            if d <= 0 || d > EXTRA_BIND_STEP_MAX {
+                return false;
+            }
+            min_d = min_d.min(d);
+            max_d = max_d.max(d);
+        }
+        max_d <= min_d.saturating_mul(4)
     }
 
     fn nat_type_tcp(&self) -> NatType {
@@ -606,9 +663,10 @@ impl StunNatTypeDetectResult {
     }
 
     // A detection round is confident only when it reached >=2 distinct STUN
-    // servers (required to tell cone from symmetric); UDP symmetric additionally
-    // needs the extra-bind probe to subclassify easy/hard. Low-confidence rounds
-    // must not overwrite a cached confident result.
+    // servers (required to tell cone from symmetric); a UDP symmetric verdict in
+    // the small-spread regime additionally needs enough extra-bind probes to
+    // trust the easy/hard split. Low-confidence rounds must not overwrite a
+    // cached confident result.
     pub fn is_confident(&self) -> bool {
         let nat_type = self.nat_type();
         if nat_type == NatType::Unknown || self.stun_server_count() < 2 {
@@ -616,7 +674,8 @@ impl StunNatTypeDetectResult {
         }
         if matches!(self.transport, StunTransport::Udp)
             && nat_type == NatType::Symmetric
-            && self.extra_bind_test.is_none()
+            && self.needs_extra_bind_probe()
+            && self.extra_bind_tests.len() < EXTRA_BIND_MIN_SAMPLES
         {
             return false;
         }
@@ -1287,28 +1346,34 @@ impl StunInfoCollector {
                 let mut udp_ret = udp_detector.detect_nat_type(0).await;
                 tracing::debug!(?udp_ret, "finish udp nat type detect");
 
-                let mut nat_type = NatType::Unknown;
                 if let Ok(resp) = &udp_ret {
                     tracing::debug!(?resp, "got udp nat type detect result");
-                    nat_type = resp.nat_type();
                 }
 
-                // if nat type is symmtric, detect with another port to gather more info
-                if nat_type == NatType::Symmetric {
+                // Small-spread symmetric NATs may still allocate ports predictably;
+                // probe several fresh sockets so easy-vs-hard rests on consistent
+                // evidence rather than one nearby sample.
+                if udp_ret
+                    .as_ref()
+                    .map(|r| r.needs_extra_bind_probe())
+                    .unwrap_or(false)
+                {
                     let old_resp = udp_ret.as_mut().unwrap();
-                    tracing::debug!(?old_resp, "start get extra bind result");
                     let available_stun_servers = old_resp.collect_available_stun_server();
-                    for server in available_stun_servers.iter() {
-                        let ret = udp_detector
-                            .get_extra_bind_result(0, *server)
-                            .await
-                            .with_context(|| "get extra bind result failed");
-                        tracing::debug!(?ret, "finish udp nat type detect with another port");
-                        if let Ok(resp) = ret {
-                            old_resp.extra_bind_test = Some(resp);
-                            break;
+                    let mut samples = vec![];
+                    for _ in 0..EXTRA_BIND_SAMPLES {
+                        for server in available_stun_servers.iter() {
+                            match udp_detector.get_extra_bind_result(0, *server).await {
+                                Ok(resp) => {
+                                    samples.push(resp);
+                                    break;
+                                }
+                                Err(e) => tracing::debug!(?e, "extra bind probe failed"),
+                            }
                         }
                     }
+                    tracing::debug!(?samples, "finished extra bind probes");
+                    old_resp.extra_bind_tests = samples;
                 }
 
                 let mut sleep_sec = 10;
@@ -1319,8 +1384,8 @@ impl StunInfoCollector {
                         // Keep a cached confident result unless the new round is also
                         // confident; never let a degraded round (e.g. only one STUN
                         // server answered) clobber it and flip the punch strategy.
-                        let replace = new_confident
-                            || slot.as_ref().is_none_or(|prev| !prev.is_confident());
+                        let replace =
+                            new_confident || slot.as_ref().is_none_or(|prev| !prev.is_confident());
                         if replace {
                             *slot = Some(resp.clone());
                             nat_test_time.store(Local::now());
@@ -1533,6 +1598,74 @@ mod tests {
             ],
         );
         assert!(two.is_confident());
+    }
+
+    #[test]
+    fn test_easy_symmetric_requires_consistent_samples() {
+        let resp = |server: &str, mapped: &str| BindRequestResponse {
+            local_addr: "0.0.0.0:12345".parse().unwrap(),
+            stun_server_addr: server.parse().unwrap(),
+            recv_from_addr: server.parse().unwrap(),
+            mapped_socket_addr: Some(mapped.parse().unwrap()),
+            changed_socket_addr: None,
+            change_ip: false,
+            change_port: false,
+            real_ip_changed: false,
+            real_port_changed: false,
+            latency_us: 1_000,
+        };
+
+        // Small per-destination spread, one egress IP -> easy-symmetric regime
+        // that depends on the extra probes to split easy from hard.
+        let base = || {
+            StunNatTypeDetectResult::new(
+                StunTransport::Udp,
+                "0.0.0.0:12345".parse().unwrap(),
+                vec![
+                    resp("1.1.1.1:3478", "9.9.9.9:1000"),
+                    resp("2.2.2.2:3478", "9.9.9.9:1010"),
+                ],
+            )
+        };
+
+        // No probes yet: must stay hard and stay non-confident so the round does
+        // not clobber a cached result.
+        let none = base();
+        assert!(none.needs_extra_bind_probe());
+        assert_eq!(none.nat_type(), NatType::Symmetric);
+        assert!(!none.is_confident());
+
+        // The original bug: a single nearby sample must NOT mint EasyInc.
+        let mut one = base();
+        one.extra_bind_tests = vec![resp("1.1.1.1:3478", "9.9.9.9:1020")];
+        assert_eq!(one.nat_type(), NatType::Symmetric);
+        assert!(!one.is_confident());
+
+        // Consistent small upward steps -> EasyInc, confident.
+        let mut inc = base();
+        inc.extra_bind_tests = vec![
+            resp("1.1.1.1:3478", "9.9.9.9:1020"),
+            resp("1.1.1.1:3478", "9.9.9.9:1030"),
+        ];
+        assert_eq!(inc.nat_type(), NatType::SymmetricEasyInc);
+        assert!(inc.is_confident());
+
+        // Consistent downward steps -> EasyDec.
+        let mut dec = base();
+        dec.extra_bind_tests = vec![
+            resp("1.1.1.1:3478", "9.9.9.9:990"),
+            resp("1.1.1.1:3478", "9.9.9.9:980"),
+        ];
+        assert_eq!(dec.nat_type(), NatType::SymmetricEasyDec);
+
+        // Random jumps -> stays hard Symmetric, but now confident (enough samples).
+        let mut hard = base();
+        hard.extra_bind_tests = vec![
+            resp("1.1.1.1:3478", "9.9.9.9:50000"),
+            resp("1.1.1.1:3478", "9.9.9.9:1200"),
+        ];
+        assert_eq!(hard.nat_type(), NatType::Symmetric);
+        assert!(hard.is_confident());
     }
 
     #[tokio::test]

@@ -15,7 +15,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::Level;
 
 use crate::{
-    common::{PeerId, global_ctx::ArcGlobalCtx, stun::StunInfoCollectorTrait},
+    common::{PeerId, global_ctx::ArcGlobalCtx, stun::StunInfoCollectorTrait, upnp},
     connector::udp_hole_punch::{
         common::{
             HOLE_PUNCH_PACKET_BODY_LEN, send_symmetric_hole_punch_packet, try_connect_with_socket,
@@ -40,6 +40,15 @@ use super::common::{PunchHoleServerCommon, UdpNatType, UdpSocketArray};
 const UDP_ARRAY_SIZE_FOR_HARD_SYM: usize = 84;
 const MAX_EASY_SYM_MAPPING_PROBES: usize = 32;
 const EASY_SYM_MAPPING_TIMEOUT_MS: u64 = 2500;
+
+// ZeroTier-parity stable-socket punch: only attempted when our NAT keeps a
+// near-stable per-destination mapping (observed STUN port spread within this
+// bound), so one reused socket's mapped port is enough for the peer to target.
+const STABLE_PUNCH_SPREAD_MAX: u32 = 64;
+// Width of the tight band the cone peer sprays around our exact mapped port; it
+// only has to absorb the small per-destination jitter, not a 4k guess window.
+const STABLE_PUNCH_WINDOW: u32 = 256;
+const STABLE_PUNCH_WAIT_MS: u128 = 2000;
 
 fn easy_sym_predict_window(observed_span: u32) -> u32 {
     observed_span
@@ -228,6 +237,117 @@ impl PunchSymToConeHoleClient {
             punch_randomly: AtomicBool::new(true),
             blacklist,
         }
+    }
+
+    // ZeroTier-parity punch: use ONE socket, hand the cone peer its exact mapped
+    // port, and have the peer spray only a tight band around it. Works whenever our
+    // NAT's per-destination mapping is near-stable, regardless of the inc/dec/hard
+    // subtype, so it also rescues "hard" NATs whose per-socket randomness misled
+    // the legacy 84-socket prediction. A fresh single-socket array per attempt
+    // (like the cone path): the recv loop consumes its socket on the first punch.
+    async fn try_stable_socket_punch(
+        &self,
+        dst_peer_id: PeerId,
+        remote_mapped_addr: crate::proto::common::SocketAddr,
+        public_ips: &[Ipv4Addr],
+    ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
+        let global_ctx = self.peer_mgr.get_global_ctx();
+
+        // Resolve the public addr BEFORE the socket joins the array: the array's
+        // recv loop would otherwise steal the STUN responses. Resolving via upnp
+        // also pins a gateway port mapping (NAT-PMP/IGD) when available, yielding a
+        // truly stable external port — the same lever ZeroTier relies on.
+        let socket = {
+            let _g = global_ctx.net_ns.guard();
+            Arc::new(UdpSocket::bind("0.0.0.0:0").await?)
+        };
+        let local_port = socket.local_addr()?.port();
+        let local_listener: url::Url = format!("udp://0.0.0.0:{local_port}").parse().unwrap();
+        let (my_mapped, _port_mapping_lease) = match upnp::resolve_udp_public_addr(
+            global_ctx.clone(),
+            &local_listener,
+            socket.clone(),
+        )
+        .await
+        {
+            Ok(ret) => ret,
+            Err(e) => {
+                tracing::warn!(?e, "stable punch: failed to resolve stable socket addr");
+                return Ok(None);
+            }
+        };
+
+        let array = Arc::new(UdpSocketArray::new(1, global_ctx.net_ns.clone()));
+        array.add_new_socket(socket).await?;
+
+        let tid: u32 = rand::thread_rng().r#gen();
+        let packet = new_hole_punch_packet(tid, HOLE_PUNCH_PACKET_BODY_LEN).into_bytes();
+        array.add_intreast_tid(tid);
+        defer! { array.remove_intreast_tid(tid); }
+
+        // Open our own mapping toward the peer before asking it to spray back.
+        array
+            .send_with_all(&packet, remote_mapped_addr.into())
+            .await?;
+
+        let margin = STABLE_PUNCH_WINDOW / 2;
+        let base_port_num = (my_mapped.port() as u32).saturating_sub(margin);
+        let proto_ips = public_ips.iter().map(|x| (*x).into()).collect();
+        let rpc_stub = self.get_rpc_stub(dst_peer_id).await;
+        let punch_task = AbortOnDropHandle::new(tokio::spawn(async move {
+            let req = SendPunchPacketEasySymRequest {
+                listener_mapped_addr: remote_mapped_addr.into(),
+                public_ips: proto_ips,
+                transaction_id: tid,
+                base_port_num,
+                max_port_num: STABLE_PUNCH_WINDOW,
+                is_incremental: true,
+            };
+            if let Err(e) = rpc_stub
+                .send_punch_packet_easy_sym(
+                    BaseController {
+                        timeout_ms: 4000,
+                        trace_id: 0,
+                        ..Default::default()
+                    },
+                    req,
+                )
+                .await
+            {
+                tracing::warn!(?e, "stable punch: remote easy-sym spray failed");
+            }
+        }));
+
+        let start = Instant::now();
+        let mut tunnel = None;
+        while start.elapsed().as_millis() < STABLE_PUNCH_WAIT_MS {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let Some(punched) = array.try_fetch_punched_socket(tid) else {
+                array
+                    .send_with_all(&packet, remote_mapped_addr.into())
+                    .await?;
+                continue;
+            };
+            for _ in 0..2 {
+                match try_connect_with_socket(
+                    global_ctx.clone(),
+                    punched.socket.clone(),
+                    remote_mapped_addr.into(),
+                )
+                .await
+                {
+                    Ok(t) => {
+                        tunnel = Some(t);
+                        break;
+                    }
+                    Err(e) => tracing::warn!(?e, "stable punch: connect failed"),
+                }
+            }
+            break;
+        }
+
+        let _ = punch_task.await;
+        Ok(tunnel)
     }
 
     async fn prepare_udp_array(&self) -> Result<Arc<UdpSocketArray>, anyhow::Error> {
@@ -528,6 +648,19 @@ impl PunchSymToConeHoleClient {
             .collect();
         if public_ips.is_empty() {
             return Err(anyhow::anyhow!("failed to get public ips"));
+        }
+
+        // ZeroTier-parity: if our NAT keeps a near-stable per-destination mapping,
+        // punch from one reused socket whose exact mapped port the peer targets,
+        // instead of scattering 84 random sockets across a 4k prediction window.
+        let observed_spread = stun_info.max_port.saturating_sub(stun_info.min_port);
+        if self.punch_predicablely.load(Ordering::Relaxed)
+            && observed_spread <= STABLE_PUNCH_SPREAD_MAX
+            && let Some(tunnel) = self
+                .try_stable_socket_punch(dst_peer_id, remote_mapped_addr, &public_ips)
+                .await?
+        {
+            return Ok(Some(tunnel));
         }
 
         let tid = rand::thread_rng().r#gen();
