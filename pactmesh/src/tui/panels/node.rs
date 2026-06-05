@@ -48,7 +48,16 @@ pub fn render(frame: &mut Frame<'_>, snap: &Snapshot, area: Rect) {
     let s = &snap.stun;
     lines.push(Line::from(vec![
         Span::styled("UDP NAT  : ", bold),
-        Span::raw(nat_label(s.udp_nat_type)),
+        Span::raw(format!(
+            "{}  [{} STUN, {}]",
+            nat_label(s.udp_nat_type),
+            s.udp_stun_server_count,
+            if s.udp_nat_type_confident {
+                "confident"
+            } else {
+                "low-confidence"
+            }
+        )),
     ]));
     lines.push(Line::from(vec![
         Span::styled("TCP NAT  : ", bold),

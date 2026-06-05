@@ -303,6 +303,8 @@ impl StunInfoCollectorTrait for GatewayBackedStunCollector {
             min_port: 0,
             max_port: 0,
             public_ip: vec![self.external_ip.to_string()],
+            udp_stun_server_count: 0,
+            udp_nat_type_confident: false,
         }
     }
 

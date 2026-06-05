@@ -46,6 +46,11 @@ pub static RUN_TESTING: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 // Blacklist timeout in seconds
 pub const BLACKLIST_TIMEOUT_SEC: u64 = 3600;
 
+// Force a NAT re-detection after this many consecutive cone-punch failures, in
+// case our NAT was misclassified as cone (a re-detect uses a fresh STUN set and
+// re-keys the task to the right strategy if the type changes).
+const CONE_REDETECT_FAIL_STREAK: u32 = 4;
+
 fn get_sym_punch_lock(peer_id: PeerId) -> Arc<Mutex<()>> {
     SYM_PUNCH_LOCK
         .entry(peer_id)
@@ -270,6 +275,7 @@ impl UdpHoePunchConnectorData {
     #[tracing::instrument(skip(self))]
     async fn cone_to_cone(self: Arc<Self>, task_info: PunchTaskInfo) -> Result<(), Error> {
         let mut backoff = BackOff::new(vec![1000, 1000, 2000, 4000, 4000, 8000, 8000, 16000]);
+        let mut fail_streak: u32 = 0;
 
         loop {
             backoff.sleep_for_next_backoff().await;
@@ -284,6 +290,14 @@ impl UdpHoePunchConnectorData {
                 .await
             {
                 break;
+            }
+
+            fail_streak += 1;
+            if fail_streak.is_multiple_of(CONE_REDETECT_FAIL_STREAK) {
+                self.peer_mgr
+                    .get_global_ctx()
+                    .get_stun_info_collector()
+                    .request_redetect();
             }
         }
 

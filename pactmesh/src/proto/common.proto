@@ -212,6 +212,8 @@ message StunInfo {
   repeated string public_ip = 4;
   uint32 min_port = 5;
   uint32 max_port = 6;
+  uint32 udp_stun_server_count = 7;
+  bool udp_nat_type_confident = 8;
 }
 
 message PeerFeatureFlag {

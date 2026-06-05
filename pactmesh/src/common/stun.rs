@@ -30,6 +30,8 @@ const DEFAULT_UDP_STUN_SERVERS: &[&str] = &[
     "stun.miwifi.com",
     "stun.chat.bilibili.com",
     "stun.hitv.com",
+    "stun.qq.com",
+    "stun.cloudflare.com",
 ];
 
 const DEFAULT_TCP_STUN_SERVERS: &[&str] = &[
@@ -503,7 +505,7 @@ impl StunNatTypeDetectResult {
         false
     }
 
-    fn stun_server_count(&self) -> usize {
+    pub fn stun_server_count(&self) -> usize {
         // find resp with distinct stun server
         self.stun_resps
             .iter()
@@ -601,6 +603,24 @@ impl StunNatTypeDetectResult {
             StunTransport::Udp => self.nat_type_udp(),
             StunTransport::Tcp => self.nat_type_tcp(),
         }
+    }
+
+    // A detection round is confident only when it reached >=2 distinct STUN
+    // servers (required to tell cone from symmetric); UDP symmetric additionally
+    // needs the extra-bind probe to subclassify easy/hard. Low-confidence rounds
+    // must not overwrite a cached confident result.
+    pub fn is_confident(&self) -> bool {
+        let nat_type = self.nat_type();
+        if nat_type == NatType::Unknown || self.stun_server_count() < 2 {
+            return false;
+        }
+        if matches!(self.transport, StunTransport::Udp)
+            && nat_type == NatType::Symmetric
+            && self.extra_bind_test.is_none()
+        {
+            return false;
+        }
+        true
     }
 
     pub fn public_ips(&self) -> Vec<IpAddr> {
@@ -966,6 +986,9 @@ impl TcpNatTypeDetector {
 #[auto_impl::auto_impl(&, Arc, Box)]
 pub trait StunInfoCollectorTrait: Send + Sync {
     fn get_stun_info(&self) -> StunInfo;
+    // Request an out-of-band NAT re-detection; no-op for collectors without a
+    // background routine (e.g. mocks).
+    fn request_redetect(&self) {}
     async fn get_udp_port_mapping(&self, local_port: u16) -> Result<SocketAddr, Error>;
     async fn get_udp_port_mapping_with_socket(
         &self,
@@ -1030,7 +1053,19 @@ impl StunInfoCollectorTrait for StunInfoCollector {
                 .map(|x| x.max_port() as u32)
                 .or_else(|| tcp_result.as_ref().map(|x| x.max_port() as u32))
                 .unwrap_or(0),
+            udp_stun_server_count: udp_result
+                .as_ref()
+                .map(|x| x.stun_server_count() as u32)
+                .unwrap_or(0),
+            udp_nat_type_confident: udp_result
+                .as_ref()
+                .map(|x| x.is_confident())
+                .unwrap_or(false),
         }
+    }
+
+    fn request_redetect(&self) {
+        self.update_stun_info();
     }
 
     async fn get_udp_port_mapping(&self, local_port: u16) -> Result<SocketAddr, Error> {
@@ -1243,8 +1278,8 @@ impl StunInfoCollector {
                 let udp_servers = stun_servers.read().unwrap().clone();
                 let udp_servers: Vec<String> = udp_servers
                     .iter()
-                    .take(2)
-                    .chain(udp_servers.iter().skip(2).choose(&mut rand::thread_rng()))
+                    .take(3)
+                    .chain(udp_servers.iter().skip(3).choose(&mut rand::thread_rng()))
                     .map(|x| x.to_string())
                     .collect();
 
@@ -1278,12 +1313,21 @@ impl StunInfoCollector {
 
                 let mut sleep_sec = 10;
                 if let Ok(resp) = &udp_ret {
-                    nat_test_time.store(Local::now());
-                    *udp_nat_test_result.write().unwrap() = Some(resp.clone());
-                    if nat_type != NatType::Unknown
-                        && (nat_type != NatType::Symmetric || resp.extra_bind_test.is_some())
+                    let new_confident = resp.is_confident();
                     {
-                        sleep_sec = 600
+                        let mut slot = udp_nat_test_result.write().unwrap();
+                        // Keep a cached confident result unless the new round is also
+                        // confident; never let a degraded round (e.g. only one STUN
+                        // server answered) clobber it and flip the punch strategy.
+                        let replace = new_confident
+                            || slot.as_ref().is_none_or(|prev| !prev.is_confident());
+                        if replace {
+                            *slot = Some(resp.clone());
+                            nat_test_time.store(Local::now());
+                        }
+                    }
+                    if new_confident {
+                        sleep_sec = 600;
                     }
                 }
 
@@ -1372,6 +1416,8 @@ impl StunInfoCollectorTrait for MockStunInfoCollector {
             min_port: 100,
             max_port: 200,
             public_ip: vec!["127.0.0.1".to_string(), "::1".to_string()],
+            udp_stun_server_count: 2,
+            udp_nat_type_confident: true,
         }
     }
 
@@ -1449,6 +1495,44 @@ mod tests {
         );
 
         assert_eq!(result.nat_type(), NatType::PortRestricted);
+    }
+
+    #[test]
+    fn test_detection_confidence_requires_two_stun_servers() {
+        let resp = |server: &str, mapped: &str| BindRequestResponse {
+            local_addr: "0.0.0.0:12345".parse().unwrap(),
+            stun_server_addr: server.parse().unwrap(),
+            recv_from_addr: server.parse().unwrap(),
+            mapped_socket_addr: Some(mapped.parse().unwrap()),
+            changed_socket_addr: None,
+            change_ip: false,
+            change_port: false,
+            real_ip_changed: false,
+            real_port_changed: false,
+            latency_us: 1_000,
+        };
+
+        // A single STUN response is classified PortRestricted but must not be
+        // trusted as confident, otherwise a degraded round would clobber a good
+        // cached result and flip the punch strategy.
+        let single = StunNatTypeDetectResult::new(
+            StunTransport::Udp,
+            "0.0.0.0:12345".parse().unwrap(),
+            vec![resp("47.115.208.211:11010", "111.43.134.139:61735")],
+        );
+        assert_eq!(single.nat_type(), NatType::PortRestricted);
+        assert!(!single.is_confident());
+
+        // Two distinct STUN servers with the same mapped address -> cone, confident.
+        let two = StunNatTypeDetectResult::new(
+            StunTransport::Udp,
+            "0.0.0.0:12345".parse().unwrap(),
+            vec![
+                resp("47.115.208.211:11010", "111.43.134.139:61735"),
+                resp("8.8.8.8:3478", "111.43.134.139:61735"),
+            ],
+        );
+        assert!(two.is_confident());
     }
 
     #[tokio::test]

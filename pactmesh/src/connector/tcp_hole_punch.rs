@@ -611,6 +611,8 @@ mod tests {
                 public_ip: vec!["127.0.0.1".to_string(), "::1".to_string()],
                 min_port: 100,
                 max_port: 200,
+                udp_stun_server_count: 2,
+                udp_nat_type_confident: true,
             }
         }
 
