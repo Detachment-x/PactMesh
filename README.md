@@ -1,87 +1,94 @@
 # PactMesh
 
-PactMesh is the product name for this EasyTier fork. It keeps EasyTier's decentralized data plane and adds a signed trust/configuration layer for small private networks.
+[English](README_EN.md) | **中文**
 
-This repository is based on EasyTier commit `5a1668c` (2026-04-25). EasyTier provides the P2P transport, NAT traversal, routing, tunnels, and RPC substrate; PactMesh adds self-managed trust domains, member certificates, signed network configuration, ACLs, MagicDNS host rendering, and cross-trust-domain relay borrowing.
+PactMesh 是当前项目的产品名。它是一个基于 EasyTier 的 fork：保留 EasyTier 的去中心化数据面，并在其上增加签名信任层与签名配置层，面向私人和小团队内网穿透场景。
 
-The user-facing CLI and daemon binaries are now named `pactmesh` and `pactmesh-core`. The local config path still uses `~/.config/privateNetwork` for compatibility with the existing Alpha data layout.
+本仓库基于 EasyTier commit `5a1668c`（2026-04-25）。EasyTier 提供 P2P 传输、NAT 穿透、路由、隧道与 RPC 基础设施；PactMesh 增加自治信任域、成员证书、签名网络配置、ACL、MagicDNS hosts 渲染，以及跨信任域中继借用。
 
-## Status
+当前用户可见 CLI 和 daemon 二进制已经命名为 `pactmesh` 与 `pactmesh-core`。本地配置目录暂时仍使用 `~/.config/privateNetwork`，用于兼容现有 Alpha 数据布局。
 
-PactMesh is currently Alpha software for private and small-team use. A VPS + NAT device + online join + TUN path has been validated, but this is not yet a polished end-user product, an enterprise IAM product, a hosted control plane, or a multi-tenant SaaS system.
+## 状态
 
-The core implementation is currently focused on:
+PactMesh 当前处于 Alpha 阶段，面向私人和小团队使用。公网 VPS + NAT 设备 + 在线准入 + TUN 路径已经验证可跑通，但还不是完整打磨后的最终用户产品，也不是企业 IAM 产品、托管控制面或多租户 SaaS 系统。
 
-- Trust domains rooted in an Ed25519 `PK_root` / `SK_root` pair.
-- Signed `NetworkState` and `TrustDomainMeta` objects distributed over untrusted channels.
-- Member certificates for device admission, revocation, disable/enable, and hostname assignment.
-- Trust-aware EasyTier handshakes and packet ACL enforcement.
-- Bootstrap invite/import flows for moving public trust-domain information between devices.
+当前核心实现聚焦于：
 
-## Trust Model
+- 以 Ed25519 `PK_root` / `SK_root` 为根的信任域。
+- 通过不可信渠道分发但可本地验签的 `NetworkState` 与 `TrustDomainMeta`。
+- 用于设备准入、吊销、临时禁用/恢复、hostname 分配的成员证书。
+- 接入 EasyTier 握手路径和数据包路径的 trust-aware 验证与 ACL。
+- 用于离线/在线分发公开信任域信息的 bootstrap invite/import 流程。
 
-Each user owns a trust domain. A trust domain is identified by `trust_domain_id = SHA-256(PK_root)`, and the holder of `SK_root` signs all member certificates and network configuration for that domain.
+## 信任模型
 
-The user-facing management password is the root key passphrase for the local `sk_root.age` file. It is not an account password, login password, or mnemonic recovery phrase. Recovering management authority requires both the `sk_root.age` backup and the root key passphrase; either one alone is insufficient.
+每个用户拥有自己的信任域。信任域由 `trust_domain_id = SHA-256(PK_root)` 标识，持有 `SK_root` 的根设备负责签发该信任域内的成员证书和网络配置。
 
-Configuration distribution does not need to be trusted. Nodes verify signatures locally before accepting a `NetworkState`, `TrustDomainMeta`, member certificate, or join-related payload. This keeps the network usable over ordinary EasyTier paths, relays, files, QR/bootstrap payloads, or future sync channels without giving those channels authority.
+用户可见的“管理密码”就是本地 `sk_root.age` 的 root key passphrase。它不是账号密码、不是登录密码，也不是助记词。恢复管理权需要同时拥有 `sk_root.age` 备份和管理密码；只有其中任意一个都无法恢复或解锁根密钥。
 
-Device roles are governance identities, not feature toggles: a Root device can unlock this trust domain's `SK_root`, a Member device has this domain's `member_cert.pem`, and an External device is referenced by this domain without being a member. Network functions such as relay, holepunch assistance, and subnet proxying are capabilities. Tags are human grouping labels. ACLs only decide data-plane traffic permission.
+### 备份与恢复管理权
 
-To make another already-joined member device a Root device, start the target daemon with a temporary local `PNW_ROOT_UPGRADE_PASSPHRASE` value, then run `pactmesh trust upgrade-peer-to-root <trust_domain_id> <network_local_id> <peer_id>` on an existing Root device. The existing Root device unlocks its local `sk_root.age`, sends raw `SK_root` bytes through the established peer RPC/Noise path, and the target verifies the derived `PK_root` against its cached `pk_root.pem` before writing its own encrypted `sk_root.age`. The target passphrase is never sent from the existing Root device; it must be supplied locally on the target side.
+创建信任域后，立即备份该信任域目录下的 `sk_root.age`，并把管理密码保存在你能长期记住或安全托管的位置。`sk_root.age` 是加密后的根私钥文件，管理密码只是解锁该文件的 passphrase；只有管理密码没有文件，无法重新生成 root key；只有 `sk_root.age` 但忘记管理密码，也无法解锁 root key。
 
-## Cross-Trust-Domain Relay Borrowing
+恢复或迁移管理权时，把备份的 `sk_root.age` 放回目标机器的信任域目录，并使用同一个管理密码执行 `trust create-network`、`trust approve`、`trust revoke` 等管理命令。普通 daemon 运行和数据面重连不需要管理密码，只有需要 `SK_root` 签名的管理操作才会按需解锁。
 
-A small-team trust domain often has only a handful of nodes, none of which sit on a stable public address. PactMesh lets one trust domain explicitly lend its relays to another, without merging the two domains or sharing private keys.
+配置分发渠道不需要可信。节点在接受 `NetworkState`、`TrustDomainMeta`、成员证书或 join 相关 payload 前，会在本地验证签名。这样配置可以通过普通 EasyTier 路径、中继、文件、QR/bootstrap payload 或后续同步通道传播，但这些传播通道本身不拥有授权能力。
 
-The mechanism layers on top of `TrustDomainMeta`:
+设备角色只表达治理身份，不表达具体网络功能：Root device 是能解锁本信任域 `SK_root` 的管理设备，Member device 是持有本域 `member_cert.pem` 的成员设备，External device 是被本域引用但不是本域成员的外部设备或服务资源。relay、打洞协助、子网代理属于 capability；tag 是人工分组；ACL 只负责判断数据面流量是否允许通过。
 
-- A trust domain's `TrustDomainMeta.active_relays` list, signed by `SK_root`, enumerates the relays the domain operates.
-- `TrustDomainMeta.outbound_grants` lists explicit, time-bounded grants of those relays to foreign trust domains (identified by `foreign_root_pk` + `foreign_trust_domain_id`).
-- A borrowing node attaches a `BorrowedRelayProof` — built from the lender's signed `TrustDomainMeta` slice — to the relevant handshake messages. The relay verifies the proof locally against its own resolver, with no central authority involved.
-- Capabilities (`can_relay_data`, `can_assist_holepunch`) and expiry are signed into each grant, so capacity, lifetime, and scope are all owned by the lending domain's root.
+把另一台已入网 Member device 提升为 Root device 时，先在目标设备 daemon 启动环境中临时设置本机 `PNW_ROOT_UPGRADE_PASSPHRASE`，再在已有 Root device 上执行 `pactmesh trust upgrade-peer-to-root <trust_domain_id> <network_local_id> <peer_id>`。已有 Root device 只解锁自己的 `sk_root.age`，通过已建立的 peer RPC/Noise 路径发送原始 `SK_root` 字节；目标设备收到后用它派生 `PK_root`，与本机缓存的 `pk_root.pem` 比对一致才写入自己的加密 `sk_root.age`。目标设备用于保存 `sk_root.age` 的密码只在目标本机提供，不会从已有 Root device 传过去。
 
-This makes asymmetric topologies practical: a friend with a well-connected home server can lend relay capacity to your domain for a few months, expiry signed in, with no shared secrets and no joint operations.
+## 跨信任域中继借用
 
-## Quick Start
+小团队信任域往往只有少量节点，且通常没有稳定的公网地址。PactMesh 允许一个信任域显式地把自己的中继借给另一个信任域使用——既不合并两个信任域，也不共享私钥。
 
-The exact binary name and service wrapper depend on how you build or package this fork. For first-run setup, use this order: create a trust domain and set the management password, create a network, bootstrap the root device as a member, then export an invite for other devices.
+该机制以 `TrustDomainMeta` 为载体：
+
+- 由 `SK_root` 签名的 `TrustDomainMeta.active_relays` 列出本信任域名下的中继节点。
+- `TrustDomainMeta.outbound_grants` 显式列出对外信任域的借用授权（含 `foreign_root_pk` + `foreign_trust_domain_id` + 能力位 + 过期时间）。
+- 借用方节点在握手时附带 `BorrowedRelayProof`（从出借方签名后的 `TrustDomainMeta` 切片构造）；中继节点用本地 resolver 验证证明，过程不涉及任何中央协调机构。
+- 能力位（`can_relay_data`、`can_assist_holepunch`）和过期时间随授权一并签名，借用容量、生命周期和范围都由出借方的根设备掌控。
+
+这让非对称拓扑变得可行：一个网络条件好的朋友可以借给你几个月的中继容量，借期签进证书内，无共享密钥，也不需要联合运维。
+
+## 快速开始
+
+具体二进制名称和服务封装取决于你的构建/打包方式。首次初始化建议按下面的向导顺序执行：先创建信任域并设置管理密码，再创建网络，给根设备自己签发成员证书，最后生成给其他设备使用的 invite。
 
 ```bash
-# 1. Create a trust domain. Enter and confirm the management password interactively;
-#    the root private key is encrypted locally as sk_root.age.
+# 1. 创建信任域。交互式输入并确认管理密码；根私钥会加密保存为 sk_root.age。
 pactmesh trust create-domain --label home --out-dir ~/.config/privateNetwork/trust-domains
 
-# Save the trust_domain_id printed by create-domain.
+# 保存输出中的 trust_domain_id，后续命令都需要它。
 export TRUST_DOMAIN_ID='<trust_domain_id>'
 export NETWORK_LOCAL_ID='home'
 
-# 2. Create a network inside that trust domain.
+# 2. 在该信任域下创建网络。
 pactmesh trust create-network "$TRUST_DOMAIN_ID" "$NETWORK_LOCAL_ID" --default-action accept
 
-# 3. Bootstrap the current root device as a network member.
+# 3. 给当前根设备自己签发成员证书，否则 daemon 无法作为网络成员启动。
 pactmesh trust bootstrap-self "$TRUST_DOMAIN_ID" "$NETWORK_LOCAL_ID" --device-label root-a
 
-# 4. Export an invite/bootstrap bundle for another device.
+# 4. 为新设备导出 invite/bootstrap。
 pactmesh trust invite "$TRUST_DOMAIN_ID" "$NETWORK_LOCAL_ID" \
   --seed tcp://<reachable-node>:11010 \
   --format url
 
-# 5. On the new device, accept the invite and generate a join request.
+# 5. 在新设备上接受 invite，并生成 join request。
 pactmesh trust accept-invite '<privatenetwork://join?...>' \
   --device-label laptop \
   --hint 'Alice laptop'
 ```
 
-Automation and non-TTY environments cannot use the interactive prompt; provide the management password through `PNW_ROOT_PASSPHRASE` or `--passphrase-file` instead. The management password is only needed by management CLI commands that sign with `SK_root`, such as `create-domain`, `create-network`, `bootstrap-self`, `approve`, and `revoke`. Do not keep it in the daemon environment.
+自动化脚本或非 TTY 环境不能交互输入管理密码，应使用 `PNW_ROOT_PASSPHRASE` 或 `--passphrase-file`。管理密码只在 `create-domain`、`create-network`、`bootstrap-self`、`approve`、`revoke` 等需要 `SK_root` 签名的管理 CLI 命令中按需使用；正常 daemon 运行不要常驻携带管理密码。
 
-For an online approval flow, run the daemon/instance with trust services enabled and use the `--online` option on `trust accept-invite`. `--online` derives a join-admission endpoint from the invite's `tcp://<reachable-node>:11010` seed as `tcp://<reachable-node>:11011`, so public firewalls must allow `11010/TCP` and `11011/TCP`; the management RPC port `15888` should remain bound to localhost and must not be exposed to new devices or the public Internet. By default the device private key is stored as `sk_self.raw` with local file permissions, so the daemon can restart without an interactive device passphrase; if you set `PNW_DEVICE_PASSPHRASE` or use `--passphrase-file`, PactMesh stores `sk_self.age` instead and the daemon reads `PNW_DEVICE_PASSPHRASE` by default; pass `--sk-self-password-env` only when using a different environment variable name. Keep the root key passphrase out of the daemon environment, and let management CLI commands unlock `SK_root` only when signing approvals or config changes. Without `--online`, the command prepares local device keys and a pending join request artifact that can be submitted later.
+如果要走在线审批流程，需要先运行启用了 trust services 的 daemon/instance，然后在 `trust accept-invite` 中使用 `--online`。`--online` 会从 invite 中的 `tcp://<reachable-node>:11010` seed 自动推导 join-admission 准入端口 `tcp://<reachable-node>:11011`，因此公网/防火墙需要放行 `11010/TCP` 与 `11011/TCP`；管理 RPC `15888` 只应绑定本机，不应暴露给新设备或公网。设备私钥默认以 `sk_self.raw` 存储并依赖本机文件权限保护，因此 daemon 可无交互重启；如果显式设置 `PNW_DEVICE_PASSPHRASE` 或 `--passphrase-file`，PactMesh 会改用 `sk_self.age`，daemon 会默认从 `PNW_DEVICE_PASSPHRASE` 读取密码；只有使用其他环境变量名时才需要 `--sk-self-password-env`。不要把管理密码放进 daemon 环境；审批和配置修改由管理 CLI 命令按需解锁 `SK_root` 后签名。不使用 `--online` 时，该命令只会准备本地设备密钥和待提交的 join request artifact，后续可再提交。
 
-`pactmesh-core --daemon` means “run the network instance in daemon mode”; it does not fork itself into the background. For manual testing, run it under `nohup ... &`, `systemd`, `screen`, or `tmux`, and redirect logs explicitly.
+`pactmesh-core --daemon` 的含义是“按 daemon/instance 模式运行网络实例”；它不会自动 fork 到后台。人工测试建议使用 `nohup ... &`、`systemd`、`screen` 或 `tmux` 管理进程，并显式重定向日志。
 
-## Build And Test
+## 构建与测试
 
-Rust 1.95 is the project baseline.
+项目基线是 Rust 1.95。
 
 ```bash
 cargo build -p pactmesh
@@ -89,50 +96,50 @@ cargo test --test trust
 cargo clippy -- -D warnings
 ```
 
-Some integration and e2e tests exercise EasyTier tunnel behavior and may need Linux networking capabilities depending on the selected test target.
+部分集成测试和 e2e 测试会触发 EasyTier 隧道行为，具体运行权限取决于测试目标和操作系统网络能力。
 
-## Release Binaries
+## Release 二进制
 
-PactMesh builds two release binaries: `pactmesh-core` for the daemon and `pactmesh` for the management CLI.
+PactMesh release 构建会生成两个二进制：daemon 使用的 `pactmesh-core` 和管理 CLI 使用的 `pactmesh`。
 
-Build release binaries from the workspace:
+在 workspace 内构建 release 产物：
 
 ```bash
 cd workspace/pactmesh
 cargo build --release --bin pactmesh-core --bin pactmesh
 ```
 
-The artifacts are written to the workspace target directory, not the crate directory:
+产物写在 workspace 级 target 目录，不在 crate 目录：
 
 ```text
 workspace/target/release/pactmesh-core
 workspace/target/release/pactmesh
 ```
 
-On the current Linux x86-64 build machine, the release artifacts are dynamically linked ELF x86-64 binaries. The observed sizes are about `28M` for `pactmesh-core` and `14M` for `pactmesh`. These x86-64 binaries cannot run directly on ARM hosts; build on the ARM host or add a proper Rust target/toolchain and cross-linker before distributing to ARM.
+当前 Linux x86-64 构建机生成的是动态链接 ELF x86-64 二进制。实测大小约为：`pactmesh-core` 28M，`pactmesh` 14M。x86-64 产物不能直接在 ARM 主机运行；ARM 机器要么在 ARM 主机本机构建，要么补齐 Rust target、交叉链接器和对应系统库后交叉编译。
 
-Copy both binaries to a test server, for example:
+复制到测试服务器示例：
 
 ```bash
 scp workspace/target/release/pactmesh-core workspace/target/release/pactmesh user@server:/opt/pactmesh/
 ssh user@server 'chmod +x /opt/pactmesh/pactmesh-core /opt/pactmesh/pactmesh'
 ```
 
-## Design Documents
+## 设计文档
 
-- [Deployment guide](deploy.md) (Chinese: [deploy_CN.md](deploy_CN.md))
-- [Trust and configuration model](trust-and-config-design.md)
-- [ACL schema draft](acl-schema-draft.md)
-- [Third-party notices](THIRD_PARTY_NOTICES.md)
+- [部署指南](deploy_CN.md)（英文版 [deploy.md](deploy.md)）
+- [信任与配置模型设计](trust-and-config-design.md)
+- [ACL schema 草案](acl-schema-draft.md)
+- [第三方声明与许可证审计](THIRD_PARTY_NOTICES.md)
 
-`THIRD_PARTY_NOTICES.md` is the audit target for EasyTier provenance, license notices, and dependency-license review.
+`THIRD_PARTY_NOTICES.md` 用于记录 EasyTier 来源、许可证声明和依赖许可证审计结果。
 
-## Relationship To EasyTier
+## 与 EasyTier 的关系
 
-PactMesh is a fork, not a replacement for the upstream EasyTier project. The fork keeps EasyTier's core networking architecture and changes the governance layer from shared network secrets toward explicit trust domains and signed configuration.
+PactMesh 是 fork，不是对上游 EasyTier 的替代。该 fork 保留 EasyTier 的核心网络架构，把治理层从共享 `network_secret` 字符串改为显式信任域和签名配置。
 
-Upstream EasyTier remains the origin of the transport and routing stack. See the original project at <https://github.com/EasyTier/EasyTier>.
+上游 EasyTier 仍然是传输与路由栈的来源。原项目地址：<https://github.com/EasyTier/EasyTier>。
 
-## License
+## 许可证
 
-This fork is distributed under LGPL-3.0-or-later, consistent with EasyTier's LGPL licensing. See `LICENSE` and `THIRD_PARTY_NOTICES.md` for license and provenance details.
+本 fork 按 LGPL-3.0-or-later 分发，与 EasyTier 的 LGPL 许可证口径保持一致。许可证和来源细节见 `LICENSE` 与 `THIRD_PARTY_NOTICES.md`。
