@@ -26,6 +26,7 @@ fn sample_unsigned_member_cert() -> UnsignedMemberCert {
         not_before: 1_715_000_000,
         expires_at: 1_716_000_000,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: false,
             can_proxy_subnet: vec![
@@ -56,6 +57,7 @@ fn sample_fingerprint(byte: u8) -> MemberCertFingerprint {
 #[test]
 fn test_capabilities_round_trip_cbor() {
     let caps = Capabilities {
+        can_be_exit_node: false,
         can_relay_data: true,
         can_relay_control: false,
         can_proxy_subnet: vec![
@@ -74,6 +76,7 @@ fn test_capabilities_round_trip_cbor() {
 #[test]
 fn test_capabilities_subset_logic() {
     let allowed = Capabilities {
+        can_be_exit_node: false,
         can_relay_data: true,
         can_relay_control: true,
         can_proxy_subnet: vec![
@@ -82,6 +85,7 @@ fn test_capabilities_subset_logic() {
         ],
     };
     let narrower = Capabilities {
+        can_be_exit_node: false,
         can_relay_data: true,
         can_relay_control: false,
         can_proxy_subnet: vec![
@@ -90,11 +94,13 @@ fn test_capabilities_subset_logic() {
         ],
     };
     let wider = Capabilities {
+        can_be_exit_node: false,
         can_relay_data: true,
         can_relay_control: true,
         can_proxy_subnet: vec![IpNet::from_str("10.0.0.0/8").unwrap()],
     };
     let wrong_family = Capabilities {
+        can_be_exit_node: false,
         can_relay_data: true,
         can_relay_control: false,
         can_proxy_subnet: vec![IpNet::from_str("::ffff:10.0.1.0/120").unwrap()],

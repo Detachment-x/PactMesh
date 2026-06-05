@@ -30,6 +30,10 @@ pub struct Capabilities {
     #[n(2)]
     #[cbor(with = "cidr_vec_cbor")]
     pub can_proxy_subnet: Vec<IpNet>,
+    /// 是否被授权充当出口节点（全量流量出网，0.0.0.0/0 等价）。出口服务在
+    /// 运行时按本字段门控，撤销/刷新 cert 后随 trust context 收敛。
+    #[n(3)]
+    pub can_be_exit_node: bool,
 }
 
 impl Capabilities {
@@ -37,6 +41,7 @@ impl Capabilities {
     pub fn is_subset_of(&self, other: &Capabilities) -> bool {
         (!self.can_relay_data || other.can_relay_data)
             && (!self.can_relay_control || other.can_relay_control)
+            && (!self.can_be_exit_node || other.can_be_exit_node)
             && self.can_proxy_subnet.iter().all(|candidate| {
                 other
                     .can_proxy_subnet
@@ -281,4 +286,35 @@ pub enum ParseError {
     Armor(#[from] ArmorError),
     #[error("cbor decode: {0}")]
     Cbor(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn caps(exit: bool) -> Capabilities {
+        Capabilities {
+            can_relay_data: false,
+            can_relay_control: false,
+            can_proxy_subnet: Vec::new(),
+            can_be_exit_node: exit,
+        }
+    }
+
+    #[test]
+    fn can_be_exit_node_cbor_round_trip() {
+        for exit in [false, true] {
+            let bytes = to_canonical_cbor(&caps(exit));
+            let decoded: Capabilities = from_cbor(&bytes).unwrap();
+            assert_eq!(decoded.can_be_exit_node, exit);
+        }
+    }
+
+    #[test]
+    fn exit_node_capability_respects_subset_rule() {
+        // 可收窄（grant→deny），不可越权（deny→grant）。
+        assert!(caps(false).is_subset_of(&caps(true)));
+        assert!(caps(true).is_subset_of(&caps(true)));
+        assert!(!caps(true).is_subset_of(&caps(false)));
+    }
 }

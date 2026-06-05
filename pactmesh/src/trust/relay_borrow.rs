@@ -100,10 +100,14 @@ impl BorrowedRelayResolver {
         if !relay_grants.has_active_grant(&proof.trust_domain_id, now) {
             return Err(BorrowedRelayError::NotServing(proof.trust_domain_id));
         }
-        if !relay_grants.permits_data_relay(&proof.trust_domain_id, now) {
+        // 借用接受需至少一项中继能力；data/holepunch 的具体区分在转发层
+        // （foreign network manager 的 relay_data 标志）执行。
+        let permits_data = relay_grants.permits_data_relay(&proof.trust_domain_id, now);
+        let permits_holepunch = relay_grants.permits_holepunch_assist(&proof.trust_domain_id, now);
+        if !permits_data && !permits_holepunch {
             return Err(BorrowedRelayError::CapabilityDenied {
                 trust_domain_id: proof.trust_domain_id,
-                capability: "can_relay_data",
+                capability: "can_relay_data|can_assist_holepunch",
             });
         }
         if proof.member_cert.details.expires_at <= now {

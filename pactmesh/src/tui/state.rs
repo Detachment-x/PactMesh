@@ -106,13 +106,10 @@ pub async fn refresh_all(
     let mut last_err: Option<String> = None;
     let setup = snapshot_setup_state().unwrap_or_default();
 
-    let (node, stun, peers) = fetch_node_peers(rpc, instance)
-        .await
-        .map(|(n, s, p)| (n, s, p))
-        .unwrap_or_else(|e| {
-            last_err = Some(format!("peer/node: {e:#}"));
-            (None, StunInfo::default(), Vec::new())
-        });
+    let (node, stun, peers) = fetch_node_peers(rpc, instance).await.unwrap_or_else(|e| {
+        last_err = Some(format!("peer/node: {e:#}"));
+        (None, StunInfo::default(), Vec::new())
+    });
 
     let connectors = match fetch_connectors(rpc, instance).await {
         Ok(v) => v,
@@ -338,7 +335,7 @@ async fn fetch_pending_joins(
 
 fn short_hex(bytes: &[u8], width: usize) -> String {
     let mut s = String::with_capacity(width);
-    for b in bytes.iter().take((width + 1) / 2) {
+    for b in bytes.iter().take(width.div_ceil(2)) {
         let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{b:02x}"));
     }
     s.truncate(width);

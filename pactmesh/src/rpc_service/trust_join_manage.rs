@@ -4,7 +4,8 @@ use crate::{
     instance_manager::NetworkInstanceManager,
     proto::{
         api::config::{
-            ApproveJoinRequestRequest, ApproveJoinRequestResponse, FetchPendingMemberCertRequest,
+            ApproveJoinRequestRequest, ApproveJoinRequestResponse, ArmRootUpgradeAcceptanceRequest,
+            ArmRootUpgradeAcceptanceResponse, FetchPendingMemberCertRequest,
             FetchPendingMemberCertResponse, ListPendingJoinRequestsRequest,
             ListPendingJoinRequestsResponse, RejectJoinRequestRequest, RejectJoinRequestResponse,
             SubmitJoinRequestRequest, SubmitJoinRequestResponse, TrustJoinManageRpc,
@@ -92,6 +93,17 @@ impl TrustJoinManageRpc for TrustJoinManageRpcService {
         super::get_instance_service(&self.instance_manager, &input.instance)?
             .get_trust_join_manage_service()
             .list_pending_join_requests(ctrl, input)
+            .await
+    }
+
+    async fn arm_root_upgrade_acceptance(
+        &self,
+        ctrl: Self::Controller,
+        input: ArmRootUpgradeAcceptanceRequest,
+    ) -> Result<ArmRootUpgradeAcceptanceResponse, rpc_types::error::Error> {
+        super::get_instance_service(&self.instance_manager, &input.instance)?
+            .get_trust_join_manage_service()
+            .arm_root_upgrade_acceptance(ctrl, input)
             .await
     }
 }

@@ -24,6 +24,7 @@ message InstanceConfigPatch {
   repeated ExitNodePatch exit_nodes = 8;
   repeated UrlPatch mapped_listeners = 9;
   repeated UrlPatch connectors = 10;
+  repeated RelayServingPatch relay_serving = 11;
 }
 
 message PortForwardPatch {
@@ -61,6 +62,16 @@ message RoutePatch {
 message ExitNodePatch {
   ConfigPatchAction action = 1;
   common.IpAddr node = 2;
+}
+
+// 跨信任域中继授权（trust_domain.relay_serving）的运行时补丁。Add 按
+// foreign_root_pk_hex 做 upsert，Remove 按 hex 删除，Clear 清空。
+message RelayServingPatch {
+  ConfigPatchAction action = 1;
+  string foreign_root_pk_hex = 2;
+  bool can_relay_data = 3;
+  bool can_assist_holepunch = 4;
+  uint64 expires_at = 5;
 }
 
 message PatchConfigRequest {
@@ -155,6 +166,17 @@ message ListPendingJoinRequestsResponse {
   repeated PendingJoinRequestSummary requests = 1;
 }
 
+// 目标设备一次性预授权 root 升级：本机 TUI 收口令后武装一个限时、一次性的
+// 接受令牌，随后远端 root 推送 sk_root_payload 时消费该令牌的口令落盘
+// sk_root.age，无需 env。
+message ArmRootUpgradeAcceptanceRequest {
+  api.instance.InstanceIdentifier instance = 1;
+  string passphrase = 2;
+  uint32 ttl_secs = 3;
+}
+
+message ArmRootUpgradeAcceptanceResponse { uint32 ttl_secs = 1; }
+
 service TrustJoinManageRpc {
   rpc SubmitJoinRequest(SubmitJoinRequestRequest) returns (SubmitJoinRequestResponse);
   rpc FetchPendingMemberCert(FetchPendingMemberCertRequest) returns (FetchPendingMemberCertResponse);
@@ -162,4 +184,5 @@ service TrustJoinManageRpc {
   rpc RejectJoinRequest(RejectJoinRequestRequest) returns (RejectJoinRequestResponse);
   rpc UpgradePeerToRoot(UpgradePeerToRootRequest) returns (UpgradePeerToRootResponse);
   rpc ListPendingJoinRequests(ListPendingJoinRequestsRequest) returns (ListPendingJoinRequestsResponse);
+  rpc ArmRootUpgradeAcceptance(ArmRootUpgradeAcceptanceRequest) returns (ArmRootUpgradeAcceptanceResponse);
 }

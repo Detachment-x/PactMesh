@@ -1,4 +1,5 @@
 use anyhow::Context;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use cidr::{Ipv4Cidr, Ipv6Cidr};
 use dashmap::DashMap;
@@ -194,7 +195,7 @@ pub struct PeerManager {
     trust_pool: Option<Arc<RwLock<TrustDomainPool>>>,
     peer_trust_acl_identities: Arc<DashMap<PeerId, TrustAclPeerIdentity>>,
     is_secure_mode_enabled: bool,
-    relay_grants: Arc<RelayGrantTable>,
+    relay_grants: Arc<ArcSwap<RelayGrantTable>>,
 }
 
 #[derive(Debug, Clone)]
@@ -265,7 +266,9 @@ impl PeerManager {
             my_peer_id,
         ));
         let peer_session_store = Arc::new(PeerSessionStore::new());
-        let relay_grants = Arc::new(global_ctx.config.get_relay_grant_table());
+        let relay_grants = Arc::new(ArcSwap::from_pointee(
+            global_ctx.config.get_relay_grant_table(),
+        ));
 
         let encryptor = if global_ctx.get_flags().enable_encryption {
             // 只有在启用加密时才使用工厂函数选择算法
@@ -628,6 +631,15 @@ impl PeerManager {
         proxy_cidrs
     }
 
+    /// fail-closed 取策略：原始 ACL 字节为空（未配置）或无法解码（损坏）→ `None`，
+    /// 调用方据此丢弃数据流量。仅在持有可解码策略时返回 `Some` 交由 `decide` 评估。
+    fn trust_acl_policy_or_fail_closed(acl_bytes: &[u8]) -> Option<AclPolicy> {
+        if acl_bytes.is_empty() {
+            return None;
+        }
+        from_cbor::<AclPolicy>(acl_bytes).ok()
+    }
+
     fn trust_acl_decision(
         policy: &AclPolicy,
         packet: &PacketTuple,
@@ -728,12 +740,11 @@ impl PeerManager {
         else {
             return true;
         };
-        if state.details.payload.acl.is_empty() {
-            return true;
-        }
-        let Ok(policy) = from_cbor::<AclPolicy>(&state.details.payload.acl) else {
-            tracing::warn!("trust ACL decode failed; fail-open for packet");
-            return true;
+        // fail-closed：信任网络无可用 ACL 策略（未配置或解码失败）时，成员间数据流量默认拒绝。
+        // 管理/控制通道（RPC、ConfigSync、握手）为非 Data 包，已在本函数开头豁免。
+        let Some(policy) = Self::trust_acl_policy_or_fail_closed(&state.details.payload.acl) else {
+            tracing::debug!(?peer_id, "trust ACL unavailable; fail-closed drop");
+            return false;
         };
 
         let proxy_cidrs = Self::proxy_cidrs_for_trust_acl(identities, &local);
@@ -749,7 +760,13 @@ impl PeerManager {
     }
 
     pub fn relay_grants(&self) -> Arc<RelayGrantTable> {
-        self.relay_grants.clone()
+        self.relay_grants.load_full()
+    }
+
+    /// 从当前 config 重建中继授权表并原子换入（TUI `:relay-grant` 改 config 后调用）。
+    pub fn reload_relay_grants(&self) {
+        self.relay_grants
+            .store(Arc::new(self.global_ctx.config.get_relay_grant_table()));
     }
 
     pub fn set_allow_loopback_tunnel(&self, allow_loopback_tunnel: bool) {
@@ -1513,6 +1530,7 @@ impl PeerManager {
             peers: Weak<PeerMap>,
             foreign_network_client: Weak<ForeignNetworkClient>,
             foreign_network_manager: Weak<ForeignNetworkManager>,
+            peer_session_store: Arc<PeerSessionStore>,
         }
 
         #[async_trait]
@@ -1543,6 +1561,10 @@ impl PeerManager {
                 if let Some(foreign_client) = self.foreign_network_client.upgrade() {
                     let _ = foreign_client.get_peer_map().close_peer(peer_id).await;
                 }
+            }
+
+            async fn invalidate_peer_session(&self, peer_id: PeerId) {
+                self.peer_session_store.invalidate_for_peer(peer_id);
             }
 
             async fn get_peer_public_key(&self, peer_id: PeerId) -> Option<Vec<u8>> {
@@ -1595,6 +1617,7 @@ impl PeerManager {
                 peers: Arc::downgrade(&self.peers),
                 foreign_network_client: Arc::downgrade(&self.foreign_network_client),
                 foreign_network_manager: Arc::downgrade(&self.foreign_network_manager),
+                peer_session_store: self.peer_session_store.clone(),
             }))
             .await
             .unwrap();
@@ -2459,7 +2482,7 @@ mod tests {
         trust::{
             ACL_SCHEMA_VERSION, AclPolicy, AclRule, Action as TrustAclAction, Cidr,
             DeviceFingerprint, MemberCertFingerprint, PortSpec, Proto as TrustAclProto, Selector,
-            TagName, from_cbor, to_canonical_cbor,
+            TagName, to_canonical_cbor,
         },
         tunnel::{
             TunnelConnector, TunnelListener,
@@ -2587,9 +2610,14 @@ mod tests {
     }
 
     #[test]
-    fn trust_acl_fail_open_when_policy_cbor_is_empty_or_invalid() {
-        assert!(from_cbor::<AclPolicy>(&[]).is_err());
-        assert!(!to_canonical_cbor(&drop_client_to_server_ssh_policy()).is_empty());
+    fn trust_acl_fail_closed_when_policy_cbor_is_empty_or_invalid() {
+        // 未配置（空字节）→ None → 调用方丢弃数据流量。
+        assert!(PeerManager::trust_acl_policy_or_fail_closed(&[]).is_none());
+        // 已配置但损坏（无法解码）→ None → 丢弃。
+        assert!(PeerManager::trust_acl_policy_or_fail_closed(&[0xAA, 0xBB]).is_none());
+        // 合法策略 → Some，交由 decide 评估。
+        let bytes = to_canonical_cbor(&drop_client_to_server_ssh_policy());
+        assert!(PeerManager::trust_acl_policy_or_fail_closed(&bytes).is_some());
     }
 
     #[test]

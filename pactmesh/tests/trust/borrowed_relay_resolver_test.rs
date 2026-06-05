@@ -30,6 +30,7 @@ fn sample_member_cert(root: &TrustDomainRoot, expires_at: u64) -> MemberCert {
         not_before: NOW.saturating_sub(60),
         expires_at,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: false,
             can_proxy_subnet: Vec::new(),
@@ -64,6 +65,51 @@ fn test_validate_ok_returns_trust_domain_id() {
     let grants = relay_grants_for(root.id());
 
     assert_eq!(resolver.validate(&proof, &grants, NOW), Ok(root.id()));
+}
+
+fn relay_grants_caps(
+    trust_domain_id: TrustDomainId,
+    can_relay_data: bool,
+    can_assist_holepunch: bool,
+) -> RelayGrantTable {
+    RelayGrantTable::from_entries(vec![RelayGrantEntry {
+        foreign_root_pk: trust_domain_id,
+        capabilities: RelayCapabilities {
+            can_relay_data,
+            can_assist_holepunch,
+        },
+        expires_at: NOW + 3600,
+    }])
+}
+
+#[test]
+fn test_validate_accepts_holepunch_only_grant() {
+    let root = TrustDomainRoot::generate();
+    let proof = BorrowedRelayProof {
+        trust_domain_id: root.id(),
+        member_cert: sample_member_cert(&root, NOW + 3600),
+        timestamp: NOW,
+    };
+    let resolver = BorrowedRelayResolver;
+    // 仅 can_assist_holepunch 也应通过借用接受校验（数据转发区分在转发层）。
+    let grants = relay_grants_caps(root.id(), false, true);
+    assert_eq!(resolver.validate(&proof, &grants, NOW), Ok(root.id()));
+}
+
+#[test]
+fn test_validate_rejects_grant_without_capability() {
+    let root = TrustDomainRoot::generate();
+    let proof = BorrowedRelayProof {
+        trust_domain_id: root.id(),
+        member_cert: sample_member_cert(&root, NOW + 3600),
+        timestamp: NOW,
+    };
+    let resolver = BorrowedRelayResolver;
+    let grants = relay_grants_caps(root.id(), false, false);
+    assert!(matches!(
+        resolver.validate(&proof, &grants, NOW),
+        Err(BorrowedRelayError::CapabilityDenied { .. })
+    ));
 }
 
 #[test]

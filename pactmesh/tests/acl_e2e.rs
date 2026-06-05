@@ -88,6 +88,7 @@ fn make_member_with_proxy(
         not_before: now.saturating_sub(60),
         expires_at: now + 3600,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: true,
             can_proxy_subnet: proxy_cidrs,

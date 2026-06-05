@@ -32,6 +32,9 @@ pub trait RouteInterface {
         false
     }
     async fn close_peer(&self, _peer_id: PeerId) {}
+    /// 信任撤销时调用：使该 peer 的安全数据面会话密钥立即失效（强制 rekey）。
+    /// 默认空实现——仅 PeerManager 真实路由接口接线到 PeerSessionStore。
+    async fn invalidate_peer_session(&self, _peer_id: PeerId) {}
     async fn get_peer_public_key(&self, _peer_id: PeerId) -> Option<Vec<u8>> {
         None
     }

@@ -141,6 +141,7 @@ enum JoinSetupStep {
 
 enum PendingAction {
     Approve(JoinRow),
+    ArmRootUpgrade { ttl_secs: u32 },
 }
 
 #[derive(Copy, Clone)]
@@ -159,6 +160,12 @@ enum ActionResult {
     ApproveErr(String),
     RejectOk(String),
     RejectErr(String),
+    ArmRootUpgradeOk {
+        ttl_secs: u32,
+    },
+    ArmRootUpgradeErr(String),
+    RelayGrantOk(String),
+    RelayGrantErr(String),
 }
 
 struct UiState {
@@ -319,13 +326,23 @@ async fn event_loop(
                     last_refresh = Instant::now() - REFRESH_INTERVAL;
                 }
                 ActionResult::RejectErr(e) => ui.flash_err(format!("reject failed: {e}")),
+                ActionResult::ArmRootUpgradeOk { ttl_secs } => ui.flash_ok(format!(
+                    "root-upgrade acceptance armed for {ttl_secs}s — initiate from the existing root now"
+                )),
+                ActionResult::ArmRootUpgradeErr(e) => {
+                    ui.flash_err(format!("arm root-upgrade failed: {e}"))
+                }
+                ActionResult::RelayGrantOk(msg) => ui.flash_ok(msg),
+                ActionResult::RelayGrantErr(e) => {
+                    ui.flash_err(format!("relay-grant failed: {e}"))
+                }
             }
         }
 
-        if let Some((_, t, _)) = &ui.flash {
-            if t.elapsed() >= FLASH_TTL {
-                ui.flash = None;
-            }
+        if let Some((_, t, _)) = &ui.flash
+            && t.elapsed() >= FLASH_TTL
+        {
+            ui.flash = None;
         }
 
         let snap = state.load_full();
@@ -587,6 +604,7 @@ fn build_detail(ui: &mut UiState, snap: &state::Snapshot) -> Option<String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_cmd(
     buf: &str,
     ui: &mut UiState,
@@ -636,6 +654,41 @@ fn dispatch_cmd(
         },
         Cmd::Revoke(_) => {
             ui.flash_info("not in TUI v0 — use: pactmesh trust revoke <td> <net> <fp>");
+        }
+        Cmd::AcceptRootUpgrade { ttl_secs } => {
+            ui.mode = InputMode::Passphrase {
+                buf: String::new(),
+                action: PendingAction::ArmRootUpgrade {
+                    ttl_secs: ttl_secs.unwrap_or(120),
+                },
+            };
+        }
+        Cmd::RelayGrant {
+            foreign_td_hex,
+            remove,
+            can_relay_data,
+            can_assist_holepunch,
+            ttl_secs,
+        } => {
+            let client = client.clone();
+            let instance = instance.clone();
+            let tx = action_tx.clone();
+            tokio::spawn(async move {
+                let r = actions::relay_grant(
+                    &client,
+                    &instance,
+                    &foreign_td_hex,
+                    remove,
+                    can_relay_data,
+                    can_assist_holepunch,
+                    ttl_secs,
+                )
+                .await;
+                let _ = tx.send(match r {
+                    Ok(msg) => ActionResult::RelayGrantOk(msg),
+                    Err(e) => ActionResult::RelayGrantErr(format!("{e:#}")),
+                });
+            });
         }
         Cmd::Reconnect(_) | Cmd::RestartConnector(_) => {
             ui.flash_info("connector-level reconnect is not exposed yet — use :daemon restart");
@@ -972,6 +1025,17 @@ fn spawn_action(
                         version: o.network_state_version,
                     },
                     Err(e) => ActionResult::ApproveErr(format!("{e:#}")),
+                });
+            });
+        }
+        PendingAction::ArmRootUpgrade { ttl_secs } => {
+            tokio::spawn(async move {
+                let pp = passphrase;
+                let r = actions::arm_root_upgrade(&client, &instance, &pp, ttl_secs).await;
+                drop(pp);
+                let _ = tx.send(match r {
+                    Ok(ttl_secs) => ActionResult::ArmRootUpgradeOk { ttl_secs },
+                    Err(e) => ActionResult::ArmRootUpgradeErr(format!("{e:#}")),
                 });
             });
         }
@@ -1596,6 +1660,9 @@ fn draw_passphrase_modal(frame: &mut ratatui::Frame<'_>, buf: &str, action: &Pen
             " Unlock sk_root.age — approve {} ({}) ",
             row.applicant_short, row.network_local_id
         ),
+        PendingAction::ArmRootUpgrade { ttl_secs } => {
+            format!(" Arm root-upgrade acceptance ({ttl_secs}s, one-shot) ")
+        }
     };
     let mask = "•".repeat(buf.chars().count());
     let body = vec![

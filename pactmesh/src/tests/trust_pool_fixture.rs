@@ -46,6 +46,7 @@ pub fn sample_member_cert(root: &TrustDomainRoot, sk_self: &SignKey) -> MemberCe
             can_relay_data: true,
             can_relay_control: true,
             can_proxy_subnet: vec!["10.0.0.0/24".parse::<IpNet>().unwrap()],
+            can_be_exit_node: false,
         },
         network_state_version_ref: NETWORK_STATE_VERSION,
         hostname: None,

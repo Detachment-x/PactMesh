@@ -16,6 +16,19 @@ pub enum Cmd {
     },
     /// `:revoke <fp_prefix>` — TODO，daemon 侧需 sk_root 签新 network_state
     Revoke(String),
+    /// `:accept-root-upgrade [ttl_secs]` — 本机预授权一次性 root 升级（弹口令 modal，默认 120s）
+    AcceptRootUpgrade {
+        ttl_secs: Option<u32>,
+    },
+    /// `:relay-grant <foreign_td_hex> [data=true] [holepunch=true] [ttl=<secs>] [remove]`
+    /// 运行时增删跨信任域中继授权（写 config relay_serving + 热重载授权表）。
+    RelayGrant {
+        foreign_td_hex: String,
+        remove: bool,
+        can_relay_data: bool,
+        can_assist_holepunch: bool,
+        ttl_secs: u64,
+    },
     /// `:reconnect <peer_hostname>` — 当前回退到 :!systemctl restart pactmesh-core
     Reconnect(String),
     /// `:restart-connector <id>` — 同上回退
@@ -98,6 +111,52 @@ pub fn parse(line: &str) -> Result<Cmd, String> {
         "revoke" => {
             let fp = require_arg(rest, "usage: :revoke <fp_prefix>")?;
             Ok(Cmd::Revoke(fp.to_string()))
+        }
+        "accept-root-upgrade" => {
+            let ttl_secs = if rest.is_empty() {
+                None
+            } else {
+                Some(
+                    rest.parse::<u32>()
+                        .map_err(|_| "usage: :accept-root-upgrade [ttl_secs]".to_string())?,
+                )
+            };
+            Ok(Cmd::AcceptRootUpgrade { ttl_secs })
+        }
+        "relay-grant" => {
+            const USAGE: &str = "usage: :relay-grant <foreign_td_hex> [data=true] [holepunch=true] [ttl=<secs>] [remove]";
+            let args = words(rest);
+            let foreign_td_hex = args.first().ok_or_else(|| USAGE.to_string())?.clone();
+            let mut remove = false;
+            let mut can_relay_data = false;
+            let mut can_assist_holepunch = false;
+            let mut ttl_secs = 86_400u64;
+            for tok in &args[1..] {
+                if tok == "remove" {
+                    remove = true;
+                    continue;
+                }
+                let (k, v) = tok
+                    .split_once('=')
+                    .ok_or_else(|| format!("invalid flag '{tok}' (use key=value or 'remove')"))?;
+                match k {
+                    "data" | "can_relay_data" => can_relay_data = parse_flag_bool(v)?,
+                    "holepunch" | "can_assist_holepunch" => {
+                        can_assist_holepunch = parse_flag_bool(v)?
+                    }
+                    "ttl" | "ttl_secs" => {
+                        ttl_secs = v.parse().map_err(|_| format!("invalid ttl '{v}'"))?
+                    }
+                    _ => return Err(format!("unknown flag '{k}'")),
+                }
+            }
+            Ok(Cmd::RelayGrant {
+                foreign_td_hex,
+                remove,
+                can_relay_data,
+                can_assist_holepunch,
+                ttl_secs,
+            })
         }
         "reconnect" => {
             let peer = require_arg(rest, "usage: :reconnect <peer_hostname>")?;
@@ -209,8 +268,45 @@ fn split_first_word(s: &str) -> (&str, Option<&str>) {
     }
 }
 
-fn words(s: &str) -> Vec<&str> {
-    s.split_whitespace().collect()
+/// 按空白切分，但 `"..."` / `'...'` 内的空白保留为单 token（引号被剥离）。
+/// 用于 setup-root/setup-join：含空格的 invite/seed URL 可整体加引号传入。
+fn parse_flag_bool(v: &str) -> Result<bool, String> {
+    match v {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(format!("invalid bool '{other}' (use true/false)")),
+    }
+}
+
+fn words(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut has_token = false;
+    for c in s.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => cur.push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                has_token = true;
+            }
+            None if c.is_whitespace() => {
+                if has_token {
+                    out.push(std::mem::take(&mut cur));
+                    has_token = false;
+                }
+            }
+            None => {
+                cur.push(c);
+                has_token = true;
+            }
+        }
+    }
+    if has_token {
+        out.push(cur);
+    }
+    out
 }
 
 /// 内嵌 help 文案；mod.rs 显示在 modal 里。
@@ -272,6 +368,47 @@ mod tests {
         assert_eq!(parse("approve abcd").unwrap(), Cmd::Approve("abcd".into()));
         assert_eq!(parse("a abcd").unwrap(), Cmd::Approve("abcd".into()));
         assert!(parse("approve").is_err());
+    }
+
+    #[test]
+    fn relay_grant_parses_flags_and_remove() {
+        assert_eq!(
+            parse("relay-grant abcd123 data=true holepunch=true ttl=600").unwrap(),
+            Cmd::RelayGrant {
+                foreign_td_hex: "abcd123".into(),
+                remove: false,
+                can_relay_data: true,
+                can_assist_holepunch: true,
+                ttl_secs: 600,
+            }
+        );
+        assert_eq!(
+            parse("relay-grant abcd123 remove").unwrap(),
+            Cmd::RelayGrant {
+                foreign_td_hex: "abcd123".into(),
+                remove: true,
+                can_relay_data: false,
+                can_assist_holepunch: false,
+                ttl_secs: 86_400,
+            }
+        );
+        assert!(parse("relay-grant").is_err());
+        assert!(parse("relay-grant x bogus").is_err());
+    }
+
+    #[test]
+    fn accept_root_upgrade_parses_optional_ttl() {
+        assert_eq!(
+            parse("accept-root-upgrade").unwrap(),
+            Cmd::AcceptRootUpgrade { ttl_secs: None }
+        );
+        assert_eq!(
+            parse("accept-root-upgrade 300").unwrap(),
+            Cmd::AcceptRootUpgrade {
+                ttl_secs: Some(300)
+            }
+        );
+        assert!(parse("accept-root-upgrade nope").is_err());
     }
 
     #[test]
@@ -373,6 +510,34 @@ mod tests {
         );
         assert!(parse("setup-root office-net root-a").is_err());
         assert!(parse("setup-join invite office-net").is_err());
+    }
+
+    #[test]
+    fn setup_join_accepts_quoted_url_with_spaces() {
+        assert_eq!(
+            parse("setup-join \"privatenetwork://join?x=a b\" office-net node-b 15889").unwrap(),
+            Cmd::SetupJoin {
+                invite: "privatenetwork://join?x=a b".into(),
+                network: "office-net".into(),
+                label: "node-b".into(),
+                rpc_port: "15889".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn setup_root_accepts_quoted_seed_with_spaces() {
+        assert_eq!(
+            parse("setup-root office-net root-a 'tcp://1.2.3.4:11010 x' 11010 15888").unwrap(),
+            Cmd::SetupRoot {
+                network: "office-net".into(),
+                label: "root-a".into(),
+                seed: "tcp://1.2.3.4:11010 x".into(),
+                listen_port: "11010".into(),
+                rpc_port: "15888".into(),
+                domain_label: None,
+            }
+        );
     }
 
     #[test]

@@ -44,13 +44,14 @@ use crate::peers::recv_packet_from_chan;
 use crate::peers::rpc_service::PeerManagerRpcService;
 use crate::peers::{PacketRecvChanReceiver, create_packet_recv_chan};
 use crate::proto::api::config::{
-    ApproveJoinRequestRequest, ApproveJoinRequestResponse, ConfigPatchAction, ConfigRpc,
-    FetchPendingMemberCertRequest, FetchPendingMemberCertResponse, GetConfigRequest,
-    GetConfigResponse, ListPendingJoinRequestsRequest, ListPendingJoinRequestsResponse,
-    PatchConfigRequest, PatchConfigResponse, PendingJoinRequestSummary, PortForwardPatch,
-    RejectJoinRequestRequest, RejectJoinRequestResponse, SubmitJoinRequestRequest,
-    SubmitJoinRequestResponse, TrustJoinManageRpc, TrustJoinManageRpcServer,
-    UpgradePeerToRootRequest, UpgradePeerToRootResponse,
+    ApproveJoinRequestRequest, ApproveJoinRequestResponse, ArmRootUpgradeAcceptanceRequest,
+    ArmRootUpgradeAcceptanceResponse, ConfigPatchAction, ConfigRpc, FetchPendingMemberCertRequest,
+    FetchPendingMemberCertResponse, GetConfigRequest, GetConfigResponse,
+    ListPendingJoinRequestsRequest, ListPendingJoinRequestsResponse, PatchConfigRequest,
+    PatchConfigResponse, PendingJoinRequestSummary, PortForwardPatch, RejectJoinRequestRequest,
+    RejectJoinRequestResponse, SubmitJoinRequestRequest, SubmitJoinRequestResponse,
+    TrustJoinManageRpc, TrustJoinManageRpcServer, UpgradePeerToRootRequest,
+    UpgradePeerToRootResponse,
 };
 use crate::proto::api::instance::{
     GetPrometheusStatsRequest, GetPrometheusStatsResponse, GetStatsRequest, GetStatsResponse,
@@ -284,6 +285,7 @@ impl InstanceConfigPatcher {
         self.patch_exit_nodes(patch.exit_nodes).await?;
         self.patch_mapped_listeners(patch.mapped_listeners).await?;
         self.patch_connector(patch.connectors).await?;
+        self.patch_relay_serving(patch.relay_serving).await?;
 
         let global_ctx = weak_upgrade(&self.global_ctx)?;
         if let Some(hostname) = patch.hostname {
@@ -482,6 +484,51 @@ impl InstanceConfigPatcher {
         crate::proto::api::config::patch_vec(&mut current_exit_nodes, patches);
         global_ctx.config.set_exit_nodes(current_exit_nodes);
         peer_manager.update_exit_nodes().await;
+
+        Ok(())
+    }
+
+    async fn patch_relay_serving(
+        &self,
+        relay_serving: Vec<crate::proto::api::config::RelayServingPatch>,
+    ) -> Result<(), anyhow::Error> {
+        if relay_serving.is_empty() {
+            return Ok(());
+        }
+        let global_ctx = weak_upgrade(&self.global_ctx)?;
+        let peer_manager = weak_upgrade(&self.peer_manager)?;
+        let mut td = global_ctx.config.get_trust_domain().ok_or_else(|| {
+            anyhow::anyhow!("no trust domain configured; cannot patch relay_serving")
+        })?;
+        for patch in relay_serving {
+            // 按 foreign_root_pk_hex upsert：Add 先删同 key 再插，避免重复授权。
+            match ConfigPatchAction::try_from(patch.action) {
+                Ok(ConfigPatchAction::Add) => {
+                    td.relay_serving
+                        .retain(|e| e.foreign_root_pk_hex != patch.foreign_root_pk_hex);
+                    td.relay_serving
+                        .push(crate::common::config::RelayServingEntryConfig {
+                            foreign_root_pk_hex: patch.foreign_root_pk_hex,
+                            foreign_trust_domain_meta_pem: None,
+                            foreign_network_state_pem: None,
+                            foreign_bootstrap_cbor: None,
+                            can_relay_data: patch.can_relay_data,
+                            can_assist_holepunch: patch.can_assist_holepunch,
+                            expires_at: patch.expires_at,
+                        });
+                }
+                Ok(ConfigPatchAction::Remove) => {
+                    td.relay_serving
+                        .retain(|e| e.foreign_root_pk_hex != patch.foreign_root_pk_hex);
+                }
+                Ok(ConfigPatchAction::Clear) => {
+                    td.relay_serving.clear();
+                }
+                _ => {}
+            }
+        }
+        global_ctx.config.set_trust_domain(Some(td));
+        peer_manager.reload_relay_grants();
 
         Ok(())
     }
@@ -863,6 +910,17 @@ impl Instance {
             ) -> crate::proto::rpc_types::error::Result<UpgradePeerToRootResponse> {
                 Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
                     "join admission endpoint does not allow root upgrades"
+                )))
+            }
+
+            async fn arm_root_upgrade_acceptance(
+                &self,
+                _ctrl: Self::Controller,
+                _request: ArmRootUpgradeAcceptanceRequest,
+            ) -> crate::proto::rpc_types::error::Result<ArmRootUpgradeAcceptanceResponse>
+            {
+                Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                    "join admission endpoint does not allow arming root-upgrade acceptance"
                 )))
             }
 
@@ -2123,6 +2181,29 @@ impl Instance {
                     })?;
 
                 Ok(UpgradePeerToRootResponse { ack: response.ack })
+            }
+
+            async fn arm_root_upgrade_acceptance(
+                &self,
+                _ctrl: Self::Controller,
+                request: ArmRootUpgradeAcceptanceRequest,
+            ) -> crate::proto::rpc_types::error::Result<ArmRootUpgradeAcceptanceResponse>
+            {
+                let service = self.config_sync_service.as_ref().ok_or_else(|| {
+                    rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
+                        "config-sync service is not available"
+                    ))
+                })?;
+                let ttl_secs = if request.ttl_secs == 0 {
+                    120
+                } else {
+                    request.ttl_secs
+                };
+                service.arm_root_upgrade(
+                    request.passphrase,
+                    std::time::Duration::from_secs(ttl_secs as u64),
+                );
+                Ok(ArmRootUpgradeAcceptanceResponse { ttl_secs })
             }
 
             async fn list_pending_join_requests(

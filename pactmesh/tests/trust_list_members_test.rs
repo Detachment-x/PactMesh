@@ -216,6 +216,7 @@ fn test_list_members_capability_rendering() {
         not_before: 10,
         expires_at: u64::MAX,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: true,
             can_proxy_subnet: vec![IpNet::new(IpAddr::from_str("10.0.0.0").unwrap(), 24).unwrap()],

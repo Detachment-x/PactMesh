@@ -147,10 +147,10 @@ pub fn render(frame: &mut Frame<'_>, view: LogsView<'_>, area: Rect) {
         if !view.grep.matches(raw) {
             continue;
         }
-        if let Some(n) = needle.as_deref() {
-            if !raw.to_ascii_lowercase().contains(n) {
-                continue;
-            }
+        if let Some(n) = needle.as_deref()
+            && !raw.to_ascii_lowercase().contains(n)
+        {
+            continue;
         }
         let color = level_color(level);
         visible_lines.push(Line::from(Span::styled(

@@ -20,6 +20,7 @@ fn sample_cert(root: &TrustDomainRoot, index: u64) -> MemberCert {
         not_before: 1_715_000_000,
         expires_at: 1_816_000_000,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: index % 2 == 0,
             can_proxy_subnet: vec![IpNet::from_str("10.0.0.0/24").unwrap()],

@@ -108,6 +108,7 @@ fn member_cert_for_request(root: &TrustDomainRoot, jr: &JoinRequest) -> MemberCe
         not_before: 1,
         expires_at: 4_102_444_800,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: false,
             can_relay_control: false,
             can_proxy_subnet: Vec::new(),

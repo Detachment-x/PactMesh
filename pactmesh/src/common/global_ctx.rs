@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use dashmap::DashMap;
 
 use super::{
@@ -202,6 +202,12 @@ pub struct GlobalCtx {
     cached_ipv4: AtomicCell<Option<cidr::Ipv4Inet>>,
     cached_ipv6: AtomicCell<Option<cidr::Ipv6Inet>>,
     cached_proxy_cidrs: AtomicCell<Option<Vec<ProxyNetworkConfig>>>,
+    /// 本地 member cert `can_proxy_subnet` 的规范化字符串快照，随 trust context 设置。
+    /// `None` = 无信任上下文（不裁剪路由宣告，向后兼容）；`Some` = 仅宣告其覆盖的 CIDR。
+    cached_cert_proxy_allow: ArcSwapOption<Vec<String>>,
+    /// 本地 member cert `can_be_exit_node` 快照，随 trust context 设置。
+    /// `None` = 无信任上下文（不门控，加载期保护）；`Some(g)` = 仅当 g 时可服务出口。
+    cached_cert_exit_node: AtomicCell<Option<bool>>,
 
     ip_collector: Mutex<Option<Arc<IPCollector>>>,
 
@@ -299,6 +305,8 @@ impl GlobalCtx {
             cached_ipv4: AtomicCell::new(None),
             cached_ipv6: AtomicCell::new(None),
             cached_proxy_cidrs: AtomicCell::new(None),
+            cached_cert_proxy_allow: ArcSwapOption::const_empty(),
+            cached_cert_exit_node: AtomicCell::new(None),
 
             ip_collector: Mutex::new(Some(Arc::new(IPCollector::new(
                 net_ns,
@@ -476,7 +484,12 @@ impl GlobalCtx {
         self.trust_data_keys.load().key_256
     }
     pub fn enable_exit_node(&self) -> bool {
-        self.flags.load().enable_exit_node || cfg!(target_env = "ohos")
+        let intent = self.flags.load().enable_exit_node || cfg!(target_env = "ohos");
+        // 有信任上下文时由 cert 门控出口服务；无上下文（加载期）退化为仅看本地意图。
+        match self.cached_cert_exit_node.load() {
+            Some(granted) => intent && granted,
+            None => intent,
+        }
     }
 
     pub fn proxy_forward_by_system(&self) -> bool {
@@ -646,7 +659,23 @@ impl GlobalCtx {
         &self,
         ctx: Arc<crate::common::trust_context::TrustDomainContext>,
     ) {
+        let allow: Vec<String> = ctx
+            .member_cert
+            .details
+            .capabilities
+            .can_proxy_subnet
+            .iter()
+            .map(|net| net.to_string())
+            .collect();
+        self.cached_cert_proxy_allow.store(Some(Arc::new(allow)));
+        self.cached_cert_exit_node
+            .store(Some(ctx.member_cert.details.capabilities.can_be_exit_node));
         *self.trust_context.write().await = Some(ctx);
+    }
+
+    /// 本地 member cert 授权的 proxy CIDR 快照（字符串）；`None` 表示无信任上下文。
+    pub fn cert_proxy_allow(&self) -> Option<Arc<Vec<String>>> {
+        self.cached_cert_proxy_allow.load_full()
     }
 
     pub fn set_trust_data_keys_from_network_state(&self, state: &crate::trust::SignedNetworkState) {

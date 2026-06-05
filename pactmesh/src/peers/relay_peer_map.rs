@@ -320,7 +320,7 @@ impl RelayPeerMap {
     ) -> Result<Arc<PeerSession>, Error> {
         let network = self.global_ctx.get_network_identity();
         let session_key = SessionKey::new(network.network_name.clone(), dst_peer_id);
-        let (local_private_key, _local_public_key) = self.get_local_keypair()?;
+        let (local_private_key, local_public_key) = self.get_local_keypair()?;
         let remote_static = self.get_remote_static_pubkey(dst_peer_id).await?;
         let params: NoiseParams = "Noise_IK_25519_ChaChaPoly_SHA256"
             .parse()
@@ -434,6 +434,7 @@ impl RelayPeerMap {
                 remote_static_key,
             )
             .map_err(|e| Error::RouteError(Some(format!("{e:?}"))))?;
+        session.bind_static_identities(&local_public_key, &remote_static);
 
         Ok(session)
     }
@@ -523,7 +524,7 @@ impl RelayPeerMap {
             }
         }
 
-        let (local_private_key, _local_public_key) = self.get_local_keypair()?;
+        let (local_private_key, local_public_key) = self.get_local_keypair()?;
         let params: NoiseParams = "Noise_IK_25519_ChaChaPoly_SHA256"
             .parse()
             .map_err(|e| Error::RouteError(Some(format!("parse noise params failed: {e:?}"))))?;
@@ -578,6 +579,9 @@ impl RelayPeerMap {
                 remote_static_key,
             )
             .map_err(|e| Error::RouteError(Some(format!("{e:?}"))))?;
+        upsert
+            .session
+            .bind_static_identities(&local_public_key, &remote_static);
         let msg2_pb = RelayNoiseMsg2Pb {
             action: match upsert.action {
                 PeerSessionAction::Join => PeerConnSessionActionPb::Join as i32,

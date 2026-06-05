@@ -34,6 +34,7 @@ impl PendingCertQueue {
                 can_relay_data: false,
                 can_relay_control: false,
                 can_proxy_subnet: Vec::<IpNet>::new(),
+                can_be_exit_node: false,
             },
             default_network_state_version_ref: 0,
             default_cert_lifetime_secs: DEFAULT_CERT_LIFETIME_SECS,

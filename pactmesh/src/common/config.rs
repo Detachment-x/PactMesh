@@ -222,6 +222,8 @@ pub trait ConfigLoader: Send + Sync {
         None
     }
 
+    fn set_trust_domain(&self, _trust_domain: Option<TrustDomainConfig>) {}
+
     fn get_credential_file(&self) -> Option<std::path::PathBuf> {
         None
     }
@@ -899,6 +901,10 @@ impl ConfigLoader for TomlConfigLoader {
 
     fn get_trust_domain(&self) -> Option<TrustDomainConfig> {
         TomlConfigLoader::get_trust_domain(self)
+    }
+
+    fn set_trust_domain(&self, trust_domain: Option<TrustDomainConfig>) {
+        TomlConfigLoader::set_trust_domain(self, trust_domain)
     }
 
     fn get_relay_grant_table(&self) -> RelayGrantTable {

@@ -90,6 +90,13 @@ impl PendingCertCache {
     }
 }
 
+/// 本机 TUI 预授权的一次性、限时 root 升级接受令牌：持有用于加密 sk_root.age
+/// 的口令与过期时刻。远端 root 推送密钥时被消费一次后即清除。
+struct ArmedRootUpgrade {
+    passphrase: String,
+    expires_at: Instant,
+}
+
 #[derive(Clone)]
 pub struct ConfigSyncService {
     pub trust_pool: Arc<RwLock<TrustDomainPool>>,
@@ -97,6 +104,7 @@ pub struct ConfigSyncService {
     trust_domain_dir: Option<PathBuf>,
     pending_cert_cache: Arc<Mutex<PendingCertCache>>,
     rate_limits: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    armed_root_upgrade: Arc<Mutex<Option<ArmedRootUpgrade>>>,
 }
 
 impl ConfigSyncService {
@@ -107,7 +115,22 @@ impl ConfigSyncService {
             trust_domain_dir: None,
             pending_cert_cache: Arc::new(Mutex::new(PendingCertCache::new())),
             rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            armed_root_upgrade: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// 武装一次性 root 升级接受令牌（本机 TUI 调用）。覆盖任何既有令牌。
+    pub fn arm_root_upgrade(&self, passphrase: String, ttl: Duration) {
+        *self.armed_root_upgrade.lock().unwrap() = Some(ArmedRootUpgrade {
+            passphrase,
+            expires_at: Instant::now() + ttl,
+        });
+    }
+
+    /// 取走已武装且未过期的口令（一次性：取走即清除；过期亦清除）。
+    fn take_armed_passphrase(&self) -> Option<String> {
+        let armed = self.armed_root_upgrade.lock().unwrap().take()?;
+        (Instant::now() < armed.expires_at).then_some(armed.passphrase)
     }
 
     pub fn with_trust_domain_dir(mut self, trust_domain_dir: impl Into<PathBuf>) -> Self {
@@ -456,9 +479,10 @@ impl ConfigSyncRpc for ConfigSyncService {
                 "root upgrade target has no configured trust-domain dir"
             ))
         })?;
-        let passphrase = std::env::var("PNW_ROOT_UPGRADE_PASSPHRASE").map_err(|_| {
+        // 消费本机 TUI 预先武装的一次性接受令牌（无 env 依赖）。未武装/已过期则拒绝。
+        let passphrase = self.take_armed_passphrase().ok_or_else(|| {
             rpc_types::error::Error::ExecutionError(anyhow!(
-                "PNW_ROOT_UPGRADE_PASSPHRASE is required on the target device to save sk_root.age"
+                "no armed root-upgrade acceptance on target; run :accept-root-upgrade in its TUI first"
             ))
         })?;
 
@@ -500,3 +524,34 @@ fn sha256_bytes(bytes: &[u8]) -> Vec<u8> {
 
 #[allow(dead_code)]
 fn _assert_wire_types(_: (&SignedNetworkState, &SignedTrustDomainMeta)) {}
+
+#[cfg(test)]
+mod armed_root_upgrade_tests {
+    use super::*;
+
+    fn service() -> ConfigSyncService {
+        ConfigSyncService::new(
+            Arc::new(RwLock::new(TrustDomainPool::new())),
+            "net".to_string(),
+        )
+    }
+
+    #[test]
+    fn take_is_one_shot() {
+        let svc = service();
+        svc.arm_root_upgrade("pw".to_string(), Duration::from_secs(60));
+        assert_eq!(svc.take_armed_passphrase().as_deref(), Some("pw"));
+        // 取走即清除：第二次为 None。
+        assert_eq!(svc.take_armed_passphrase(), None);
+    }
+
+    #[test]
+    fn take_rejects_expired_and_unarmed() {
+        let svc = service();
+        assert_eq!(svc.take_armed_passphrase(), None);
+        svc.arm_root_upgrade("pw".to_string(), Duration::from_secs(0));
+        // TTL=0 立即过期 → None（且令牌被清除）。
+        assert_eq!(svc.take_armed_passphrase(), None);
+        assert_eq!(svc.take_armed_passphrase(), None);
+    }
+}

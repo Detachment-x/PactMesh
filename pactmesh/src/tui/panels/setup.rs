@@ -15,8 +15,7 @@ pub fn render(frame: &mut Frame<'_>, snap: &Snapshot, area: Rect) {
     let warn = Style::default().fg(Color::Yellow);
 
     let setup = &snap.setup;
-    let mut lines = Vec::new();
-    lines.push(Line::from(vec![
+    let mut lines = vec![Line::from(vec![
         Span::styled("Config    : ", bold),
         Span::raw(
             setup
@@ -25,7 +24,7 @@ pub fn render(frame: &mut Frame<'_>, snap: &Snapshot, area: Rect) {
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "<not resolved>".to_string()),
         ),
-    ]));
+    ])];
     lines.push(Line::from(vec![
         Span::styled("Domains   : ", bold),
         Span::raw(setup.trust_domain_count.to_string()),

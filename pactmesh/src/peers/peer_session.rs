@@ -73,6 +73,19 @@ impl PeerSessionStore {
         self.sessions.remove(key);
     }
 
+    /// 信任撤销驱动：使某 peer 的所有存量会话立即失效并移除，
+    /// 阻止撤销后快速重连复用旧 root key（普通网络抖动断连不走此路径）。
+    pub fn invalidate_for_peer(&self, peer_id: PeerId) {
+        self.sessions.retain(|key, session| {
+            if key.peer_id == peer_id {
+                session.invalidate();
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     pub fn insert_session(&self, key: SessionKey, session: Arc<PeerSession>) {
         self.sessions.insert(key, session);
     }
@@ -236,6 +249,7 @@ impl std::fmt::Debug for PeerSession {
 impl PeerSession {
     const SYNC_RX_GRACE_AFTER_MS: u64 = SecureDatagramSession::SYNC_RX_GRACE_AFTER_MS;
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         network_name: String,
         local_peer_id: PeerId,
@@ -320,6 +334,13 @@ impl PeerSession {
         }
         *guard = Some(peer_static_pubkey);
         Ok(())
+    }
+
+    /// 握手完成后绑定双方静态公钥到流量 KDF（set-once，见
+    /// `SecureDatagramSession::set_identity_binding`）。
+    pub fn bind_static_identities(&self, local_static_pubkey: &[u8], remote_static_pubkey: &[u8]) {
+        self.datagram
+            .set_identity_binding(local_static_pubkey, remote_static_pubkey);
     }
 
     pub fn sync_root_key(
@@ -508,5 +529,36 @@ mod tests {
             PeerSession::SYNC_RX_GRACE_AFTER_MS,
             SecureDatagramSession::SYNC_RX_GRACE_AFTER_MS
         );
+    }
+
+    #[test]
+    fn invalidate_for_peer_kills_only_matching_sessions() {
+        let store = PeerSessionStore::new();
+        let mk = |remote: PeerId| {
+            Arc::new(PeerSession::new(
+                "net1".to_string(),
+                10,
+                remote,
+                PeerSession::new_root_key(),
+                1,
+                0,
+                "aes-256-gcm".to_string(),
+                "aes-256-gcm".to_string(),
+                None,
+            ))
+        };
+        let target: PeerId = 20;
+        let other: PeerId = 30;
+        let k_target = SessionKey::new("net1".to_string(), target);
+        let k_other = SessionKey::new("net1".to_string(), other);
+        let s_target = mk(target);
+        store.insert_session(k_target.clone(), s_target.clone());
+        store.insert_session(k_other.clone(), mk(other));
+
+        store.invalidate_for_peer(target);
+
+        assert!(!s_target.is_valid());
+        assert!(store.get(&k_target).is_none());
+        assert!(store.get(&k_other).is_some());
     }
 }

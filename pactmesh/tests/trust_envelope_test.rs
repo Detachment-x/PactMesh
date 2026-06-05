@@ -29,6 +29,7 @@ fn member_cert(root: &TrustDomainRoot) -> MemberCert {
         not_before: 1,
         expires_at: 3600,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: false,
             can_proxy_subnet: Vec::new(),

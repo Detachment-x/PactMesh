@@ -82,6 +82,7 @@ fn sample_member_cert(
         not_before: CERT_NOT_BEFORE,
         expires_at: CERT_EXPIRES_AT,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: true,
             can_proxy_subnet: vec!["10.0.0.0/24".parse::<IpNet>().unwrap()],
@@ -606,13 +607,15 @@ async fn test_config_sync_persists_trust_domain_meta() {
 #[tokio::test]
 #[serial]
 async fn test_upgrade_to_root_device_saves_matching_root_key() {
-    unsafe { std::env::set_var("PNW_ROOT_UPGRADE_PASSPHRASE", "target-root-pass") };
-
     let root = TrustDomainRoot::generate();
     let dir = tempfile::tempdir().unwrap();
     write_pk_root(dir.path(), &root);
     let service = ConfigSyncService::new(build_pool(&root, None, None), NETWORK_NAME.to_owned())
         .with_trust_domain_dir(dir.path());
+    service.arm_root_upgrade(
+        "target-root-pass".to_owned(),
+        std::time::Duration::from_secs(60),
+    );
 
     let response = service
         .upgrade_to_root_device(
@@ -630,18 +633,15 @@ async fn test_upgrade_to_root_device_saves_matching_root_key() {
         TrustDomainRoot::load_from_file(&dir.path().join("sk_root.age"), "target-root-pass")
             .unwrap();
     assert_eq!(installed.id(), root.id());
-
-    unsafe { std::env::remove_var("PNW_ROOT_UPGRADE_PASSPHRASE") };
 }
 
 #[tokio::test]
 #[serial]
-async fn test_upgrade_to_root_device_requires_target_passphrase() {
-    unsafe { std::env::remove_var("PNW_ROOT_UPGRADE_PASSPHRASE") };
-
+async fn test_upgrade_to_root_device_requires_armed_acceptance() {
     let root = TrustDomainRoot::generate();
     let dir = tempfile::tempdir().unwrap();
     write_pk_root(dir.path(), &root);
+    // 未武装接受令牌 → 拒绝（不读 env）。
     let service = ConfigSyncService::new(build_pool(&root, None, None), NETWORK_NAME.to_owned())
         .with_trust_domain_dir(dir.path());
 
@@ -656,15 +656,13 @@ async fn test_upgrade_to_root_device_requires_target_passphrase() {
         .await
         .unwrap_err();
 
-    assert!(err.to_string().contains("PNW_ROOT_UPGRADE_PASSPHRASE"));
+    assert!(err.to_string().contains("no armed root-upgrade acceptance"));
     assert!(!dir.path().join("sk_root.age").exists());
 }
 
 #[tokio::test]
 #[serial]
 async fn test_upgrade_to_root_device_rejects_root_key_mismatch() {
-    unsafe { std::env::set_var("PNW_ROOT_UPGRADE_PASSPHRASE", "target-root-pass") };
-
     let expected_root = TrustDomainRoot::generate();
     let wrong_root = TrustDomainRoot::generate();
     let dir = tempfile::tempdir().unwrap();
@@ -674,6 +672,10 @@ async fn test_upgrade_to_root_device_rejects_root_key_mismatch() {
         NETWORK_NAME.to_owned(),
     )
     .with_trust_domain_dir(dir.path());
+    service.arm_root_upgrade(
+        "target-root-pass".to_owned(),
+        std::time::Duration::from_secs(60),
+    );
 
     let err = service
         .upgrade_to_root_device(
@@ -688,8 +690,6 @@ async fn test_upgrade_to_root_device_rejects_root_key_mismatch() {
 
     assert!(err.to_string().contains("does not match"));
     assert!(!dir.path().join("sk_root.age").exists());
-
-    unsafe { std::env::remove_var("PNW_ROOT_UPGRADE_PASSPHRASE") };
 }
 
 #[derive(Clone)]

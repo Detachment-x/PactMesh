@@ -1015,6 +1015,7 @@ impl PeerConn {
             msg2_pb.server_encryption_algorithm.clone(),
             remote_static_key,
         )?;
+        session.bind_static_identities(&local_static_pubkey, &remote_static);
 
         Ok(NoiseHandshakeResult {
             peer_id: remote_peer_id,
@@ -1217,6 +1218,7 @@ impl PeerConn {
             None
         };
         session.check_or_set_peer_static_pubkey(remote_static_key)?;
+        session.bind_static_identities(&local_static_pubkey, &remote_static);
 
         let member_cert = Self::decode_member_cert(&msg3_pb.member_cert_cbor)?;
         let now = Self::current_unix_secs()?;

@@ -111,6 +111,12 @@ fn cidr_is_subset_str(child: &str, parent: &str) -> bool {
     cidr_is_subset(&child_cidr, &parent_cidr)
 }
 
+/// 按本地证书授权集 `allow`（CIDR 字符串）裁剪宣告的 proxy CIDR，
+/// 仅保留被某授权项覆盖者。`allow` 为空 → 全部裁掉。
+fn retain_cert_allowed_cidrs(cidrs: &mut Vec<String>, allow: &[String]) {
+    cidrs.retain(|cidr| allow.iter().any(|a| cidr_is_subset_str(cidr, a)));
+}
+
 /// Patch specific fields in a raw DynamicMessage from a decoded RoutePeerInfo,
 /// preserving all other fields (including unknown ones).
 fn patch_raw_from_info(raw: &mut DynamicMessage, info: &RoutePeerInfo, fields: &[&str]) {
@@ -229,19 +235,25 @@ impl RoutePeerInfo {
             .and_then(|cfg| cfg.public_key().ok())
             .map(|pk| pk.as_bytes().to_vec())
             .unwrap_or_default();
+        let mut proxy_cidrs: Vec<String> = global_ctx
+            .config
+            .get_proxy_cidrs()
+            .iter()
+            .map(|x| x.mapped_cidr.unwrap_or(x.cidr))
+            .chain(global_ctx.get_vpn_portal_cidr())
+            .map(|x| x.to_string())
+            .collect();
+        // 信任域成员仅宣告自身证书 can_proxy_subnet 覆盖的 proxy CIDR；
+        // 无信任上下文（None）时保持原样，向后兼容非信任部署。
+        if let Some(allow) = global_ctx.cert_proxy_allow() {
+            retain_cert_allowed_cidrs(&mut proxy_cidrs, &allow);
+        }
         Self {
             peer_id: my_peer_id,
             inst_id: Some(global_ctx.get_id().into()),
             cost: 0,
             ipv4_addr: global_ctx.get_ipv4().map(|x| x.address().into()),
-            proxy_cidrs: global_ctx
-                .config
-                .get_proxy_cidrs()
-                .iter()
-                .map(|x| x.mapped_cidr.unwrap_or(x.cidr))
-                .chain(global_ctx.get_vpn_portal_cidr())
-                .map(|x| x.to_string())
-                .collect(),
+            proxy_cidrs,
             hostname: Some(global_ctx.get_hostname()),
             udp_nat_type: stun_info.udp_nat_type,
             tcp_nat_type: stun_info.tcp_nat_type,
@@ -2686,6 +2698,7 @@ impl PeerRouteServiceImpl {
 
         for peer_id in untrusted_peers {
             tracing::warn!(?peer_id, "disconnecting untrusted peer");
+            interface.invalidate_peer_session(*peer_id).await;
             interface.close_peer(*peer_id).await;
         }
     }
@@ -3914,6 +3927,28 @@ mod tests {
         tunnel::common::tests::wait_for_condition,
     };
     use prost::Message;
+
+    #[test]
+    fn retain_cert_allowed_cidrs_keeps_only_covered() {
+        // allow 覆盖 10.0.0.0/8；其内子网保留，域外网段裁掉。
+        let allow = vec!["10.0.0.0/8".to_string()];
+        let mut cidrs = vec![
+            "10.1.2.0/24".to_string(),
+            "192.168.1.0/24".to_string(),
+            "10.0.0.0/8".to_string(),
+        ];
+        super::retain_cert_allowed_cidrs(&mut cidrs, &allow);
+        assert_eq!(
+            cidrs,
+            vec!["10.1.2.0/24".to_string(), "10.0.0.0/8".to_string()]
+        );
+
+        // 空 allow（证书不授权任何代理）→ 全部裁掉。
+        let mut all = vec!["10.1.2.0/24".to_string()];
+        super::retain_cert_allowed_cidrs(&mut all, &[]);
+        assert!(all.is_empty());
+    }
+
     struct AuthOnlyInterface {
         my_peer_id: PeerId,
         identity_type: DashMap<PeerId, PeerIdentityType>,

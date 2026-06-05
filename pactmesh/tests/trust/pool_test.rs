@@ -119,6 +119,7 @@ fn test_verify_full_chain_happy() {
         not_before: 1_715_000_000,
         expires_at: 1_716_000_000,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: false,
             can_proxy_subnet: vec![IpNet::from_str("10.0.0.0/24").unwrap()],
@@ -157,6 +158,7 @@ fn test_verify_revoked_rejected() {
         not_before: 1_715_000_000,
         expires_at: 1_716_000_000,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: false,
             can_proxy_subnet: vec![IpNet::from_str("10.0.0.0/24").unwrap()],
@@ -201,6 +203,7 @@ fn test_verify_disabled_temporarily() {
         not_before: 1_715_000_000,
         expires_at: 1_716_000_000,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: false,
             can_proxy_subnet: vec![IpNet::from_str("10.0.0.0/24").unwrap()],
@@ -244,6 +247,7 @@ fn test_verify_disabled_recovered_after_expected() {
         not_before: 1_715_000_000,
         expires_at: 1_716_000_000,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: false,
             can_proxy_subnet: vec![IpNet::from_str("10.0.0.0/24").unwrap()],
@@ -308,6 +312,7 @@ fn sample_member_cert_for_root(root: &TrustDomainRoot) -> pactmesh::trust::membe
         not_before: 1_715_000_000,
         expires_at: 1_716_000_000,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: false,
             can_proxy_subnet: vec![IpNet::from_str("10.0.0.0/24").unwrap()],

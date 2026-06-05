@@ -277,6 +277,7 @@ fn test_bootstrap_self_rejects_mismatched_existing_cert_domain() {
         not_before: 1,
         expires_at: 100,
         capabilities: pactmesh::trust::Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: true,
             can_proxy_subnet: Vec::new(),

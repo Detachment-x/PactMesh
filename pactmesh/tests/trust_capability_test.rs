@@ -99,6 +99,7 @@ fn setup_network(
         not_before: 10,
         expires_at: 100,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: false,
             can_relay_control: false,
             can_proxy_subnet: Vec::new(),

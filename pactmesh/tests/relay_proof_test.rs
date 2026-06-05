@@ -59,6 +59,7 @@ fn sample_member_cert(root: &TrustDomainRoot, sk_self: &SignKey, device_label: &
         not_before: now.saturating_sub(60),
         expires_at: now + 3600,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: true,
             can_proxy_subnet: Vec::new(),
@@ -243,15 +244,19 @@ impl GlobalForeignNetworkAccessor for EmptyAccessor {
     }
 }
 
-fn relay_grants_for(tdid: pactmesh::trust::TrustDomainId) -> Arc<RelayGrantTable> {
-    Arc::new(RelayGrantTable::from_entries(vec![RelayGrantEntry {
-        foreign_root_pk: tdid,
-        capabilities: RelayCapabilities {
-            can_relay_data: true,
-            can_assist_holepunch: true,
-        },
-        expires_at: now_unix() + 3600,
-    }]))
+fn relay_grants_for(
+    tdid: pactmesh::trust::TrustDomainId,
+) -> Arc<arc_swap::ArcSwap<RelayGrantTable>> {
+    Arc::new(arc_swap::ArcSwap::from_pointee(
+        RelayGrantTable::from_entries(vec![RelayGrantEntry {
+            foreign_root_pk: tdid,
+            capabilities: RelayCapabilities {
+                can_relay_data: true,
+                can_assist_holepunch: true,
+            },
+            expires_at: now_unix() + 3600,
+        }]),
+    ))
 }
 
 #[test]
@@ -387,7 +392,7 @@ async fn test_foreign_network_manager_admits_borrowed_client() {
         Arc::new(PeerSessionStore::new()),
         tx,
         Box::new(EmptyAccessor),
-        Arc::new(RelayGrantTable::empty()),
+        Arc::new(arc_swap::ArcSwap::from_pointee(RelayGrantTable::empty())),
     );
     let err = denied_mgr.add_peer_conn(denied_conn).await.unwrap_err();
     let err_str = err.to_string();

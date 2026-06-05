@@ -52,10 +52,10 @@ async fn run_loop(tx: UnboundedSender<String>, mut path_rx: watch::Receiver<Opti
                 None => None,
             };
         }
-        if let Some(t) = tracker.as_mut() {
-            if let Err(e) = t.tick(&tx).await {
-                let _ = tx.send(format!("[log_tail] read err: {e:#}"));
-            }
+        if let Some(t) = tracker.as_mut()
+            && let Err(e) = t.tick(&tx).await
+        {
+            let _ = tx.send(format!("[log_tail] read err: {e:#}"));
         }
         tokio::select! {
             _ = tokio::time::sleep(POLL) => {}
@@ -148,10 +148,10 @@ fn inode_of(_: &std::path::Path) -> Option<u64> {
 
 /// 启动时按优先级解析 log file 路径。
 pub fn detect_initial_path() -> Option<PathBuf> {
-    if let Ok(v) = std::env::var("PNW_TUI_LOG_FILE") {
-        if !v.is_empty() {
-            return Some(PathBuf::from(v));
-        }
+    if let Ok(v) = std::env::var("PNW_TUI_LOG_FILE")
+        && !v.is_empty()
+    {
+        return Some(PathBuf::from(v));
     }
     None
 }

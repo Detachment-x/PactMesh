@@ -10,6 +10,7 @@ use std::{
     time::SystemTime,
 };
 
+use arc_swap::ArcSwap;
 use dashmap::{DashMap, DashSet};
 use tokio::{
     sync::{
@@ -710,7 +711,9 @@ pub struct ForeignNetworkManager {
     global_ctx: ArcGlobalCtx,
     peer_session_store: Arc<PeerSessionStore>,
     packet_sender_to_mgr: PacketRecvChan,
-    relay_grants: Arc<RelayGrantTable>,
+    /// 可热重载的中继授权表：TUI `:relay-grant` 经 PatchConfig 改 config 后
+    /// 由 peer_manager.reload_relay_grants() 原子换入，新连接即生效。
+    relay_grants: Arc<ArcSwap<RelayGrantTable>>,
 
     data: Arc<ForeignNetworkManagerData>,
 
@@ -740,7 +743,7 @@ impl ForeignNetworkManager {
         peer_session_store: Arc<PeerSessionStore>,
         packet_sender_to_mgr: PacketRecvChan,
         accessor: Box<dyn GlobalForeignNetworkAccessor>,
-        relay_grants: Arc<RelayGrantTable>,
+        relay_grants: Arc<ArcSwap<RelayGrantTable>>,
     ) -> Self {
         let data = Arc::new(ForeignNetworkManagerData {
             network_peer_maps: DashMap::new(),
@@ -787,21 +790,26 @@ impl ForeignNetworkManager {
             return ret;
         }
 
+        // 跨信任域借用：按 relay grant 判定。仅授 can_assist_holepunch 时接受连接但
+        // 不转发数据（relay_data=false 仍转发控制/RPC，holepunch 协调走 RPC 即可）；
+        // can_relay_data 才转发数据；两者皆无则拒绝。
+        let mut relay_data = ret.is_ok();
         if let Some(proof) = peer_conn.get_borrowed_proof() {
             let now_unix = SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock after epoch")
                 .as_secs();
-            if !self
-                .relay_grants
-                .permits_data_relay(&proof.trust_domain_id, now_unix)
-            {
+            let grants = self.relay_grants.load();
+            let data_ok = grants.permits_data_relay(&proof.trust_domain_id, now_unix);
+            let holepunch_ok = grants.permits_holepunch_assist(&proof.trust_domain_id, now_unix);
+            if !data_ok && !holepunch_ok {
                 return Err(anyhow::anyhow!(
-                    "borrowed_proof from trust_domain {} is not permitted for can_relay_data",
+                    "borrowed_proof from trust_domain {} has no relay grant (neither can_relay_data nor can_assist_holepunch)",
                     proof.trust_domain_id
                 )
                 .into());
             }
+            relay_data = relay_data && data_ok;
         }
 
         let (entry, new_added) = self
@@ -810,7 +818,7 @@ impl ForeignNetworkManager {
                 &peer_network,
                 peer_conn.get_my_peer_id(),
                 peer_conn.get_peer_id(),
-                ret.is_ok(),
+                relay_data,
                 &self.global_ctx,
                 self.peer_session_store.clone(),
                 &self.packet_sender_to_mgr,

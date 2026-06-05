@@ -87,6 +87,7 @@ fn make_member(root: &TrustDomainRoot, device_label: &str, expires_at: u64) -> M
         not_before: now.saturating_sub(60),
         expires_at,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: true,
             can_proxy_subnet: Vec::new(),

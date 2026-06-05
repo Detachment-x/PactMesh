@@ -59,6 +59,7 @@ fn sample_member_cert_for_network(
             can_relay_data: true,
             can_relay_control: true,
             can_proxy_subnet: Vec::new(),
+            can_be_exit_node: false,
         },
         network_state_version_ref: NETWORK_STATE_VERSION,
         hostname: None,

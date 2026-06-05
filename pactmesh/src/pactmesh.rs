@@ -139,6 +139,7 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 enum SubCommand {
     #[command(about = "show peers info")]
     Peer(PeerArgs),
@@ -4190,10 +4191,10 @@ fn handle_lab_remote_run(options: LabRemoteRunOptions) -> Result<(), Error> {
         Ok(())
     })();
 
-    if !options.keep_running {
-        if let Err(err) = remote_run_stop(&options) {
-            eprintln!("remote-run: cleanup failed: {err:#}");
-        }
+    if !options.keep_running
+        && let Err(err) = remote_run_stop(&options)
+    {
+        eprintln!("remote-run: cleanup failed: {err:#}");
     }
 
     result
@@ -4221,10 +4222,10 @@ fn handle_lab_remote_fresh_run(options: LabRemoteFreshRunOptions) -> Result<(), 
         Ok(())
     })();
 
-    if !options.keep_running {
-        if let Err(err) = remote_fresh_stop(&options) {
-            eprintln!("remote-fresh-run: cleanup failed: {err:#}");
-        }
+    if !options.keep_running
+        && let Err(err) = remote_fresh_stop(&options)
+    {
+        eprintln!("remote-fresh-run: cleanup failed: {err:#}");
     }
 
     result
@@ -5299,6 +5300,7 @@ fn ssh_capture(host: &str, command: &str) -> Result<String, Error> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_lab_member_toggle(
     handler: &CommandHandler<'_>,
     trust_domain_id: String,
@@ -7164,6 +7166,7 @@ fn unlock_domain_root(
     Ok(root)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_trust_disable(
     handler: Option<&CommandHandler<'_>>,
     trust_domain_id: String,
@@ -7220,12 +7223,12 @@ async fn handle_trust_disable(
     let next_state = sign_next_network_state(&original_state, &root);
     let new_version =
         write_pre_signed_network_state(&network_dir, old_version, original_pem, &next_state)?;
-    if let Some(handler) = handler {
-        if let Err(err) = handler.apply_network_state_to_daemon(&next_state).await {
-            eprintln!(
-                "warning: network_state written to disk but not hot-loaded into running daemon: {err:#}"
-            );
-        }
+    if let Some(handler) = handler
+        && let Err(err) = handler.apply_network_state_to_daemon(&next_state).await
+    {
+        eprintln!(
+            "warning: network_state written to disk but not hot-loaded into running daemon: {err:#}"
+        );
     }
 
     if json {
@@ -7282,12 +7285,12 @@ async fn handle_trust_enable(
     let next_state = sign_next_network_state(&original_state, &root);
     let new_version =
         write_pre_signed_network_state(&network_dir, old_version, original_pem, &next_state)?;
-    if let Some(handler) = handler {
-        if let Err(err) = handler.apply_network_state_to_daemon(&next_state).await {
-            eprintln!(
-                "warning: network_state written to disk but not hot-loaded into running daemon: {err:#}"
-            );
-        }
+    if let Some(handler) = handler
+        && let Err(err) = handler.apply_network_state_to_daemon(&next_state).await
+    {
+        eprintln!(
+            "warning: network_state written to disk but not hot-loaded into running daemon: {err:#}"
+        );
     }
 
     if json {
@@ -7827,6 +7830,7 @@ async fn handle_trust_approve(
             can_relay_data: false,
             can_relay_control: false,
             can_proxy_subnet: Vec::new(),
+            can_be_exit_node: false,
         },
         network_state_version_ref: state.details.version,
         hostname: None,
@@ -8346,6 +8350,7 @@ fn handle_trust_bootstrap_self(options: BootstrapSelfOptions) -> Result<(), Erro
                 can_relay_data: true,
                 can_relay_control: true,
                 can_proxy_subnet: Vec::new(),
+                can_be_exit_node: false,
             },
             network_state_version_ref: state.details.version.saturating_add(1),
             hostname: None,

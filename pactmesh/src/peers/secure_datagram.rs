@@ -234,6 +234,11 @@ pub struct SecureDatagramSession {
     root_key: RwLock<[u8; 32]>,
     session_generation: AtomicU32,
     kdf_context: Option<SecureDatagramKdfContext>,
+    /// 双方 Noise 静态公钥（规范排序）一次性绑定：把流量密钥锚定到真实
+    /// 加密身份，而非可伪造的 u32 peer_id。静态公钥在同一 peer 的所有
+    /// 链路/重连中恒定，故 set-once 不引入多链路换钥竞争（握手 transcript
+    /// hash 是 per-connection 的，绑入会破坏共享 session 的其它链路，故不绑）。
+    identity_binding: RwLock<Option<[u8; 64]>>,
 
     send_epoch: AtomicU32,
     send_seq: [AtomicU64; 2],
@@ -258,6 +263,7 @@ impl std::fmt::Debug for SecureDatagramSession {
             .field("root_key", &self.root_key)
             .field("session_generation", &self.session_generation)
             .field("kdf_context", &self.kdf_context)
+            .field("identity_binding", &self.identity_binding)
             .field("send_epoch", &self.send_epoch)
             .field("send_seq", &self.send_seq)
             .field("send_epoch_started_ms", &self.send_epoch_started_ms)
@@ -321,6 +327,7 @@ impl SecureDatagramSession {
             root_key: RwLock::new(root_key),
             session_generation: AtomicU32::new(session_generation),
             kdf_context,
+            identity_binding: RwLock::new(None),
             send_epoch: AtomicU32::new(initial_epoch),
             send_seq: [AtomicU64::new(0), AtomicU64::new(0)],
             send_epoch_started_ms: AtomicU64::new(now_ms),
@@ -350,6 +357,27 @@ impl SecureDatagramSession {
 
     pub fn root_key(&self) -> [u8; 32] {
         *self.root_key.read().unwrap()
+    }
+
+    /// 把双方 Noise 静态公钥（规范排序后 lo||hi）一次性绑入流量 KDF。
+    /// 握手完成后两端各自调用；同一 peer-pair 的静态身份恒定，故重复调用
+    /// 写入相同值，set-once 保证多链路/重连下绑定值稳定。非 32B 输入忽略。
+    pub fn set_identity_binding(&self, local_static_pubkey: &[u8], remote_static_pubkey: &[u8]) {
+        if local_static_pubkey.len() != 32 || remote_static_pubkey.len() != 32 {
+            return;
+        }
+        let (lo, hi) = if local_static_pubkey <= remote_static_pubkey {
+            (local_static_pubkey, remote_static_pubkey)
+        } else {
+            (remote_static_pubkey, local_static_pubkey)
+        };
+        let mut buf = [0u8; 64];
+        buf[..32].copy_from_slice(lo);
+        buf[32..].copy_from_slice(hi);
+        let mut guard = self.identity_binding.write().unwrap();
+        if guard.is_none() {
+            *guard = Some(buf);
+        }
     }
 
     pub fn new_root_key() -> [u8; 32] {
@@ -443,12 +471,16 @@ impl SecureDatagramSession {
         let prk = extract.finalize().into_bytes();
 
         let mut expand = HmacSha256::new_from_slice(&prk).unwrap();
-        expand.update(b"pactmesh secure datagram traffic v1");
+        expand.update(b"pactmesh secure datagram traffic v2");
         expand.update(&self.session_generation().to_be_bytes());
         expand.update(&epoch.to_be_bytes());
         expand.update(&[dir.idx() as u8]);
         if let Some(ctx) = &self.kdf_context {
             ctx.update_hmac(&mut expand);
+        }
+        if let Some(binding) = self.identity_binding.read().unwrap().as_ref() {
+            expand.update(b"id");
+            expand.update(binding);
         }
         expand.update(&[1u8]);
         let okm = expand.finalize().into_bytes();
@@ -1064,5 +1096,58 @@ mod tests {
         s.sync_root_key(SecureDatagramSession::new_root_key(), 2, 2, true);
         assert!(s.check_replay_for_test(2, 0, SecureDatagramDirection::AToB, now + 2));
         assert!(!s.check_replay_for_test(1, 1, SecureDatagramDirection::AToB, now + 3));
+    }
+
+    fn session_for_binding() -> SecureDatagramSession {
+        SecureDatagramSession::new(
+            [7u8; 32],
+            1,
+            0,
+            "aes-256-gcm".to_string(),
+            "aes-256-gcm".to_string(),
+        )
+    }
+
+    #[test]
+    fn identity_binding_changes_traffic_key_and_is_order_independent_and_set_once() {
+        let pk_a = [0x11u8; 32];
+        let pk_b = [0x22u8; 32];
+
+        let unbound = session_for_binding();
+        let base = unbound.hkdf_traffic_key(0, SecureDatagramDirection::AToB);
+
+        // 绑定后派生密钥不同于未绑定。
+        let bound = session_for_binding();
+        bound.set_identity_binding(&pk_a, &pk_b);
+        let k_bound = bound.hkdf_traffic_key(0, SecureDatagramDirection::AToB);
+        assert_ne!(base, k_bound);
+
+        // 规范排序：两端各以本地视角传入，绑定值一致 → 密钥相同。
+        let reversed = session_for_binding();
+        reversed.set_identity_binding(&pk_b, &pk_a);
+        assert_eq!(
+            k_bound,
+            reversed.hkdf_traffic_key(0, SecureDatagramDirection::AToB)
+        );
+
+        // 不同 peer-pair → 不同密钥。
+        let other = session_for_binding();
+        other.set_identity_binding(&pk_a, &[0x33u8; 32]);
+        assert_ne!(
+            k_bound,
+            other.hkdf_traffic_key(0, SecureDatagramDirection::AToB)
+        );
+
+        // set-once：首次绑定后再次写入被忽略。
+        bound.set_identity_binding(&pk_a, &[0x33u8; 32]);
+        assert_eq!(
+            k_bound,
+            bound.hkdf_traffic_key(0, SecureDatagramDirection::AToB)
+        );
+
+        // 非 32B 输入被忽略。
+        let bad = session_for_binding();
+        bad.set_identity_binding(&[0u8; 16], &pk_b);
+        assert_eq!(base, bad.hkdf_traffic_key(0, SecureDatagramDirection::AToB));
     }
 }

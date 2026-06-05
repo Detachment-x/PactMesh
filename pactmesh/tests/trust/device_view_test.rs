@@ -20,6 +20,7 @@ fn member_cert(root: &TrustDomainRoot, network_id: &str) -> pactmesh::trust::Mem
         not_before: 10,
         expires_at: 1000,
         capabilities: Capabilities {
+            can_be_exit_node: false,
             can_relay_data: true,
             can_relay_control: false,
             can_proxy_subnet: vec![IpNet::from_str("10.1.0.0/24").unwrap()],

@@ -25,6 +25,7 @@ fn cert_with_capabilities(capabilities: Capabilities) -> (TrustDomainRoot, Membe
 
 fn basic_capabilities() -> Capabilities {
     Capabilities {
+        can_be_exit_node: false,
         can_relay_data: true,
         can_relay_control: true,
         can_proxy_subnet: Vec::new(),
@@ -71,6 +72,7 @@ fn test_round_trip_with_d5_empty_device_pk() {
 fn test_round_trip_with_capabilities() {
     let subnet: IpNetwork = "10.10.0.0/16".parse().unwrap();
     let capabilities = Capabilities {
+        can_be_exit_node: false,
         can_relay_data: false,
         can_relay_control: true,
         can_proxy_subnet: vec![subnet],

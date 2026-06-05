@@ -13,7 +13,9 @@ use tokio::sync::Mutex;
 
 use crate::common::config_dir::pnw_trust_domains_dir;
 use crate::proto::api::config::{
-    ApproveJoinRequestRequest, TrustJoinManageRpc, TrustJoinManageRpcClientFactory,
+    ApproveJoinRequestRequest, ArmRootUpgradeAcceptanceRequest, ConfigPatchAction, ConfigRpc,
+    ConfigRpcClientFactory, InstanceConfigPatch, PatchConfigRequest, RelayServingPatch,
+    TrustJoinManageRpc, TrustJoinManageRpcClientFactory,
 };
 use crate::proto::api::instance::InstanceIdentifier;
 use crate::proto::rpc_impl::standalone::StandAloneClient;
@@ -76,6 +78,7 @@ pub async fn approve_join(
             can_relay_data: false,
             can_relay_control: false,
             can_proxy_subnet: Vec::new(),
+            can_be_exit_node: false,
         },
         network_state_version_ref: state.details.version,
         hostname: None,
@@ -150,6 +153,85 @@ pub async fn approve_join(
         short_fp,
         network_state_version: new_version,
         device_label,
+    })
+}
+
+/// 预授权一次性 root 升级接受：把口令 + TTL 提交给本地 daemon 武装令牌，返回实际 TTL。
+pub async fn arm_root_upgrade(
+    rpc: &std::sync::Arc<Mutex<StandAloneClient<TcpTunnelConnector>>>,
+    instance: &InstanceIdentifier,
+    passphrase: &str,
+    ttl_secs: u32,
+) -> Result<u32> {
+    let client = {
+        let mut g = rpc.lock().await;
+        g.scoped_client::<TrustJoinManageRpcClientFactory<BaseController>>(String::new())
+            .await
+            .context("creating trust join manage rpc client")?
+    };
+    let resp = client
+        .arm_root_upgrade_acceptance(
+            BaseController::default(),
+            ArmRootUpgradeAcceptanceRequest {
+                instance: Some(instance.clone()),
+                passphrase: passphrase.to_string(),
+                ttl_secs,
+            },
+        )
+        .await
+        .context("daemon refused to arm root-upgrade acceptance")?;
+    Ok(resp.ttl_secs)
+}
+
+/// 运行时增删跨信任域中继授权：经 PatchConfig 改 config.relay_serving，daemon 热重载授权表。
+#[allow(clippy::too_many_arguments)]
+pub async fn relay_grant(
+    rpc: &std::sync::Arc<Mutex<StandAloneClient<TcpTunnelConnector>>>,
+    instance: &InstanceIdentifier,
+    foreign_td_hex: &str,
+    remove: bool,
+    can_relay_data: bool,
+    can_assist_holepunch: bool,
+    ttl_secs: u64,
+) -> Result<String> {
+    let action = if remove {
+        ConfigPatchAction::Remove
+    } else {
+        ConfigPatchAction::Add
+    };
+    let patch = InstanceConfigPatch {
+        relay_serving: vec![RelayServingPatch {
+            action: action as i32,
+            foreign_root_pk_hex: foreign_td_hex.to_owned(),
+            can_relay_data,
+            can_assist_holepunch,
+            expires_at: now_unix_secs().saturating_add(ttl_secs),
+        }],
+        ..Default::default()
+    };
+    let client = {
+        let mut g = rpc.lock().await;
+        g.scoped_client::<ConfigRpcClientFactory<BaseController>>(String::new())
+            .await
+            .context("creating config rpc client")?
+    };
+    client
+        .patch_config(
+            BaseController::default(),
+            PatchConfigRequest {
+                patch: Some(patch),
+                instance: Some(instance.clone()),
+                network_state_cbor: None,
+            },
+        )
+        .await
+        .context("daemon refused relay-grant patch")?;
+    Ok(if remove {
+        format!("relay grant removed for {foreign_td_hex}")
+    } else {
+        format!(
+            "relay grant set for {foreign_td_hex} (data={can_relay_data}, holepunch={can_assist_holepunch}, ttl={ttl_secs}s)"
+        )
     })
 }
 
