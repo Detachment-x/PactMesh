@@ -1,6 +1,5 @@
 use std::{
     net::Ipv4Addr,
-    ops::{Div, Mul},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -40,21 +39,51 @@ use super::common::{PunchHoleServerCommon, UdpNatType, UdpSocketArray};
 const UDP_ARRAY_SIZE_FOR_HARD_SYM: usize = 84;
 const MAX_EASY_SYM_MAPPING_PROBES: usize = 32;
 const EASY_SYM_MAPPING_TIMEOUT_MS: u64 = 2500;
+const PUNCH_RESULT_GRACE_MS: u128 = 2000;
 
 // ZeroTier-parity stable-socket punch: only attempted when our NAT keeps a
 // near-stable per-destination mapping (observed STUN port spread within this
 // bound), so one reused socket's mapped port is enough for the peer to target.
 const STABLE_PUNCH_SPREAD_MAX: u32 = 64;
-// Width of the tight band the cone peer sprays around our exact mapped port; it
-// only has to absorb the small per-destination jitter, not a 4k guess window.
-const STABLE_PUNCH_WINDOW: u32 = 256;
-const STABLE_PUNCH_WAIT_MS: u128 = 2000;
+// Use a wider centered spray than the STUN-observed spread: some symmetric NATs
+// shift the mapped port further when the destination changes from STUN to peer.
+const STABLE_PUNCH_WINDOW: u32 = 4096;
+const STABLE_PUNCH_WAIT_MS: u128 = 3000;
+
+const HARD_SYM_RANDOM_PASSES: usize = 2;
+const HARD_SYM_RANDOM_PORTS_PER_PASS_MIN: u32 = 2048;
+const HARD_SYM_RANDOM_PORTS_PER_PASS_MAX: u32 = 3072;
 
 fn easy_sym_predict_window(observed_span: u32) -> u32 {
     observed_span
         .saturating_add((UDP_ARRAY_SIZE_FOR_HARD_SYM as u32) * 16)
         .saturating_add(512)
         .clamp(1024, 4096)
+}
+
+fn port_range_to_vec(start: u32, end: u32) -> Vec<u16> {
+    let start = start.max(1);
+    let end = end.min(u16::MAX as u32);
+    if end < start {
+        return Vec::new();
+    }
+
+    (start..=end).map(|port| port as u16).collect()
+}
+
+fn easy_sym_target_ports(base_port_num: u32, max_port_num: u32, is_incremental: bool) -> Vec<u16> {
+    let max_port_num = max_port_num.max(1);
+    if is_incremental {
+        port_range_to_vec(
+            base_port_num.saturating_add(1),
+            base_port_num.saturating_add(max_port_num),
+        )
+    } else {
+        port_range_to_vec(
+            base_port_num.saturating_sub(max_port_num),
+            base_port_num.saturating_sub(1),
+        )
+    }
 }
 
 pub(crate) struct PunchSymToConeHoleServer {
@@ -111,25 +140,13 @@ impl PunchSymToConeHoleServer {
         let max_port_num = request.max_port_num.max(1);
         let is_incremental = request.is_incremental;
 
-        let port_start = if is_incremental {
-            base_port_num.saturating_add(1)
-        } else {
-            base_port_num.saturating_sub(max_port_num)
-        };
-
-        let port_end = if is_incremental {
-            base_port_num.saturating_add(max_port_num)
-        } else {
-            base_port_num.saturating_sub(1)
-        };
-
-        if port_end <= port_start {
+        let ports = easy_sym_target_ports(base_port_num, max_port_num, is_incremental);
+        if ports.is_empty() {
             return Err(anyhow::anyhow!("send_punch_packet_easy_sym invalid port range").into());
         }
 
-        let ports = (port_start..=port_end)
-            .map(|x| x as u16)
-            .collect::<Vec<_>>();
+        let port_start = ports.first().copied().unwrap();
+        let port_end = ports.last().copied().unwrap();
         tracing::debug!(
             port_start,
             port_end,
@@ -189,23 +206,25 @@ impl PunchSymToConeHoleServer {
 
         let round = std::cmp::max(request.round, 1);
 
-        // send max k1 packets if we are predicting the dst port
-        let max_k1: u32 = 180;
-        // send max k2 packets if we are sending to random port
-        let mut max_k2: u32 = rand::thread_rng().gen_range(600..800);
-        if round > 2 {
-            max_k2 = max_k2.mul(2).div(round).max(max_k1);
-        }
+        let ports_per_pass = rand::thread_rng()
+            .gen_range(HARD_SYM_RANDOM_PORTS_PER_PASS_MIN..=HARD_SYM_RANDOM_PORTS_PER_PASS_MAX);
 
-        let mut next_port_index = 0;
-        for _ in 0..2 {
+        let mut next_port_index = last_port_index;
+        for pass in 0..HARD_SYM_RANDOM_PASSES {
+            tracing::debug!(
+                pass,
+                round,
+                port_start_idx = next_port_index,
+                ports_per_pass,
+                "send hard symmetric random port pass"
+            );
             next_port_index = send_symmetric_hole_punch_packet(
                 &self.shuffled_port_vec,
                 listener.clone(),
                 transaction_id,
                 &public_ips,
-                last_port_index,
-                max_k2 as usize,
+                next_port_index,
+                ports_per_pass as usize,
             )
             .await
             .with_context(|| "failed to send symmetric hole punch packet randomly")?;
@@ -545,7 +564,9 @@ impl PunchSymToConeHoleClient {
         // no matter what the result is, we should check if we received any hole punching packet
         let mut ret_tunnel: Option<Box<dyn Tunnel>> = None;
         let mut finish_time: Option<Instant> = None;
-        while finish_time.is_none() || finish_time.as_ref().unwrap().elapsed().as_millis() < 1000 {
+        while finish_time.is_none()
+            || finish_time.as_ref().unwrap().elapsed().as_millis() < PUNCH_RESULT_GRACE_MS
+        {
             udp_array
                 .send_with_all(packet, remote_mapped_addr.into())
                 .await?;
@@ -716,6 +737,11 @@ impl PunchSymToConeHoleClient {
             }
         }
 
+        if !self.punch_randomly.load(Ordering::Relaxed) {
+            tracing::debug!("skip random symmetric punch because punch_randomly=false");
+            return Ok(None);
+        }
+
         let rpc_stub = self.get_rpc_stub(dst_peer_id).await;
         let punch_task =
             AbortOnDropHandle::new(tokio::spawn(Self::remote_send_hole_punch_packet_random(
@@ -773,6 +799,24 @@ pub mod tests {
         assert_eq!(super::easy_sym_predict_window(53), 1909);
         assert_eq!(super::easy_sym_predict_window(554), 2410);
         assert_eq!(super::easy_sym_predict_window(10_000), 4096);
+    }
+
+    #[test]
+    fn easy_sym_target_ports_clamp_without_wrapping() {
+        let ports = super::easy_sym_target_ports(32_335, 256, true);
+        assert_eq!(ports.first().copied(), Some(32_336));
+        assert_eq!(ports.last().copied(), Some(32_591));
+        assert_eq!(ports.len(), 256);
+
+        let ports = super::easy_sym_target_ports(65_000, 4096, true);
+        assert_eq!(ports.first().copied(), Some(65_001));
+        assert_eq!(ports.last().copied(), Some(u16::MAX));
+        assert!(!ports.contains(&0));
+
+        let ports = super::easy_sym_target_ports(100, 4096, false);
+        assert_eq!(ports.first().copied(), Some(1));
+        assert_eq!(ports.last().copied(), Some(99));
+        assert!(!ports.contains(&0));
     }
 
     #[tokio::test]
