@@ -39,6 +39,8 @@ use crate::{
 };
 
 pub const UDP_DATA_MTU: usize = 2000;
+const HOLE_PUNCH_ECHO_SUPPRESS_MS: u128 = 3000;
+const MAX_HOLE_PUNCH_ECHO_CACHE_ENTRIES: usize = 4096;
 
 type UdpCloseEventSender = UnboundedSender<(SocketAddr, Option<TunnelError>)>;
 type UdpCloseEventReceiver = UnboundedReceiver<(SocketAddr, Option<TunnelError>)>;
@@ -395,6 +397,7 @@ struct UdpTunnelListenerData {
     local_url: url::Url,
     socket: Option<Arc<UdpSocket>>,
     sock_map: Arc<DashMap<SocketAddr, UdpConnection>>,
+    hole_punch_echo_cache: Arc<DashMap<(SocketAddr, u32), std::time::Instant>>,
     conn_send: Sender<Box<dyn Tunnel>>,
     close_event_sender: UdpCloseEventSender,
 }
@@ -409,6 +412,7 @@ impl UdpTunnelListenerData {
             local_url,
             socket: None,
             sock_map: Arc::new(DashMap::new()),
+            hole_punch_echo_cache: Arc::new(DashMap::new()),
             conn_send,
             close_event_sender,
         }
@@ -476,6 +480,54 @@ impl UdpTunnelListenerData {
         }
     }
 
+    fn should_echo_hole_punch(&self, addr: SocketAddr, tid: u32) -> bool {
+        if addr.ip().is_unspecified() || addr.ip().is_multicast() {
+            return false;
+        }
+
+        let now = std::time::Instant::now();
+        if self.hole_punch_echo_cache.len() > MAX_HOLE_PUNCH_ECHO_CACHE_ENTRIES {
+            self.hole_punch_echo_cache.clear();
+        }
+
+        let key = (addr, tid);
+        if let Some(mut last_echo) = self.hole_punch_echo_cache.get_mut(&key) {
+            if last_echo.elapsed().as_millis() < HOLE_PUNCH_ECHO_SUPPRESS_MS {
+                return false;
+            }
+            *last_echo = now;
+            return true;
+        }
+
+        self.hole_punch_echo_cache.insert(key, now);
+        true
+    }
+
+    async fn echo_hole_punch(&self, zc_packet: &ZCPacket, addr: SocketAddr, tid: u32) {
+        if !self.should_echo_hole_punch(addr, tid) {
+            tracing::trace!(?addr, ?tid, "udp forward packet suppress hole punch echo");
+            return;
+        }
+
+        let socket = self.socket.as_ref().unwrap().clone();
+        let packet = zc_packet.clone().inner().to_vec();
+        tokio::spawn(async move {
+            match socket.send_to(&packet, addr).await {
+                Ok(ret) => {
+                    tracing::debug!(
+                        ?addr,
+                        ?tid,
+                        ?ret,
+                        "udp forward packet echo hole punch packet"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(?e, ?addr, ?tid, "udp echo hole punch packet error");
+                }
+            }
+        });
+    }
+
     async fn do_forward_one_packet_to_conn(&self, zc_packet: ZCPacket, addr: SocketAddr) {
         let header = zc_packet.udp_tunnel_header().unwrap();
         if header.msg_type == UdpPacketType::Syn as u8 {
@@ -540,7 +592,8 @@ impl UdpTunnelListenerData {
                 tracing::trace!(?e, "udp forward packet error");
             }
         } else {
-            tracing::trace!(?header, "udp forward packet ignore hole punch packet");
+            let tid = header.conn_id.get();
+            self.echo_hole_punch(&zc_packet, addr, tid).await;
         }
     }
 
@@ -1241,5 +1294,36 @@ mod tests {
             .await
             .expect("Timeout waiting for v4 hole punch packet")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_listener_echoes_plain_hole_punch_packet() {
+        let mut lis = UdpTunnelListener::new("udp://127.0.0.1:0".parse().unwrap());
+        lis.listen().await.unwrap();
+
+        let tid = 0x1234_abcd;
+        let packet = new_hole_punch_packet(tid, 16).into_bytes();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket
+            .send_to(&packet, ("127.0.0.1", lis.local_url().port().unwrap()))
+            .await
+            .unwrap();
+
+        let mut buf = BytesMut::new();
+        buf.reserve(UDP_DATA_MTU);
+        let (len, addr) = tokio::time::timeout(
+            tokio::time::Duration::from_secs(2),
+            socket.recv_buf_from(&mut buf),
+        )
+        .await
+        .expect("Timeout waiting for echoed hole punch packet")
+        .unwrap();
+
+        assert_eq!(addr.port(), lis.local_url().port().unwrap());
+        assert_eq!(len, UDP_TUNNEL_HEADER_SIZE + 16);
+        let packet = get_zcpacket_from_buf(buf.split(), false).unwrap();
+        let header = packet.udp_tunnel_header().unwrap();
+        assert_eq!(header.msg_type, UdpPacketType::HolePunch as u8);
+        assert_eq!(header.conn_id.get(), tid);
     }
 }
