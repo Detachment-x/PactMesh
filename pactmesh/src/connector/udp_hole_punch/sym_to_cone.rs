@@ -131,7 +131,9 @@ impl PunchSymToConeHoleServer {
             .map(|x| x as u16)
             .collect::<Vec<_>>();
         tracing::debug!(
-            ?ports,
+            port_start,
+            port_end,
+            port_count = ports.len(),
             ?public_ips,
             "send_punch_packet_easy_sym send to ports"
         );
@@ -306,7 +308,7 @@ impl PunchSymToConeHoleClient {
             if let Err(e) = rpc_stub
                 .send_punch_packet_easy_sym(
                     BaseController {
-                        timeout_ms: 4000,
+                        timeout_ms: 8000,
                         trace_id: 0,
                         ..Default::default()
                     },
@@ -498,7 +500,7 @@ impl PunchSymToConeHoleClient {
         match rpc_stub
             .send_punch_packet_hard_sym(
                 BaseController {
-                    timeout_ms: 4000,
+                    timeout_ms: 12000,
                     trace_id: 0,
                     ..Default::default()
                 },

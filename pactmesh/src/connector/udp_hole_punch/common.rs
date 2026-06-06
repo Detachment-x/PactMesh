@@ -697,7 +697,7 @@ fn should_retry_public_listener_selection(
     !force_new_listener && current_listener_count < MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS
 }
 
-#[tracing::instrument(err, ret(level=Level::DEBUG))]
+#[tracing::instrument(err, ret(level = Level::DEBUG), skip(ports, udp, public_ips))]
 pub(crate) async fn send_symmetric_hole_punch_packet(
     ports: &[u16],
     udp: Arc<UdpSocket>,
@@ -720,7 +720,9 @@ pub(crate) async fn send_symmetric_hole_punch_packet(
             sent_packets += 1;
         }
         cur_port_idx = cur_port_idx.wrapping_add(1);
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        if sent_packets % 64 == 0 {
+            tokio::task::yield_now().await;
+        }
     }
     Ok(cur_port_idx % ports.len())
 }

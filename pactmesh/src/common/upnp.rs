@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::Arc,
     time::Duration,
 };
@@ -70,6 +70,7 @@ struct ActiveUdpPortMapping {
     local_listener: url::Url,
     local_addr: SocketAddr,
     gateway_external_port: u16,
+    gateway_external_ip: Option<IpAddr>,
 }
 
 impl ActiveUdpPortMapping {
@@ -94,12 +95,25 @@ impl ActiveUdpPortMapping {
                 .with_context(|| {
                     format!("map udp socket for {local_listener} via nat-pmp gateway {gateway}")
                 })?;
+        let gateway_external_ip = match get_nat_pmp_external_ip(gateway).await {
+            Ok(ip) => Some(IpAddr::V4(ip)),
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    %local_listener,
+                    gateway = %gateway,
+                    "failed to get nat-pmp gateway external ip"
+                );
+                None
+            }
+        };
 
         Ok(Self {
             backend: PortMappingBackend::NatPmp { gateway },
             local_listener: local_listener.clone(),
             local_addr,
             gateway_external_port,
+            gateway_external_ip,
         })
     }
 
@@ -133,12 +147,25 @@ impl ActiveUdpPortMapping {
                     gateway.addr
                 )
             })?;
+        let gateway_external_ip = match gateway.get_external_ip().await {
+            Ok(ip) => Some(ip),
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    %local_listener,
+                    gateway = %gateway.addr,
+                    "failed to get igd gateway external ip"
+                );
+                None
+            }
+        };
 
         Ok(Self {
             backend: PortMappingBackend::Igd { gateway },
             local_listener: local_listener.clone(),
             local_addr,
             gateway_external_port,
+            gateway_external_ip,
         })
     }
 
@@ -191,6 +218,7 @@ impl ActiveUdpPortMapping {
 pub struct UdpPortMappingLease {
     backend: &'static str,
     gateway_external_port: u16,
+    gateway_external_ip: Option<IpAddr>,
     stop_tx: Option<oneshot::Sender<()>>,
 }
 
@@ -202,6 +230,10 @@ impl UdpPortMappingLease {
     pub fn gateway_external_port(&self) -> u16 {
         self.gateway_external_port
     }
+
+    pub fn gateway_external_ip(&self) -> Option<IpAddr> {
+        self.gateway_external_ip
+    }
 }
 
 impl fmt::Debug for UdpPortMappingLease {
@@ -209,6 +241,7 @@ impl fmt::Debug for UdpPortMappingLease {
         f.debug_struct("UdpPortMappingLease")
             .field("backend", &self.backend)
             .field("gateway_external_port", &self.gateway_external_port)
+            .field("gateway_external_ip", &self.gateway_external_ip)
             .finish()
     }
 }
@@ -238,36 +271,73 @@ pub async fn resolve_udp_public_addr(
         }
     };
 
-    let mapped_addr = global_ctx
+    let stun_mapped_addr = global_ctx
         .get_stun_info_collector()
         .get_udp_port_mapping_with_socket(socket)
         .await
         .map_err(anyhow::Error::from)
         .with_context(|| format!("resolve udp public addr for {local_listener}"))?;
 
-    if let Some(port_mapping) = port_mapping.as_ref() {
-        let mapped_listener = build_url_from_socket_addr(&mapped_addr.to_string(), "udp");
-        global_ctx.issue_event(GlobalCtxEvent::ListenerPortMappingEstablished {
-            local_listener: local_listener.clone(),
-            mapped_listener,
-            backend: port_mapping.backend().to_string(),
-        });
-        tracing::info!(
-            %local_listener,
-            backend = port_mapping.backend(),
-            gateway_external_port = port_mapping.gateway_external_port(),
-            stun_mapped_addr = %mapped_addr,
-            "udp public addr resolved after port mapping"
-        );
+    let mut port_mapping = port_mapping;
+    let mapped_addr = if let Some(port_mapping_ref) = port_mapping.as_ref() {
+        let backend = port_mapping_ref.backend();
+        let gateway_external_port = port_mapping_ref.gateway_external_port();
+        let gateway_external_ip = port_mapping_ref.gateway_external_ip();
+        if let Some(mapped_addr) = udp_port_mapping_public_addr(stun_mapped_addr, port_mapping_ref)
+        {
+            let mapped_listener = build_url_from_socket_addr(&mapped_addr.to_string(), "udp");
+            global_ctx.issue_event(GlobalCtxEvent::ListenerPortMappingEstablished {
+                local_listener: local_listener.clone(),
+                mapped_listener,
+                backend: backend.to_string(),
+            });
+            tracing::info!(
+                %local_listener,
+                backend,
+                gateway_external_port,
+                ?gateway_external_ip,
+                stun_mapped_addr = %stun_mapped_addr,
+                public_mapped_addr = %mapped_addr,
+                "udp public addr resolved after verified port mapping"
+            );
+            mapped_addr
+        } else {
+            tracing::warn!(
+                %local_listener,
+                backend,
+                gateway_external_port,
+                ?gateway_external_ip,
+                stun_mapped_addr = %stun_mapped_addr,
+                "udp port mapping external ip did not match stun public ip; falling back to stun-only public addr"
+            );
+            port_mapping = None;
+            stun_mapped_addr
+        }
     } else {
         tracing::debug!(
             %local_listener,
-            stun_mapped_addr = %mapped_addr,
+            stun_mapped_addr = %stun_mapped_addr,
             "udp public addr resolved without port mapping"
         );
-    }
+        stun_mapped_addr
+    };
 
     Ok((mapped_addr, port_mapping))
+}
+
+fn udp_port_mapping_public_addr(
+    stun_mapped_addr: SocketAddr,
+    port_mapping: &UdpPortMappingLease,
+) -> Option<SocketAddr> {
+    let gateway_external_ip = port_mapping.gateway_external_ip()?;
+    if gateway_external_ip != stun_mapped_addr.ip() {
+        return None;
+    }
+
+    Some(SocketAddr::new(
+        gateway_external_ip,
+        port_mapping.gateway_external_port(),
+    ))
 }
 
 async fn try_start_udp_port_mapping(
@@ -287,11 +357,13 @@ async fn try_start_udp_port_mapping(
         backend = mapping.backend_name(),
         local_addr = %mapping.local_addr,
         gateway_external_port = mapping.gateway_external_port,
+        gateway_external_ip = ?mapping.gateway_external_ip,
         "udp port mapping established"
     );
 
     let backend = mapping.backend_name();
     let gateway_external_port = mapping.gateway_external_port;
+    let gateway_external_ip = mapping.gateway_external_ip;
     let runtime_global_ctx = global_ctx.clone();
     let runtime_local_listener = local_listener.clone();
     let (stop_tx, stop_rx) = oneshot::channel();
@@ -329,6 +401,7 @@ async fn try_start_udp_port_mapping(
     Ok(Some(UdpPortMappingLease {
         backend,
         gateway_external_port,
+        gateway_external_ip,
         stop_tx: Some(stop_tx),
     }))
 }
@@ -613,6 +686,29 @@ async fn add_udp_mapping_port_nat_pmp(
     }
 }
 
+async fn get_nat_pmp_external_ip(gateway: Ipv4Addr) -> anyhow::Result<Ipv4Addr> {
+    let mut client = new_tokio_natpmp_with(gateway)
+        .await
+        .with_context(|| format!("create nat-pmp client for gateway {gateway}"))?;
+    client
+        .send_public_address_request()
+        .await
+        .with_context(|| format!("send nat-pmp public address request gateway={gateway}"))?;
+
+    let response = tokio::time::timeout(NAT_PMP_RESPONSE_TIMEOUT, client.read_response_or_retry())
+        .await
+        .with_context(|| format!("wait nat-pmp public address response gateway={gateway}"))?
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("read nat-pmp public address response gateway={gateway}"))?;
+
+    match response {
+        NatPmpResponse::Gateway(gateway) => Ok(*gateway.public_address()),
+        NatPmpResponse::UDP(_) | NatPmpResponse::TCP(_) => {
+            bail!("unexpected nat-pmp mapping response for public address request")
+        }
+    }
+}
+
 async fn request_nat_pmp_mapping(
     gateway: Ipv4Addr,
     private_port: u16,
@@ -765,6 +861,32 @@ async fn remove_udp_mapping_igd(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn udp_port_mapping_public_addr_requires_matching_gateway_external_ip() {
+        let stun_mapped_addr = "203.0.113.7:34656".parse().unwrap();
+        let port_mapping = super::UdpPortMappingLease {
+            backend: super::PORT_MAPPING_BACKEND_IGD,
+            gateway_external_port: 35729,
+            gateway_external_ip: Some("203.0.113.7".parse().unwrap()),
+            stop_tx: None,
+        };
+
+        let public_addr = super::udp_port_mapping_public_addr(stun_mapped_addr, &port_mapping);
+
+        assert_eq!(public_addr, Some("203.0.113.7:35729".parse().unwrap()));
+
+        let mismatched = super::UdpPortMappingLease {
+            backend: super::PORT_MAPPING_BACKEND_IGD,
+            gateway_external_port: 35729,
+            gateway_external_ip: Some("198.51.100.9".parse().unwrap()),
+            stop_tx: None,
+        };
+        assert_eq!(
+            super::udp_port_mapping_public_addr(stun_mapped_addr, &mismatched),
+            None
+        );
+    }
+
     #[test]
     fn udp_mapping_requires_private_or_unspecified_ipv4_listener() {
         assert!(super::should_map_udp_listener(

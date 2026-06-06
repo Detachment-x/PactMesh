@@ -4815,11 +4815,19 @@ fn remote_fresh_wait_for_peers(
     options: &LabRemoteFreshRunOptions,
     _root: &FreshRootSetup,
 ) -> Result<(), Error> {
-    println!(
-        "remote-fresh-run: waiting up to {}s for peer visibility",
-        options.wait_secs
-    );
+    if options.require_bc_direct {
+        println!(
+            "remote-fresh-run: waiting up to {}s for peer visibility and B/C direct route",
+            options.wait_secs
+        );
+    } else {
+        println!(
+            "remote-fresh-run: waiting up to {}s for peer visibility",
+            options.wait_secs
+        );
+    }
     let deadline = std::time::Instant::now() + Duration::from_secs(options.wait_secs);
+    let mut last_direct_error: Option<String> = None;
     loop {
         let b =
             remote_run_collect_linux("B", None, &options.b_bin_dir, options.b_rpc, &options.b_log)?;
@@ -4835,19 +4843,47 @@ fn remote_fresh_wait_for_peers(
         let c_direct = remote_run_assert_direct_quiet("C", &c.peer_json, "user")
             .or_else(|_| remote_run_assert_direct_quiet("C", &c.peer_json, "node-b"));
         if b_sees_c && c_sees_b {
-            println!("\n== B ==\n{}", trim_remote_output(&last_b, 4000));
-            println!("\n== C ==\n{}", trim_remote_output(&last_c, 4000));
             if options.require_bc_direct {
-                b_direct?;
-                c_direct?;
+                if b_direct.is_ok() && c_direct.is_ok() {
+                    println!("\n== B ==\n{}", trim_remote_output(&last_b, 4000));
+                    println!("\n== C ==\n{}", trim_remote_output(&last_c, 4000));
+                    return Ok(());
+                }
+                last_direct_error = Some(format!(
+                    "B direct: {}; C direct: {}",
+                    b_direct
+                        .as_ref()
+                        .map(|_| "ok".to_owned())
+                        .unwrap_or_else(|err| err.to_string()),
+                    c_direct
+                        .as_ref()
+                        .map(|_| "ok".to_owned())
+                        .unwrap_or_else(|err| err.to_string())
+                ));
             } else if b_direct.is_err() || c_direct.is_err() {
+                println!("\n== B ==\n{}", trim_remote_output(&last_b, 4000));
+                println!("\n== C ==\n{}", trim_remote_output(&last_c, 4000));
                 println!(
                     "remote-fresh-run: B/C visible but not direct; continuing because --require-bc-direct=false"
                 );
+                return Ok(());
+            } else {
+                println!("\n== B ==\n{}", trim_remote_output(&last_b, 4000));
+                println!("\n== C ==\n{}", trim_remote_output(&last_c, 4000));
+                return Ok(());
             }
-            return Ok(());
         }
+
         if std::time::Instant::now() >= deadline {
+            if options.require_bc_direct && b_sees_c && c_sees_b {
+                anyhow::bail!(
+                    "timed out waiting for B/C direct route\nlast direct check: {}\nlast B:\n{}\nlast C:\n{}",
+                    last_direct_error
+                        .unwrap_or_else(|| "B/C direct route was not established".to_owned()),
+                    trim_remote_output(&last_b, 4000),
+                    trim_remote_output(&last_c, 4000)
+                );
+            }
             anyhow::bail!(
                 "timed out waiting for B/C peer visibility\nlast B:\n{}\nlast C:\n{}",
                 trim_remote_output(&last_b, 4000),
