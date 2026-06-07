@@ -420,12 +420,16 @@ impl PeerTaskLauncher for UdpHolePunchPeerTaskLauncher {
     }
 
     async fn collect_peers_need_task(&self, data: &Self::Data) -> Vec<Self::CollectPeerItem> {
-        let my_nat_type = data
+        let my_stun_info = data
             .peer_mgr
             .get_global_ctx()
             .get_stun_info_collector()
-            .get_stun_info()
-            .udp_nat_type;
+            .get_stun_info();
+        let my_nat_type = if my_stun_info.udp_nat_type_confident {
+            my_stun_info.udp_nat_type
+        } else {
+            NatType::Unknown as i32
+        };
         let my_nat_type: UdpNatType = NatType::try_from(my_nat_type)
             .unwrap_or(NatType::Unknown)
             .into();

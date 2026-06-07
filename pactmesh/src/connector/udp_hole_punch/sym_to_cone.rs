@@ -85,6 +85,27 @@ fn infer_ordered_port_direction(mapped_ports: &[u16]) -> Option<bool> {
     }
 }
 
+fn hard_sym_centered_port_window(first: u16, last: u16) -> PredictablePortWindow {
+    let window = HARD_SYM_PREDICT_WINDOW.min(u16::MAX as u32);
+    let first = first as u32;
+    let last = last as u32;
+    let center = first + (last.saturating_sub(first) / 2);
+
+    let mut start = center.saturating_sub(window / 2).max(1);
+    let end = start
+        .saturating_add(window.saturating_sub(1))
+        .min(u16::MAX as u32);
+    if end.saturating_sub(start).saturating_add(1) < window {
+        start = end.saturating_sub(window.saturating_sub(1)).max(1);
+    }
+
+    PredictablePortWindow {
+        base_port_num: start.saturating_sub(1) as u16,
+        max_port_num: end.saturating_sub(start).saturating_add(1),
+        is_incremental: true,
+    }
+}
+
 fn predictable_port_window_from_samples(
     my_nat_info: UdpNatType,
     mapped_ports: &[u16],
@@ -94,34 +115,24 @@ fn predictable_port_window_from_samples(
     }
 
     let known_inc = my_nat_info.get_inc_of_easy_sym();
-    let is_incremental = match known_inc {
-        Some(inc) => inc,
-        None => infer_ordered_port_direction(mapped_ports)?,
-    };
-
     let mut sorted_ports = mapped_ports.to_vec();
     sorted_ports.sort_unstable();
     let first = *sorted_ports.first().unwrap();
     let last = *sorted_ports.last().unwrap();
     let observed_span = last.saturating_sub(first) as u32;
 
-    if known_inc.is_none() && observed_span > STABLE_PUNCH_WINDOW {
-        return None;
-    }
-
-    let base_port_num = match (known_inc, is_incremental) {
-        (Some(_), true) | (None, true) => last,
-        (Some(_), false) | (None, false) => first,
-    };
-    let max_port_num = if known_inc.is_some() {
-        easy_sym_predict_window(observed_span)
-    } else {
-        HARD_SYM_PREDICT_WINDOW
+    let Some(is_incremental) = known_inc else {
+        infer_ordered_port_direction(mapped_ports)?;
+        if observed_span > STABLE_PUNCH_WINDOW {
+            return None;
+        }
+        return Some(hard_sym_centered_port_window(first, last));
     };
 
+    let base_port_num = if is_incremental { last } else { first };
     Some(PredictablePortWindow {
         base_port_num,
-        max_port_num,
+        max_port_num: easy_sym_predict_window(observed_span),
         is_incremental,
     })
 }
@@ -924,29 +935,66 @@ pub mod tests {
     }
 
     #[test]
-    fn hard_sym_predicts_from_monotonic_runtime_samples() {
+    fn hard_sym_predicts_centered_window_from_monotonic_runtime_samples() {
         let prediction = super::predictable_port_window_from_samples(
             super::UdpNatType::HardSymmetric(NatType::Symmetric),
             &[22_590, 22_640, 22_779, 23_010],
         )
         .unwrap();
 
-        assert_eq!(prediction.base_port_num, 23_010);
+        assert_eq!(prediction.base_port_num, 6_415);
         assert_eq!(prediction.max_port_num, super::HARD_SYM_PREDICT_WINDOW);
         assert!(prediction.is_incremental);
+
+        let ports = super::easy_sym_target_ports(
+            prediction.base_port_num as u32,
+            prediction.max_port_num,
+            prediction.is_incremental,
+        );
+        assert!(ports.contains(&22_590));
+        assert!(ports.contains(&23_010));
+        assert!(ports.contains(&30_000));
     }
 
     #[test]
-    fn hard_sym_dec_predicts_from_lowest_runtime_sample() {
+    fn hard_sym_dec_uses_same_centered_window() {
         let prediction = super::predictable_port_window_from_samples(
             super::UdpNatType::HardSymmetric(NatType::Symmetric),
             &[23_010, 22_779, 22_640, 22_590],
         )
         .unwrap();
 
-        assert_eq!(prediction.base_port_num, 22_590);
+        assert_eq!(prediction.base_port_num, 6_415);
         assert_eq!(prediction.max_port_num, super::HARD_SYM_PREDICT_WINDOW);
-        assert!(!prediction.is_incremental);
+        assert!(prediction.is_incremental);
+    }
+
+    #[test]
+    fn hard_sym_centered_window_covers_real_low_peer_port() {
+        let prediction = super::predictable_port_window_from_samples(
+            super::UdpNatType::HardSymmetric(NatType::Symmetric),
+            &[
+                8_121, 8_122, 8_123, 8_124, 8_125, 8_126, 8_128, 8_129, 8_130, 8_131, 8_133, 8_134,
+                8_135, 8_136, 8_137, 8_138, 8_140, 8_141, 8_142, 8_143, 8_144, 8_145, 8_146, 8_553,
+                8_554, 8_555, 8_556, 8_557, 8_558, 8_559, 8_560, 8_561,
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(prediction.base_port_num, 0);
+        assert_eq!(prediction.max_port_num, super::HARD_SYM_PREDICT_WINDOW);
+        assert!(prediction.is_incremental);
+
+        let ports = super::easy_sym_target_ports(
+            prediction.base_port_num as u32,
+            prediction.max_port_num,
+            prediction.is_incremental,
+        );
+        assert_eq!(ports.first().copied(), Some(1));
+        assert_eq!(ports.last().copied(), Some(32_768));
+        assert!(ports.contains(&4_866));
+        assert!(ports.contains(&8_121));
+        assert!(ports.contains(&8_561));
     }
 
     #[test]

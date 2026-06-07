@@ -229,6 +229,11 @@ impl RoutePeerInfo {
         global_ctx: &ArcGlobalCtx,
     ) -> Self {
         let stun_info = global_ctx.get_stun_info_collector().get_stun_info();
+        let udp_nat_type = if stun_info.udp_nat_type_confident {
+            stun_info.udp_nat_type
+        } else {
+            NatType::Unknown as i32
+        };
         let noise_static_pubkey = global_ctx
             .config
             .get_secure_mode()
@@ -255,7 +260,7 @@ impl RoutePeerInfo {
             ipv4_addr: global_ctx.get_ipv4().map(|x| x.address().into()),
             proxy_cidrs,
             hostname: Some(global_ctx.get_hostname()),
-            udp_nat_type: stun_info.udp_nat_type,
+            udp_nat_type,
             tcp_nat_type: stun_info.tcp_nat_type,
 
             // these two fields should not participate in comparison.
