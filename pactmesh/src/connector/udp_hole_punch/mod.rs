@@ -671,8 +671,18 @@ pub mod tests {
         ));
 
         assert!(matches!(
-            UdpNatType::HardSymmetric(NatType::Symmetric)
-                .get_punch_hole_method(UdpNatType::HardSymmetric(NatType::Symmetric), global_ctx,),
+            UdpNatType::HardSymmetric(NatType::Symmetric).get_punch_hole_method(
+                UdpNatType::HardSymmetric(NatType::Symmetric),
+                global_ctx.clone(),
+            ),
+            UdpPunchClientMethod::SymToCone
+        ));
+
+        assert!(matches!(
+            UdpNatType::Unknown.get_punch_hole_method(
+                UdpNatType::EasySymmetric(NatType::SymmetricEasyInc, true),
+                global_ctx,
+            ),
             UdpPunchClientMethod::SymToCone
         ));
     }
@@ -694,9 +704,19 @@ pub mod tests {
         ));
 
         assert!(matches!(
-            UdpNatType::EasySymmetric(NatType::SymmetricEasyInc, true)
-                .get_punch_hole_method(UdpNatType::Cone(NatType::PortRestricted), global_ctx,),
+            UdpNatType::EasySymmetric(NatType::SymmetricEasyInc, true).get_punch_hole_method(
+                UdpNatType::Cone(NatType::PortRestricted),
+                global_ctx.clone(),
+            ),
             UdpPunchClientMethod::ConeToCone
+        ));
+
+        assert!(matches!(
+            UdpNatType::Unknown.get_punch_hole_method(
+                UdpNatType::EasySymmetric(NatType::SymmetricEasyInc, true),
+                global_ctx,
+            ),
+            UdpPunchClientMethod::None
         ));
     }
 

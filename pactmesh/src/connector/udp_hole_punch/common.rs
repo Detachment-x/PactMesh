@@ -142,7 +142,10 @@ impl UdpNatType {
 
         if self.is_unknown() {
             if other.is_sym() {
-                return UdpPunchClientMethod::None;
+                if disable_sym_hole_punching {
+                    return UdpPunchClientMethod::None;
+                }
+                return UdpPunchClientMethod::SymToCone;
             } else {
                 return UdpPunchClientMethod::ConeToCone;
             }
