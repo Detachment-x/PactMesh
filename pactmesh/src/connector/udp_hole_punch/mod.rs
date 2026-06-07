@@ -335,6 +335,7 @@ impl UdpHoePunchConnectorData {
                         round,
                         &mut port_idx,
                         task_info.my_nat_type,
+                        task_info.dst_nat_type,
                     )
                     .await
             };

@@ -1,5 +1,5 @@
 use std::{
-    net::Ipv4Addr,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -61,6 +61,8 @@ const HARD_SYM_RANDOM_PASSES: usize = 2;
 const HARD_SYM_RANDOM_PORTS_PER_PASS_MIN: u32 = 2048;
 const HARD_SYM_RANDOM_PORTS_PER_PASS_MAX: u32 = 3072;
 const HARD_SYM_PREDICT_MIN_SAMPLES: usize = 3;
+const REMOTE_SYM_SCAN_PORTS_PER_TICK: usize = 32;
+const REMOTE_SYM_SCAN_WINDOW: u16 = 4096;
 
 fn easy_sym_predict_window(_observed_span: u32) -> u32 {
     EASY_SYM_PREDICT_WINDOW
@@ -161,6 +163,59 @@ fn easy_sym_target_ports(base_port_num: u32, max_port_num: u32, is_incremental: 
             base_port_num.saturating_sub(max_port_num),
             base_port_num.saturating_sub(1),
         )
+    }
+}
+
+struct RemotePortScanPlan {
+    public_ip: Ipv4Addr,
+    ports: Vec<u16>,
+    next_idx: usize,
+}
+
+impl RemotePortScanPlan {
+    fn new(remote_addr: SocketAddr) -> Option<Self> {
+        let remote_addr = match remote_addr {
+            SocketAddr::V4(addr) => addr,
+            SocketAddr::V6(_) => return None,
+        };
+        let public_ip = *remote_addr.ip();
+        let base_port = remote_addr.port();
+        let mut ports = Vec::with_capacity((REMOTE_SYM_SCAN_WINDOW as usize) * 2 + 1);
+        ports.push(base_port);
+        for offset in 1..=REMOTE_SYM_SCAN_WINDOW {
+            if let Some(port) = base_port.checked_add(offset) {
+                ports.push(port);
+            }
+            if let Some(port) = base_port.checked_sub(offset)
+                && port > 0
+            {
+                ports.push(port);
+            }
+        }
+
+        Some(Self {
+            public_ip,
+            ports,
+            next_idx: 0,
+        })
+    }
+
+    async fn send_next(
+        &mut self,
+        udp_array: &Arc<UdpSocketArray>,
+        packet: &[u8],
+    ) -> Result<(), anyhow::Error> {
+        for _ in 0..REMOTE_SYM_SCAN_PORTS_PER_TICK {
+            let port = self.ports[self.next_idx % self.ports.len()];
+            self.next_idx = (self.next_idx + 1) % self.ports.len();
+            udp_array
+                .send_with_all(
+                    packet,
+                    SocketAddr::V4(SocketAddrV4::new(self.public_ip, port)),
+                )
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -709,6 +764,7 @@ impl PunchSymToConeHoleClient {
         tid: u32,
         remote_mapped_addr: crate::proto::common::SocketAddr,
         punch_task: &AbortOnDropHandle<T>,
+        mut remote_scan: Option<&mut RemotePortScanPlan>,
     ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
         // no matter what the result is, we should check if we received any hole punching packet
         let mut ret_tunnel: Option<Box<dyn Tunnel>> = None;
@@ -719,6 +775,9 @@ impl PunchSymToConeHoleClient {
             udp_array
                 .send_with_all(packet, remote_mapped_addr.into())
                 .await?;
+            if let Some(remote_scan) = remote_scan.as_deref_mut() {
+                remote_scan.send_next(udp_array, packet).await?;
+            }
 
             tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -761,6 +820,7 @@ impl PunchSymToConeHoleClient {
         round: u32,
         last_port_idx: &mut usize,
         my_nat_info: UdpNatType,
+        peer_nat_info: UdpNatType,
     ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
         // Check if peer is blacklisted
         if self.blacklist.contains(&dst_peer_id) {
@@ -864,6 +924,23 @@ impl PunchSymToConeHoleClient {
             udp_array.start_with_sockets(sockets).await?;
             self.publish_udp_array(udp_array.clone()).await;
         }
+        let mut remote_scan = if peer_nat_info.is_unknown() || peer_nat_info.is_sym() {
+            let remote_addr: SocketAddr = remote_mapped_addr.into();
+            let plan = RemotePortScanPlan::new(remote_addr);
+            if plan.is_some() {
+                tracing::info!(
+                    ?remote_addr,
+                    ?peer_nat_info,
+                    ports_per_tick = REMOTE_SYM_SCAN_PORTS_PER_TICK,
+                    scan_window = REMOTE_SYM_SCAN_WINDOW,
+                    "enable remote symmetric port scan while punching"
+                );
+            }
+            plan
+        } else {
+            None
+        };
+
         let tid = rand::thread_rng().r#gen();
         let packet = new_hole_punch_packet(tid, HOLE_PUNCH_PACKET_BODY_LEN).into_bytes();
         udp_array.add_intreast_tid(tid);
@@ -891,6 +968,7 @@ impl PunchSymToConeHoleClient {
                 tid,
                 remote_mapped_addr,
                 &punch_task,
+                remote_scan.as_mut(),
             )
             .await?;
 
@@ -923,6 +1001,7 @@ impl PunchSymToConeHoleClient {
             tid,
             remote_mapped_addr,
             &punch_task,
+            remote_scan.as_mut(),
         )
         .await?;
 
