@@ -229,6 +229,20 @@ impl UdpSocketArray {
         !self.sockets.is_empty()
     }
 
+    pub async fn bind_new_socket(&self) -> Result<Arc<UdpSocket>, anyhow::Error> {
+        let _g = self.net_ns.guard();
+        let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+        Ok(socket)
+    }
+
+    pub async fn bind_sockets(&self) -> Result<Vec<Arc<UdpSocket>>, anyhow::Error> {
+        let mut sockets = Vec::with_capacity(self.max_socket_count);
+        for _ in 0..self.max_socket_count {
+            sockets.push(self.bind_new_socket().await?);
+        }
+        Ok(sockets)
+    }
+
     pub async fn add_new_socket(&self, socket: Arc<UdpSocket>) -> Result<(), anyhow::Error> {
         #[cfg(target_os = "windows")]
         crate::arch::windows::disable_connection_reset(socket.as_ref())
@@ -292,16 +306,22 @@ impl UdpSocketArray {
         Ok(())
     }
 
+    pub async fn start_with_sockets(
+        &self,
+        sockets: Vec<Arc<UdpSocket>>,
+    ) -> Result<(), anyhow::Error> {
+        for socket in sockets {
+            self.add_new_socket(socket).await?;
+        }
+        Ok(())
+    }
+
     #[instrument(err)]
     pub async fn start(&self) -> Result<(), anyhow::Error> {
         tracing::info!("starting udp socket array");
 
         while self.sockets.len() < self.max_socket_count {
-            let socket = {
-                let _g = self.net_ns.guard();
-                Arc::new(UdpSocket::bind("0.0.0.0:0").await?)
-            };
-
+            let socket = self.bind_new_socket().await?;
             self.add_new_socket(socket).await?;
         }
 

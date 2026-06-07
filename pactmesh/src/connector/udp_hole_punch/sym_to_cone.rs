@@ -333,6 +333,7 @@ impl PunchSymToConeHoleServer {
 pub(crate) struct PunchSymToConeHoleClient {
     peer_mgr: Arc<PeerManager>,
     udp_array: RwLock<Option<Arc<UdpSocketArray>>>,
+    udp_array_predictable_port_window: RwLock<Option<PredictablePortWindow>>,
     try_direct_connect: AtomicBool,
     punch_predicablely: AtomicBool,
     punch_randomly: AtomicBool,
@@ -347,6 +348,7 @@ impl PunchSymToConeHoleClient {
         Self {
             peer_mgr,
             udp_array: RwLock::new(None),
+            udp_array_predictable_port_window: RwLock::new(None),
             try_direct_connect: AtomicBool::new(true),
             punch_predicablely: AtomicBool::new(true),
             punch_randomly: AtomicBool::new(true),
@@ -465,35 +467,54 @@ impl PunchSymToConeHoleClient {
         Ok(tunnel)
     }
 
-    async fn prepare_udp_array(&self) -> Result<Arc<UdpSocketArray>, anyhow::Error> {
+    async fn prepare_udp_array(
+        &self,
+    ) -> Result<(Arc<UdpSocketArray>, Option<Vec<Arc<UdpSocket>>>), anyhow::Error> {
         let rlocked = self.udp_array.read().await;
         if let Some(udp_array) = rlocked.clone() {
-            return Ok(udp_array);
+            return Ok((udp_array, None));
         }
 
         drop(rlocked);
-        let mut wlocked = self.udp_array.write().await;
+        let wlocked = self.udp_array.write().await;
         if let Some(udp_array) = wlocked.clone() {
-            return Ok(udp_array);
+            return Ok((udp_array, None));
         }
+        drop(wlocked);
 
         let udp_array = Arc::new(UdpSocketArray::new(
             UDP_ARRAY_SIZE_FOR_HARD_SYM,
             self.peer_mgr.get_global_ctx().net_ns.clone(),
         ));
-        udp_array.start().await?;
-        wlocked.replace(udp_array.clone());
-        Ok(udp_array)
+        let sockets = udp_array.bind_sockets().await?;
+        Ok((udp_array, Some(sockets)))
+    }
+
+    async fn publish_udp_array(&self, udp_array: Arc<UdpSocketArray>) {
+        let mut wlocked = self.udp_array.write().await;
+        if wlocked.is_none() {
+            wlocked.replace(udp_array);
+        }
+    }
+
+    async fn cache_predictable_port_window(&self, prediction: Option<PredictablePortWindow>) {
+        if let Some(prediction) = prediction {
+            let mut wlocked = self.udp_array_predictable_port_window.write().await;
+            wlocked.replace(prediction);
+        }
     }
 
     pub(crate) async fn clear_udp_array(&self) {
         let mut wlocked = self.udp_array.write().await;
         wlocked.take();
+        let mut prediction = self.udp_array_predictable_port_window.write().await;
+        prediction.take();
     }
 
     async fn get_predictable_port_window(
         &self,
         my_nat_info: UdpNatType,
+        prediction_sockets: Option<&[Arc<UdpSocket>]>,
     ) -> Option<PredictablePortWindow> {
         if !my_nat_info.is_sym() {
             return None;
@@ -508,44 +529,68 @@ impl PunchSymToConeHoleClient {
             HARD_SYM_PREDICT_MIN_SAMPLES
         };
 
-        for _ in 0..MAX_EASY_SYM_MAPPING_PROBES {
-            let socket = {
-                let _g = global_ctx.net_ns.guard();
-                match UdpSocket::bind("0.0.0.0:0").await {
-                    Ok(socket) => Arc::new(socket),
-                    Err(e) => {
-                        tracing::warn!(?e, "failed to bind udp socket for sym prediction");
-                        continue;
+        if let Some(prediction_sockets) = prediction_sockets {
+            for socket in prediction_sockets.iter().take(MAX_EASY_SYM_MAPPING_PROBES) {
+                match stun_collector
+                    .get_udp_port_mapping_with_socket(socket.clone())
+                    .await
+                {
+                    Ok(addr) => {
+                        mapped_ports.push(addr.port());
+                        if mapped_ports.len() >= target_samples {
+                            break;
+                        }
+                    }
+                    ret => {
+                        tracing::warn!(?ret, "failed to map udp array socket for sym prediction")
                     }
                 }
-            };
-
-            match stun_collector
-                .get_udp_port_mapping_with_socket(socket)
-                .await
-            {
-                Ok(addr) => {
-                    mapped_ports.push(addr.port());
-                    if mapped_ports.len() >= target_samples {
-                        break;
-                    }
-                }
-                ret => tracing::warn!(
-                    ?ret,
-                    "failed to map temporary udp socket for sym prediction"
-                ),
             }
-        }
 
-        if mapped_ports.is_empty() {
-            match stun_collector.get_udp_port_mapping(0).await {
-                Ok(addr) => mapped_ports.push(addr.port()),
-                ret => {
-                    tracing::warn!(
+            if mapped_ports.is_empty() {
+                tracing::warn!("failed to sample any udp array sockets for sym prediction");
+                return None;
+            }
+        } else {
+            for _ in 0..MAX_EASY_SYM_MAPPING_PROBES {
+                let socket = {
+                    let _g = global_ctx.net_ns.guard();
+                    match UdpSocket::bind("0.0.0.0:0").await {
+                        Ok(socket) => Arc::new(socket),
+                        Err(e) => {
+                            tracing::warn!(?e, "failed to bind udp socket for sym prediction");
+                            continue;
+                        }
+                    }
+                };
+
+                match stun_collector
+                    .get_udp_port_mapping_with_socket(socket)
+                    .await
+                {
+                    Ok(addr) => {
+                        mapped_ports.push(addr.port());
+                        if mapped_ports.len() >= target_samples {
+                            break;
+                        }
+                    }
+                    ret => tracing::warn!(
                         ?ret,
-                        "failed to get fallback udp port mapping for sym prediction"
-                    );
-                    return None;
+                        "failed to map temporary udp socket for sym prediction"
+                    ),
+                }
+            }
+
+            if mapped_ports.is_empty() {
+                match stun_collector.get_udp_port_mapping(0).await {
+                    Ok(addr) => mapped_ports.push(addr.port()),
+                    ret => {
+                        tracing::warn!(
+                            ?ret,
+                            "failed to get fallback udp port mapping for sym prediction"
+                        );
+                        return None;
+                    }
                 }
             }
         }
@@ -556,7 +601,8 @@ impl PunchSymToConeHoleClient {
             ?prediction,
             ?my_nat_info,
             target_samples,
-            "symmetric nat prediction based on temporary udp sockets"
+            from_udp_array = prediction_sockets.is_some(),
+            "symmetric nat prediction based on sampled udp sockets"
         );
 
         prediction
@@ -790,24 +836,34 @@ impl PunchSymToConeHoleClient {
 
         let port_index = *last_port_idx as u32;
         let punch_predictably = self.punch_predicablely.load(Ordering::Relaxed);
+        let (udp_array, prediction_sockets) = self.prepare_udp_array().await?;
         let predictable_port_window = if punch_predictably {
-            tokio::time::timeout(
-                Duration::from_millis(EASY_SYM_MAPPING_TIMEOUT_MS),
-                self.get_predictable_port_window(my_nat_info),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                tracing::warn!(
-                    timeout_ms = EASY_SYM_MAPPING_TIMEOUT_MS,
-                    "symmetric port prediction timed out; falling back to random punch"
-                );
-                None
-            })
+            let prediction = if let Some(prediction_sockets) = prediction_sockets.as_deref() {
+                tokio::time::timeout(
+                    Duration::from_millis(EASY_SYM_MAPPING_TIMEOUT_MS),
+                    self.get_predictable_port_window(my_nat_info, Some(prediction_sockets)),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::warn!(
+                        timeout_ms = EASY_SYM_MAPPING_TIMEOUT_MS,
+                        "symmetric port prediction timed out; falling back to random punch"
+                    );
+                    None
+                })
+            } else {
+                *self.udp_array_predictable_port_window.read().await
+            };
+            self.cache_predictable_port_window(prediction).await;
+            prediction
         } else {
             None
         };
 
-        let udp_array = self.prepare_udp_array().await?;
+        if let Some(sockets) = prediction_sockets {
+            udp_array.start_with_sockets(sockets).await?;
+            self.publish_udp_array(udp_array.clone()).await;
+        }
         let tid = rand::thread_rng().r#gen();
         let packet = new_hole_punch_packet(tid, HOLE_PUNCH_PACKET_BODY_LEN).into_bytes();
         udp_array.add_intreast_tid(tid);
