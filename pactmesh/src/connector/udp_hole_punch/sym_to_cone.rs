@@ -24,6 +24,7 @@ use crate::{
     defer,
     peers::peer_manager::PeerManager,
     proto::{
+        common::NatType,
         peer_rpc::{
             SelectPunchListenerRequest, SendPunchPacketEasySymRequest,
             SendPunchPacketHardSymRequest, SendPunchPacketHardSymResponse, UdpHolePunchRpc,
@@ -62,7 +63,9 @@ const HARD_SYM_RANDOM_PORTS_PER_PASS_MIN: u32 = 2048;
 const HARD_SYM_RANDOM_PORTS_PER_PASS_MAX: u32 = 3072;
 const HARD_SYM_PREDICT_MIN_SAMPLES: usize = 3;
 const REMOTE_SYM_SCAN_PORTS_PER_TICK: usize = 32;
+const REMOTE_HARD_SYM_SCAN_PORTS_PER_TICK: usize = 128;
 const REMOTE_SYM_SCAN_WINDOW: u16 = 4096;
+const REMOTE_SYM_SCAN_SOCKET_LIMIT: usize = 16;
 
 fn easy_sym_predict_window(_observed_span: u32) -> u32 {
     EASY_SYM_PREDICT_WINDOW
@@ -166,20 +169,44 @@ fn easy_sym_target_ports(base_port_num: u32, max_port_num: u32, is_incremental: 
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemotePortScanKind {
+    Centered,
+    FullRandom,
+}
+
 struct RemotePortScanPlan {
     public_ip: Ipv4Addr,
     ports: Vec<u16>,
     next_idx: usize,
+    ports_per_tick: usize,
+    socket_limit: usize,
+    kind: RemotePortScanKind,
 }
 
 impl RemotePortScanPlan {
-    fn new(remote_addr: SocketAddr) -> Option<Self> {
+    fn new(remote_addr: SocketAddr, peer_nat_info: UdpNatType) -> Option<Self> {
         let remote_addr = match remote_addr {
             SocketAddr::V4(addr) => addr,
             SocketAddr::V6(_) => return None,
         };
         let public_ip = *remote_addr.ip();
         let base_port = remote_addr.port();
+
+        if peer_nat_info.is_unknown() || peer_nat_info.is_hard_sym() {
+            let mut ports: Vec<u16> = (1..=u16::MAX).collect();
+            ports.shuffle(&mut rand::thread_rng());
+            let next_idx = rand::thread_rng().gen_range(0..ports.len());
+            return Some(Self {
+                public_ip,
+                ports,
+                next_idx,
+                ports_per_tick: REMOTE_HARD_SYM_SCAN_PORTS_PER_TICK,
+                socket_limit: REMOTE_SYM_SCAN_SOCKET_LIMIT,
+                kind: RemotePortScanKind::FullRandom,
+            });
+        }
+
         let mut ports = Vec::with_capacity((REMOTE_SYM_SCAN_WINDOW as usize) * 2 + 1);
         ports.push(base_port);
         for offset in 1..=REMOTE_SYM_SCAN_WINDOW {
@@ -197,7 +224,18 @@ impl RemotePortScanPlan {
             public_ip,
             ports,
             next_idx: 0,
+            ports_per_tick: REMOTE_SYM_SCAN_PORTS_PER_TICK,
+            socket_limit: usize::MAX,
+            kind: RemotePortScanKind::Centered,
         })
+    }
+
+    fn kind(&self) -> RemotePortScanKind {
+        self.kind
+    }
+
+    fn port_count(&self) -> usize {
+        self.ports.len()
     }
 
     async fn send_next(
@@ -205,17 +243,35 @@ impl RemotePortScanPlan {
         udp_array: &Arc<UdpSocketArray>,
         packet: &[u8],
     ) -> Result<(), anyhow::Error> {
-        for _ in 0..REMOTE_SYM_SCAN_PORTS_PER_TICK {
+        let sockets = udp_array.sockets();
+        if sockets.is_empty() {
+            return Ok(());
+        }
+
+        let socket_count = self.socket_limit.min(sockets.len());
+        for _ in 0..self.ports_per_tick {
             let port = self.ports[self.next_idx % self.ports.len()];
             self.next_idx = (self.next_idx + 1) % self.ports.len();
-            udp_array
-                .send_with_all(
-                    packet,
-                    SocketAddr::V4(SocketAddrV4::new(self.public_ip, port)),
-                )
-                .await?;
+            let addr = SocketAddr::V4(SocketAddrV4::new(self.public_ip, port));
+            for socket in sockets.iter().take(socket_count) {
+                for _ in 0..3 {
+                    socket.send_to(packet, addr).await?;
+                }
+            }
         }
         Ok(())
+    }
+}
+
+fn runtime_nat_info_for_punch(my_nat_info: UdpNatType, observed_port_spread: u32) -> UdpNatType {
+    if !my_nat_info.is_unknown() {
+        return my_nat_info;
+    }
+
+    if observed_port_spread > STABLE_PUNCH_SPREAD_MAX {
+        UdpNatType::HardSymmetric(NatType::Symmetric)
+    } else {
+        my_nat_info
     }
 }
 
@@ -885,6 +941,16 @@ impl PunchSymToConeHoleClient {
         // punch from one reused socket whose exact mapped port the peer targets,
         // instead of scattering 84 random sockets across a 4k prediction window.
         let observed_spread = stun_info.max_port.saturating_sub(stun_info.min_port);
+        let runtime_my_nat_info = runtime_nat_info_for_punch(my_nat_info, observed_spread);
+        if runtime_my_nat_info != my_nat_info {
+            tracing::info!(
+                ?my_nat_info,
+                ?runtime_my_nat_info,
+                observed_spread,
+                "override unknown udp nat type from runtime STUN spread"
+            );
+        }
+
         if self.punch_predicablely.load(Ordering::Relaxed)
             && observed_spread <= STABLE_PUNCH_SPREAD_MAX
             && let Some(tunnel) = self
@@ -901,7 +967,7 @@ impl PunchSymToConeHoleClient {
             let prediction = if let Some(prediction_sockets) = prediction_sockets.as_deref() {
                 tokio::time::timeout(
                     Duration::from_millis(EASY_SYM_MAPPING_TIMEOUT_MS),
-                    self.get_predictable_port_window(my_nat_info, Some(prediction_sockets)),
+                    self.get_predictable_port_window(runtime_my_nat_info, Some(prediction_sockets)),
                 )
                 .await
                 .unwrap_or_else(|_| {
@@ -926,12 +992,15 @@ impl PunchSymToConeHoleClient {
         }
         let mut remote_scan = if peer_nat_info.is_unknown() || peer_nat_info.is_sym() {
             let remote_addr: SocketAddr = remote_mapped_addr.into();
-            let plan = RemotePortScanPlan::new(remote_addr);
-            if plan.is_some() {
+            let plan = RemotePortScanPlan::new(remote_addr, peer_nat_info);
+            if let Some(plan) = plan.as_ref() {
                 tracing::info!(
                     ?remote_addr,
                     ?peer_nat_info,
-                    ports_per_tick = REMOTE_SYM_SCAN_PORTS_PER_TICK,
+                    scan_kind = ?plan.kind(),
+                    ports_per_tick = plan.ports_per_tick,
+                    socket_limit = plan.socket_limit,
+                    port_count = plan.port_count(),
                     scan_window = REMOTE_SYM_SCAN_WINDOW,
                     "enable remote symmetric port scan while punching"
                 );
@@ -955,7 +1024,7 @@ impl PunchSymToConeHoleClient {
                 Self::remote_send_hole_punch_packet_predicable(
                     rpc_stub,
                     predictable_port_window,
-                    my_nat_info,
+                    runtime_my_nat_info,
                     remote_mapped_addr,
                     public_ips.clone(),
                     tid,
@@ -1064,6 +1133,32 @@ pub mod tests {
         assert_eq!(ports.first().copied(), Some(1));
         assert_eq!(ports.last().copied(), Some(99));
         assert!(!ports.contains(&0));
+    }
+
+    #[test]
+    fn unknown_nat_with_large_runtime_spread_is_treated_as_hard_symmetric() {
+        let runtime_nat = super::runtime_nat_info_for_punch(super::UdpNatType::Unknown, 512);
+        assert_eq!(
+            runtime_nat,
+            super::UdpNatType::HardSymmetric(NatType::Symmetric)
+        );
+    }
+
+    #[test]
+    fn unknown_remote_nat_uses_full_random_scan_plan() {
+        let plan = super::RemotePortScanPlan::new(
+            "198.51.100.10:45678".parse().unwrap(),
+            super::UdpNatType::Unknown,
+        )
+        .unwrap();
+
+        assert_eq!(plan.kind(), super::RemotePortScanKind::FullRandom);
+        assert_eq!(
+            plan.ports_per_tick,
+            super::REMOTE_HARD_SYM_SCAN_PORTS_PER_TICK
+        );
+        assert_eq!(plan.socket_limit, super::REMOTE_SYM_SCAN_SOCKET_LIMIT);
+        assert_eq!(plan.port_count(), u16::MAX as usize);
     }
 
     #[test]
