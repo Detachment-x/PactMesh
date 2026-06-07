@@ -494,26 +494,46 @@ impl PunchSymToConeHoleClient {
     async fn get_predictable_port_window(
         &self,
         my_nat_info: UdpNatType,
-        udp_array: &UdpSocketArray,
     ) -> Option<PredictablePortWindow> {
         if !my_nat_info.is_sym() {
             return None;
         }
 
-        let stun_collector = self.peer_mgr.get_global_ctx().get_stun_info_collector();
+        let global_ctx = self.peer_mgr.get_global_ctx();
+        let stun_collector = global_ctx.get_stun_info_collector();
         let mut mapped_ports = Vec::new();
+        let target_samples = if my_nat_info.get_inc_of_easy_sym().is_some() {
+            1
+        } else {
+            HARD_SYM_PREDICT_MIN_SAMPLES
+        };
 
-        for socket in udp_array
-            .sockets()
-            .into_iter()
-            .take(MAX_EASY_SYM_MAPPING_PROBES)
-        {
+        for _ in 0..MAX_EASY_SYM_MAPPING_PROBES {
+            let socket = {
+                let _g = global_ctx.net_ns.guard();
+                match UdpSocket::bind("0.0.0.0:0").await {
+                    Ok(socket) => Arc::new(socket),
+                    Err(e) => {
+                        tracing::warn!(?e, "failed to bind udp socket for sym prediction");
+                        continue;
+                    }
+                }
+            };
+
             match stun_collector
                 .get_udp_port_mapping_with_socket(socket)
                 .await
             {
-                Ok(addr) => mapped_ports.push(addr.port()),
-                ret => tracing::warn!(?ret, "failed to map udp array socket for sym prediction"),
+                Ok(addr) => {
+                    mapped_ports.push(addr.port());
+                    if mapped_ports.len() >= target_samples {
+                        break;
+                    }
+                }
+                ret => tracing::warn!(
+                    ?ret,
+                    "failed to map temporary udp socket for sym prediction"
+                ),
             }
         }
 
@@ -535,7 +555,8 @@ impl PunchSymToConeHoleClient {
             ?mapped_ports,
             ?prediction,
             ?my_nat_info,
-            "symmetric nat prediction based on udp array sockets"
+            target_samples,
+            "symmetric nat prediction based on temporary udp sockets"
         );
 
         prediction
@@ -701,7 +722,6 @@ impl PunchSymToConeHoleClient {
             return Ok(None);
         }
 
-        let udp_array = self.prepare_udp_array().await?;
         let global_ctx = self.peer_mgr.get_global_ctx();
 
         let rpc_stub = self
@@ -768,17 +788,12 @@ impl PunchSymToConeHoleClient {
             return Ok(Some(tunnel));
         }
 
-        let tid = rand::thread_rng().r#gen();
-        let packet = new_hole_punch_packet(tid, HOLE_PUNCH_PACKET_BODY_LEN).into_bytes();
-        udp_array.add_intreast_tid(tid);
-        defer! { udp_array.remove_intreast_tid(tid);}
-
         let port_index = *last_port_idx as u32;
         let punch_predictably = self.punch_predicablely.load(Ordering::Relaxed);
         let predictable_port_window = if punch_predictably {
             tokio::time::timeout(
                 Duration::from_millis(EASY_SYM_MAPPING_TIMEOUT_MS),
-                self.get_predictable_port_window(my_nat_info, &udp_array),
+                self.get_predictable_port_window(my_nat_info),
             )
             .await
             .unwrap_or_else(|_| {
@@ -791,6 +806,12 @@ impl PunchSymToConeHoleClient {
         } else {
             None
         };
+
+        let udp_array = self.prepare_udp_array().await?;
+        let tid = rand::thread_rng().r#gen();
+        let packet = new_hole_punch_packet(tid, HOLE_PUNCH_PACKET_BODY_LEN).into_bytes();
+        udp_array.add_intreast_tid(tid);
+        defer! { udp_array.remove_intreast_tid(tid);}
         udp_array
             .send_with_all(&packet, remote_mapped_addr.into())
             .await?;
