@@ -40,6 +40,7 @@ const UDP_ARRAY_SIZE_FOR_HARD_SYM: usize = 84;
 const MAX_EASY_SYM_MAPPING_PROBES: usize = 32;
 const EASY_SYM_MAPPING_TIMEOUT_MS: u64 = 2500;
 const PUNCH_RESULT_GRACE_MS: u128 = 2000;
+const EASY_SYM_PREDICT_WINDOW: u32 = 8192;
 
 // ZeroTier-parity stable-socket punch: only attempted when our NAT keeps a
 // near-stable per-destination mapping (observed STUN port spread within this
@@ -48,18 +49,16 @@ const STABLE_PUNCH_SPREAD_MAX: u32 = 64;
 // Use a wider centered spray than the STUN-observed spread: some symmetric NATs
 // shift the mapped port further when the destination changes from STUN to peer.
 const STABLE_PUNCH_WINDOW: u32 = 4096;
-const STABLE_PUNCH_WAIT_MS: u128 = 3000;
+const HARD_SYM_PREDICT_WINDOW: u32 = 32768;
+const STABLE_PUNCH_WAIT_MS: u128 = 5000;
 
 const HARD_SYM_RANDOM_PASSES: usize = 2;
 const HARD_SYM_RANDOM_PORTS_PER_PASS_MIN: u32 = 2048;
 const HARD_SYM_RANDOM_PORTS_PER_PASS_MAX: u32 = 3072;
 const HARD_SYM_PREDICT_MIN_SAMPLES: usize = 3;
 
-fn easy_sym_predict_window(observed_span: u32) -> u32 {
-    observed_span
-        .saturating_add((UDP_ARRAY_SIZE_FOR_HARD_SYM as u32) * 16)
-        .saturating_add(512)
-        .clamp(1024, 4096)
+fn easy_sym_predict_window(_observed_span: u32) -> u32 {
+    EASY_SYM_PREDICT_WINDOW
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,11 +106,14 @@ fn predictable_port_window_from_samples(
         return None;
     }
 
-    let base_port_num = if is_incremental { first } else { last };
+    let base_port_num = match (known_inc, is_incremental) {
+        (Some(_), true) | (None, true) => last,
+        (Some(_), false) | (None, false) => first,
+    };
     let max_port_num = if known_inc.is_some() {
         easy_sym_predict_window(observed_span)
     } else {
-        STABLE_PUNCH_WINDOW
+        HARD_SYM_PREDICT_WINDOW
     };
 
     Some(PredictablePortWindow {
@@ -371,7 +373,7 @@ impl PunchSymToConeHoleClient {
             .send_with_all(&packet, remote_mapped_addr.into())
             .await?;
 
-        let margin = STABLE_PUNCH_WINDOW / 2;
+        let margin = EASY_SYM_PREDICT_WINDOW / 2;
         let base_port_num = (my_mapped.port() as u32).saturating_sub(margin);
         let proto_ips = public_ips.iter().map(|x| (*x).into()).collect();
         let rpc_stub = self.get_rpc_stub(dst_peer_id).await;
@@ -381,7 +383,7 @@ impl PunchSymToConeHoleClient {
                 public_ips: proto_ips,
                 transaction_id: tid,
                 base_port_num,
-                max_port_num: STABLE_PUNCH_WINDOW,
+                max_port_num: EASY_SYM_PREDICT_WINDOW,
                 is_incremental: true,
             };
             if let Err(e) = rpc_stub
@@ -848,10 +850,14 @@ pub mod tests {
 
     #[test]
     fn easy_sym_predict_window_is_wide_enough_for_real_nat_jitter() {
-        assert_eq!(super::easy_sym_predict_window(0), 1856);
-        assert_eq!(super::easy_sym_predict_window(53), 1909);
-        assert_eq!(super::easy_sym_predict_window(554), 2410);
-        assert_eq!(super::easy_sym_predict_window(10_000), 4096);
+        assert_eq!(
+            super::easy_sym_predict_window(0),
+            super::EASY_SYM_PREDICT_WINDOW
+        );
+        assert_eq!(
+            super::easy_sym_predict_window(10_000),
+            super::EASY_SYM_PREDICT_WINDOW
+        );
     }
 
     #[test]
@@ -873,6 +879,32 @@ pub mod tests {
     }
 
     #[test]
+    fn easy_sym_inc_predicts_from_highest_runtime_sample() {
+        let prediction = super::predictable_port_window_from_samples(
+            super::UdpNatType::EasySymmetric(NatType::SymmetricEasyInc, true),
+            &[14_552, 14_553, 14_554, 14_583],
+        )
+        .unwrap();
+
+        assert_eq!(prediction.base_port_num, 14_583);
+        assert_eq!(prediction.max_port_num, super::EASY_SYM_PREDICT_WINDOW);
+        assert!(prediction.is_incremental);
+    }
+
+    #[test]
+    fn easy_sym_dec_predicts_from_lowest_runtime_sample() {
+        let prediction = super::predictable_port_window_from_samples(
+            super::UdpNatType::EasySymmetric(NatType::SymmetricEasyDec, false),
+            &[32_100, 32_099, 32_098, 32_070],
+        )
+        .unwrap();
+
+        assert_eq!(prediction.base_port_num, 32_070);
+        assert_eq!(prediction.max_port_num, super::EASY_SYM_PREDICT_WINDOW);
+        assert!(!prediction.is_incremental);
+    }
+
+    #[test]
     fn hard_sym_predicts_from_monotonic_runtime_samples() {
         let prediction = super::predictable_port_window_from_samples(
             super::UdpNatType::HardSymmetric(NatType::Symmetric),
@@ -880,9 +912,22 @@ pub mod tests {
         )
         .unwrap();
 
-        assert_eq!(prediction.base_port_num, 22_590);
-        assert_eq!(prediction.max_port_num, super::STABLE_PUNCH_WINDOW);
+        assert_eq!(prediction.base_port_num, 23_010);
+        assert_eq!(prediction.max_port_num, super::HARD_SYM_PREDICT_WINDOW);
         assert!(prediction.is_incremental);
+    }
+
+    #[test]
+    fn hard_sym_dec_predicts_from_lowest_runtime_sample() {
+        let prediction = super::predictable_port_window_from_samples(
+            super::UdpNatType::HardSymmetric(NatType::Symmetric),
+            &[23_010, 22_779, 22_640, 22_590],
+        )
+        .unwrap();
+
+        assert_eq!(prediction.base_port_num, 22_590);
+        assert_eq!(prediction.max_port_num, super::HARD_SYM_PREDICT_WINDOW);
+        assert!(!prediction.is_incremental);
     }
 
     #[test]

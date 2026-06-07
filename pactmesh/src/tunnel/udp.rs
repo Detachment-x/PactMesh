@@ -39,7 +39,7 @@ use crate::{
 };
 
 pub const UDP_DATA_MTU: usize = 2000;
-const HOLE_PUNCH_ECHO_SUPPRESS_MS: u128 = 3000;
+const HOLE_PUNCH_ECHO_SUPPRESS_MS: u128 = 250;
 const MAX_HOLE_PUNCH_ECHO_CACHE_ENTRIES: usize = 4096;
 
 type UdpCloseEventSender = UnboundedSender<(SocketAddr, Option<TunnelError>)>;

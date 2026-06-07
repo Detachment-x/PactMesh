@@ -315,9 +315,9 @@ impl UdpSocketArray {
             .collect()
     }
 
-    #[instrument(err)]
+    #[instrument(err, level = Level::DEBUG, skip(data))]
     pub async fn send_with_all(&self, data: &[u8], addr: SocketAddr) -> Result<(), anyhow::Error> {
-        tracing::info!(?addr, "sending hole punching packet");
+        tracing::debug!(?addr, "sending hole punching packet");
 
         let sockets = self.sockets();
 
@@ -697,7 +697,7 @@ fn should_retry_public_listener_selection(
     !force_new_listener && current_listener_count < MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS
 }
 
-#[tracing::instrument(err, ret(level = Level::DEBUG), skip(ports, udp, public_ips))]
+#[tracing::instrument(level = Level::DEBUG, err, ret(level = Level::DEBUG), skip(ports, udp, public_ips))]
 pub(crate) async fn send_symmetric_hole_punch_packet(
     ports: &[u16],
     udp: Arc<UdpSocket>,
