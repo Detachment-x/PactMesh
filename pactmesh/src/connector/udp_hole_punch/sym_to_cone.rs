@@ -41,6 +41,9 @@ const MAX_EASY_SYM_MAPPING_PROBES: usize = 32;
 const EASY_SYM_MAPPING_TIMEOUT_MS: u64 = 2500;
 const PUNCH_RESULT_GRACE_MS: u128 = 2000;
 const EASY_SYM_PREDICT_WINDOW: u32 = 8192;
+const EASY_SYM_SPRAY_CHUNK_SIZE: usize = 512;
+const EASY_SYM_SPRAY_CHUNK_PAUSE_MS: u64 = 20;
+const EASY_SYM_SPRAY_PASSES: usize = 2;
 
 // ZeroTier-parity stable-socket punch: only attempted when our NAT keeps a
 // near-stable per-destination mapping (observed STUN port spread within this
@@ -217,17 +220,33 @@ impl PunchSymToConeHoleServer {
             "send_punch_packet_easy_sym send to ports"
         );
 
-        for _ in 0..2 {
-            send_symmetric_hole_punch_packet(
-                &ports,
-                listener.clone(),
-                transaction_id,
-                &public_ips,
-                0,
-                ports.len(),
-            )
-            .await
-            .with_context(|| "failed to send symmetric hole punch packet")?;
+        for pass in 0..EASY_SYM_SPRAY_PASSES {
+            let mut next_port_index = 0;
+            let mut sent_in_pass = 0;
+            while sent_in_pass < ports.len() {
+                let packets_this_chunk = EASY_SYM_SPRAY_CHUNK_SIZE.min(ports.len() - sent_in_pass);
+                tracing::debug!(
+                    pass,
+                    port_start_idx = next_port_index,
+                    packets_this_chunk,
+                    "send easy symmetric port chunk"
+                );
+                next_port_index = send_symmetric_hole_punch_packet(
+                    &ports,
+                    listener.clone(),
+                    transaction_id,
+                    &public_ips,
+                    next_port_index,
+                    packets_this_chunk,
+                )
+                .await
+                .with_context(|| "failed to send symmetric hole punch packet")?;
+                sent_in_pass += packets_this_chunk;
+
+                if sent_in_pass < ports.len() || pass + 1 < EASY_SYM_SPRAY_PASSES {
+                    tokio::time::sleep(Duration::from_millis(EASY_SYM_SPRAY_CHUNK_PAUSE_MS)).await;
+                }
+            }
         }
 
         Ok(())
