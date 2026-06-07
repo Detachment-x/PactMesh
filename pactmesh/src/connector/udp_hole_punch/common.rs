@@ -697,7 +697,7 @@ fn should_retry_public_listener_selection(
     !force_new_listener && current_listener_count < MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS
 }
 
-#[tracing::instrument(level = Level::DEBUG, err, ret(level = Level::DEBUG), skip(ports, udp, public_ips))]
+#[tracing::instrument(level = Level::TRACE, err, ret(level = Level::TRACE), skip(ports, udp, public_ips))]
 pub(crate) async fn send_symmetric_hole_punch_packet(
     ports: &[u16],
     udp: Arc<UdpSocket>,
@@ -706,7 +706,7 @@ pub(crate) async fn send_symmetric_hole_punch_packet(
     port_start_idx: usize,
     max_packets: usize,
 ) -> Result<usize, Error> {
-    tracing::debug!("sending hard symmetric hole punching packet");
+    tracing::trace!("sending symmetric hole punching packet");
     let mut sent_packets = 0;
     let mut cur_port_idx = port_start_idx;
     while sent_packets < max_packets {

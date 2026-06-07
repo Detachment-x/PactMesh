@@ -40,6 +40,8 @@ const UDP_ARRAY_SIZE_FOR_HARD_SYM: usize = 84;
 const MAX_EASY_SYM_MAPPING_PROBES: usize = 32;
 const EASY_SYM_MAPPING_TIMEOUT_MS: u64 = 2500;
 const PUNCH_RESULT_GRACE_MS: u128 = 2000;
+const PREDICTABLE_PUNCH_RPC_TIMEOUT_MS: i32 = 30_000;
+const RANDOM_PUNCH_RPC_TIMEOUT_MS: i32 = 12_000;
 const EASY_SYM_PREDICT_WINDOW: u32 = 8192;
 const EASY_SYM_SPRAY_CHUNK_SIZE: usize = 512;
 const EASY_SYM_SPRAY_CHUNK_PAUSE_MS: u64 = 20;
@@ -236,7 +238,7 @@ impl PunchSymToConeHoleServer {
             let mut sent_in_pass = 0;
             while sent_in_pass < ports.len() {
                 let packets_this_chunk = EASY_SYM_SPRAY_CHUNK_SIZE.min(ports.len() - sent_in_pass);
-                tracing::debug!(
+                tracing::trace!(
                     pass,
                     port_start_idx = next_port_index,
                     packets_this_chunk,
@@ -568,7 +570,7 @@ impl PunchSymToConeHoleClient {
         let ret = rpc_stub
             .send_punch_packet_easy_sym(
                 BaseController {
-                    timeout_ms: 12000,
+                    timeout_ms: PREDICTABLE_PUNCH_RPC_TIMEOUT_MS,
                     trace_id: 0,
                     ..Default::default()
                 },
@@ -599,7 +601,7 @@ impl PunchSymToConeHoleClient {
         match rpc_stub
             .send_punch_packet_hard_sym(
                 BaseController {
-                    timeout_ms: 12000,
+                    timeout_ms: RANDOM_PUNCH_RPC_TIMEOUT_MS,
                     trace_id: 0,
                     ..Default::default()
                 },
