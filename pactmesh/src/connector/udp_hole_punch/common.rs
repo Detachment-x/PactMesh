@@ -30,6 +30,25 @@ use crate::{
 
 pub(crate) const HOLE_PUNCH_PACKET_BODY_LEN: u16 = 16;
 const MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS: usize = 4;
+const UDP_SOCKET_ARRAY_RECV_BUF_SIZE: usize = u16::MAX as usize;
+const WINDOWS_WSAEMSGSIZE: i32 = 10040;
+
+fn is_windows_udp_message_too_large_error(raw_os_error: Option<i32>) -> bool {
+    raw_os_error == Some(WINDOWS_WSAEMSGSIZE)
+}
+
+fn is_recoverable_udp_recv_error(err: &std::io::Error) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        is_windows_udp_message_too_large_error(err.raw_os_error())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = err;
+        false
+    }
+}
 
 fn generate_shuffled_port_vec() -> Vec<u16> {
     let mut rng = rand::thread_rng();
@@ -259,11 +278,19 @@ impl UdpSocketArray {
         self.tasks.lock().unwrap().spawn(
             async move {
                 defer!(socket_map.remove(&local_addr););
-                let mut buf = [0u8; UDP_TUNNEL_HEADER_SIZE + HOLE_PUNCH_PACKET_BODY_LEN as usize];
+                let mut buf = [0u8; UDP_SOCKET_ARRAY_RECV_BUF_SIZE];
                 tracing::trace!(?local_addr, "udp socket added");
                 loop {
                     let (len, addr) = match socket.recv_from(&mut buf).await {
                         Ok(ret) => ret,
+                        Err(err) if is_recoverable_udp_recv_error(&err) => {
+                            tracing::debug!(
+                                ?err,
+                                ?local_addr,
+                                "udp socket recv skipped recoverable error"
+                            );
+                            continue;
+                        }
                         Err(err) => {
                             tracing::debug!(?err, ?local_addr, "udp socket recv loop ended");
                             break;
@@ -276,7 +303,7 @@ impl UdpSocketArray {
                         continue;
                     }
 
-                    let Some(p) = UDPTunnelHeader::ref_from_prefix(&buf) else {
+                    let Some(p) = UDPTunnelHeader::ref_from_prefix(&buf[..len]) else {
                         continue;
                     };
 
@@ -800,10 +827,67 @@ pub(crate) async fn try_connect_with_socket(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS, should_create_public_listener,
-        should_retry_public_listener_selection,
+    use std::{sync::Arc, time::Duration};
+
+    use tokio::net::UdpSocket;
+
+    use crate::{
+        common::netns::NetNS,
+        tunnel::{packet_def::UDP_TUNNEL_HEADER_SIZE, udp::new_hole_punch_packet},
     };
+
+    use super::{
+        HOLE_PUNCH_PACKET_BODY_LEN, MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS,
+        UDP_SOCKET_ARRAY_RECV_BUF_SIZE, UdpSocketArray, is_windows_udp_message_too_large_error,
+        should_create_public_listener, should_retry_public_listener_selection,
+    };
+
+    #[test]
+    fn udp_socket_array_recv_buffer_can_hold_full_datagram() {
+        assert_eq!(UDP_SOCKET_ARRAY_RECV_BUF_SIZE, u16::MAX as usize);
+    }
+
+    #[test]
+    fn windows_oversize_udp_error_is_recognized() {
+        assert!(is_windows_udp_message_too_large_error(Some(10040)));
+        assert!(!is_windows_udp_message_too_large_error(Some(10054)));
+        assert!(!is_windows_udp_message_too_large_error(None));
+    }
+
+    #[tokio::test]
+    async fn udp_socket_array_ignores_large_non_hole_punch_datagram() {
+        let array = UdpSocketArray::new(1, NetNS::new(None));
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let local_addr = socket.local_addr().unwrap();
+        array.add_new_socket(socket).await.unwrap();
+
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender_addr = sender.local_addr().unwrap();
+        let noise = vec![0x55; UDP_TUNNEL_HEADER_SIZE + HOLE_PUNCH_PACKET_BODY_LEN as usize + 8];
+        sender.send_to(&noise, local_addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(array.started());
+
+        let tid = 0xfeed_beef;
+        array.add_intreast_tid(tid);
+        let packet = new_hole_punch_packet(tid, HOLE_PUNCH_PACKET_BODY_LEN).into_bytes();
+        sender.send_to(&packet, local_addr).await.unwrap();
+
+        let punched = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(punched) = array.try_fetch_punched_socket(tid) {
+                    break punched;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for hole punch packet");
+
+        assert_eq!(punched.tid, tid);
+        assert_eq!(punched.remote_addr, sender_addr);
+        array.remove_intreast_tid(tid);
+    }
 
     #[test]
     fn listener_selection_prefers_reuse_before_cap() {
