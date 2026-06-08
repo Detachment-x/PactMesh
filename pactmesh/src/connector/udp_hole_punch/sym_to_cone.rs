@@ -187,7 +187,7 @@ fn easy_sym_target_ports(base_port_num: u32, max_port_num: u32, is_incremental: 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RemotePortScanKind {
     Centered,
-    FullRandom,
+    CenteredThenRandom,
 }
 
 struct RemotePortScanPlan {
@@ -199,6 +199,22 @@ struct RemotePortScanPlan {
     kind: RemotePortScanKind,
 }
 
+fn centered_ports_around(base_port: u16, window: u16) -> Vec<u16> {
+    let mut ports = Vec::with_capacity((window as usize) * 2 + 1);
+    ports.push(base_port);
+    for offset in 1..=window {
+        if let Some(port) = base_port.checked_add(offset) {
+            ports.push(port);
+        }
+        if let Some(port) = base_port.checked_sub(offset)
+            && port > 0
+        {
+            ports.push(port);
+        }
+    }
+    ports
+}
+
 impl RemotePortScanPlan {
     fn new(remote_addr: SocketAddr, peer_nat_info: UdpNatType) -> Option<Self> {
         let remote_addr = match remote_addr {
@@ -207,37 +223,37 @@ impl RemotePortScanPlan {
         };
         let public_ip = *remote_addr.ip();
         let base_port = remote_addr.port();
+        let centered_ports = centered_ports_around(base_port, REMOTE_SYM_SCAN_WINDOW);
 
         if peer_nat_info.is_unknown() || peer_nat_info.is_hard_sym() {
-            let mut ports: Vec<u16> = (1..=u16::MAX).collect();
-            ports.shuffle(&mut rand::thread_rng());
-            let next_idx = rand::thread_rng().gen_range(0..ports.len());
+            let mut included = vec![false; u16::MAX as usize + 1];
+            for port in centered_ports.iter().copied() {
+                included[port as usize] = true;
+            }
+
+            let mut remaining_ports = Vec::with_capacity(u16::MAX as usize - centered_ports.len());
+            for port in 1..=u16::MAX {
+                if !included[port as usize] {
+                    remaining_ports.push(port);
+                }
+            }
+            remaining_ports.shuffle(&mut rand::thread_rng());
+
+            let mut ports = centered_ports;
+            ports.extend(remaining_ports);
             return Some(Self {
                 public_ip,
                 ports,
-                next_idx,
+                next_idx: 0,
                 ports_per_tick: REMOTE_HARD_SYM_SCAN_PORTS_PER_TICK,
                 socket_limit: REMOTE_SYM_SCAN_SOCKET_LIMIT,
-                kind: RemotePortScanKind::FullRandom,
+                kind: RemotePortScanKind::CenteredThenRandom,
             });
-        }
-
-        let mut ports = Vec::with_capacity((REMOTE_SYM_SCAN_WINDOW as usize) * 2 + 1);
-        ports.push(base_port);
-        for offset in 1..=REMOTE_SYM_SCAN_WINDOW {
-            if let Some(port) = base_port.checked_add(offset) {
-                ports.push(port);
-            }
-            if let Some(port) = base_port.checked_sub(offset)
-                && port > 0
-            {
-                ports.push(port);
-            }
         }
 
         Some(Self {
             public_ip,
-            ports,
+            ports: centered_ports,
             next_idx: 0,
             ports_per_tick: REMOTE_SYM_SCAN_PORTS_PER_TICK,
             socket_limit: usize::MAX,
@@ -1224,20 +1240,21 @@ pub mod tests {
     }
 
     #[test]
-    fn unknown_remote_nat_uses_full_random_scan_plan() {
+    fn unknown_remote_nat_uses_centered_then_random_scan_plan() {
         let plan = super::RemotePortScanPlan::new(
             "198.51.100.10:45678".parse().unwrap(),
             super::UdpNatType::Unknown,
         )
         .unwrap();
 
-        assert_eq!(plan.kind(), super::RemotePortScanKind::FullRandom);
+        assert_eq!(plan.kind(), super::RemotePortScanKind::CenteredThenRandom);
         assert_eq!(
             plan.ports_per_tick,
             super::REMOTE_HARD_SYM_SCAN_PORTS_PER_TICK
         );
         assert_eq!(plan.socket_limit, super::REMOTE_SYM_SCAN_SOCKET_LIMIT);
         assert_eq!(plan.port_count(), u16::MAX as usize);
+        assert_eq!(&plan.ports[..5], &[45_678, 45_679, 45_677, 45_680, 45_676]);
     }
 
     #[test]
