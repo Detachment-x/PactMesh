@@ -83,6 +83,30 @@ struct PredictablePortWindow {
     is_incremental: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimePortPrediction {
+    predictable_port_window: Option<PredictablePortWindow>,
+    mapped_ports: Vec<u16>,
+}
+
+impl RuntimePortPrediction {
+    fn observed_port_spread(&self) -> u32 {
+        let Some(min_port) = self.mapped_ports.iter().min() else {
+            return 0;
+        };
+        let Some(max_port) = self.mapped_ports.iter().max() else {
+            return 0;
+        };
+
+        max_port.saturating_sub(*min_port) as u32
+    }
+
+    fn should_try_stable_socket_punch(&self) -> bool {
+        self.predictable_port_window.is_some()
+            && self.observed_port_spread() <= STABLE_PUNCH_SPREAD_MAX
+    }
+}
+
 fn infer_ordered_port_direction(mapped_ports: &[u16]) -> Option<bool> {
     if mapped_ports.len() < HARD_SYM_PREDICT_MIN_SAMPLES {
         return None;
@@ -97,8 +121,9 @@ fn infer_ordered_port_direction(mapped_ports: &[u16]) -> Option<bool> {
     }
 }
 
-fn hard_sym_centered_port_window(first: u16, last: u16) -> PredictablePortWindow {
-    let window = HARD_SYM_PREDICT_WINDOW.min(u16::MAX as u32);
+fn centered_predictable_port_window(first: u16, last: u16, window: u32) -> PredictablePortWindow {
+    let min_window = last.saturating_sub(first) as u32 + 1;
+    let window = window.max(min_window).min(u16::MAX as u32);
     let first = first as u32;
     let last = last as u32;
     let center = first + (last.saturating_sub(first) / 2);
@@ -116,6 +141,20 @@ fn hard_sym_centered_port_window(first: u16, last: u16) -> PredictablePortWindow
         max_port_num: end.saturating_sub(start).saturating_add(1),
         is_incremental: true,
     }
+}
+
+fn hard_sym_centered_port_window(first: u16, last: u16) -> PredictablePortWindow {
+    centered_predictable_port_window(first, last, HARD_SYM_PREDICT_WINDOW)
+}
+
+fn stable_predictable_port_window(mapped_ports: &[u16]) -> Option<PredictablePortWindow> {
+    let first = *mapped_ports.iter().min()?;
+    let last = *mapped_ports.iter().max()?;
+    Some(centered_predictable_port_window(
+        first,
+        last,
+        STABLE_PUNCH_WINDOW,
+    ))
 }
 
 fn nat_info_for_port_prediction(my_nat_info: UdpNatType) -> Option<UdpNatType> {
@@ -609,6 +648,92 @@ impl PunchSymToConeHoleClient {
         Ok(tunnel)
     }
 
+    async fn try_runtime_stable_socket_punch(
+        &self,
+        dst_peer_id: PeerId,
+        udp_array: &Arc<UdpSocketArray>,
+        remote_mapped_addr: crate::proto::common::SocketAddr,
+        public_ips: &[Ipv4Addr],
+        peer_nat_info: UdpNatType,
+        mapped_ports: &[u16],
+    ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
+        let Some(port_window) = stable_predictable_port_window(mapped_ports) else {
+            return Ok(None);
+        };
+        let global_ctx = self.peer_mgr.get_global_ctx();
+        let tid: u32 = rand::thread_rng().r#gen();
+        let packet = new_hole_punch_packet(tid, HOLE_PUNCH_PACKET_BODY_LEN).into_bytes();
+        udp_array.add_intreast_tid(tid);
+        defer! { udp_array.remove_intreast_tid(tid); }
+
+        let remote_addr: SocketAddr = remote_mapped_addr.into();
+        udp_array.send_with_all(&packet, remote_addr).await?;
+
+        let proto_ips = public_ips.iter().map(|x| (*x).into()).collect();
+        let mapped_ports = mapped_ports.to_vec();
+        let rpc_stub = self.get_rpc_stub(dst_peer_id).await;
+        let punch_task = AbortOnDropHandle::new(tokio::spawn(async move {
+            let req = SendPunchPacketEasySymRequest {
+                listener_mapped_addr: remote_mapped_addr.into(),
+                public_ips: proto_ips,
+                transaction_id: tid,
+                base_port_num: port_window.base_port_num as u32,
+                max_port_num: port_window.max_port_num,
+                is_incremental: port_window.is_incremental,
+            };
+            tracing::info!(
+                ?req,
+                ?mapped_ports,
+                "runtime stable punch: ask peer to target sampled mapped ports"
+            );
+            if let Err(e) = rpc_stub
+                .send_punch_packet_easy_sym(
+                    BaseController {
+                        timeout_ms: 8000,
+                        trace_id: 0,
+                        ..Default::default()
+                    },
+                    req,
+                )
+                .await
+            {
+                tracing::warn!(?e, "runtime stable punch: remote easy-sym spray failed");
+            }
+        }));
+
+        let mut remote_scan = if peer_nat_info.is_unknown() || peer_nat_info.is_sym() {
+            let plan = RemotePortScanPlan::new(remote_addr, peer_nat_info);
+            if let Some(plan) = plan.as_ref() {
+                tracing::info!(
+                    ?remote_addr,
+                    ?peer_nat_info,
+                    scan_kind = ?plan.kind(),
+                    ports_per_tick = plan.ports_per_tick,
+                    socket_limit = plan.socket_limit,
+                    port_count = plan.port_count(),
+                    scan_window = REMOTE_SYM_SCAN_WINDOW,
+                    "runtime stable punch: enable remote symmetric port scan"
+                );
+            }
+            plan
+        } else {
+            None
+        };
+
+        let tunnel = Self::check_hole_punch_result(
+            global_ctx,
+            udp_array,
+            &packet,
+            tid,
+            remote_mapped_addr,
+            &punch_task,
+            remote_scan.as_mut(),
+        )
+        .await?;
+        let _ = punch_task.await;
+        Ok(tunnel)
+    }
+
     async fn prepare_udp_array(
         &self,
     ) -> Result<(Arc<UdpSocketArray>, Option<Vec<Arc<UdpSocket>>>), anyhow::Error> {
@@ -653,11 +778,11 @@ impl PunchSymToConeHoleClient {
         prediction.take();
     }
 
-    async fn get_predictable_port_window(
+    async fn sample_runtime_port_prediction(
         &self,
         my_nat_info: UdpNatType,
         prediction_sockets: Option<&[Arc<UdpSocket>]>,
-    ) -> Option<PredictablePortWindow> {
+    ) -> Option<RuntimePortPrediction> {
         let prediction_nat_info = nat_info_for_port_prediction(my_nat_info)?;
 
         let global_ctx = self.peer_mgr.get_global_ctx();
@@ -736,9 +861,14 @@ impl PunchSymToConeHoleClient {
         }
 
         let prediction = predictable_port_window_from_samples(prediction_nat_info, &mapped_ports);
+        let runtime_prediction = RuntimePortPrediction {
+            predictable_port_window: prediction,
+            mapped_ports,
+        };
         tracing::info!(
-            ?mapped_ports,
-            ?prediction,
+            mapped_ports = ?runtime_prediction.mapped_ports,
+            observed_spread = runtime_prediction.observed_port_spread(),
+            prediction = ?runtime_prediction.predictable_port_window,
             ?my_nat_info,
             ?prediction_nat_info,
             target_samples,
@@ -746,7 +876,7 @@ impl PunchSymToConeHoleClient {
             "symmetric nat prediction based on sampled udp sockets"
         );
 
-        prediction
+        Some(runtime_prediction)
     }
 
     async fn remote_send_hole_punch_packet_predicable<
@@ -1021,8 +1151,10 @@ impl PunchSymToConeHoleClient {
             );
         }
 
-        if self.punch_predicablely.load(Ordering::Relaxed)
-            && observed_spread <= STABLE_PUNCH_SPREAD_MAX
+        let punch_predictably = self.punch_predicablely.load(Ordering::Relaxed);
+        let attempted_global_stable_punch =
+            punch_predictably && observed_spread <= STABLE_PUNCH_SPREAD_MAX;
+        if attempted_global_stable_punch
             && let Some(tunnel) = self
                 .try_stable_socket_punch(dst_peer_id, remote_mapped_addr, &public_ips)
                 .await?
@@ -1031,13 +1163,15 @@ impl PunchSymToConeHoleClient {
         }
 
         let port_index = *last_port_idx as u32;
-        let punch_predictably = self.punch_predicablely.load(Ordering::Relaxed);
         let (udp_array, prediction_sockets) = self.prepare_udp_array().await?;
-        let predictable_port_window = if punch_predictably {
-            let prediction = if let Some(prediction_sockets) = prediction_sockets.as_deref() {
+        let runtime_port_prediction = if punch_predictably {
+            if let Some(prediction_sockets) = prediction_sockets.as_deref() {
                 tokio::time::timeout(
                     Duration::from_millis(EASY_SYM_MAPPING_TIMEOUT_MS),
-                    self.get_predictable_port_window(runtime_my_nat_info, Some(prediction_sockets)),
+                    self.sample_runtime_port_prediction(
+                        runtime_my_nat_info,
+                        Some(prediction_sockets),
+                    ),
                 )
                 .await
                 .unwrap_or_else(|_| {
@@ -1048,8 +1182,16 @@ impl PunchSymToConeHoleClient {
                     None
                 })
             } else {
-                *self.udp_array_predictable_port_window.read().await
-            };
+                None
+            }
+        } else {
+            None
+        };
+        let predictable_port_window = if punch_predictably {
+            let prediction = runtime_port_prediction
+                .as_ref()
+                .and_then(|prediction| prediction.predictable_port_window)
+                .or(*self.udp_array_predictable_port_window.read().await);
             self.cache_predictable_port_window(prediction).await;
             prediction
         } else {
@@ -1059,6 +1201,31 @@ impl PunchSymToConeHoleClient {
         if let Some(sockets) = prediction_sockets {
             udp_array.start_with_sockets(sockets).await?;
             self.publish_udp_array(udp_array.clone()).await;
+        }
+
+        if !attempted_global_stable_punch
+            && punch_predictably
+            && let Some(runtime_port_prediction) = runtime_port_prediction.as_ref()
+            && runtime_port_prediction.should_try_stable_socket_punch()
+        {
+            tracing::info!(
+                mapped_ports = ?runtime_port_prediction.mapped_ports,
+                observed_spread = runtime_port_prediction.observed_port_spread(),
+                "runtime udp array samples qualify for stable-socket punch"
+            );
+            if let Some(tunnel) = self
+                .try_runtime_stable_socket_punch(
+                    dst_peer_id,
+                    &udp_array,
+                    remote_mapped_addr,
+                    &public_ips,
+                    peer_nat_info,
+                    &runtime_port_prediction.mapped_ports,
+                )
+                .await?
+            {
+                return Ok(Some(tunnel));
+            }
         }
         let mut remote_scan = if peer_nat_info.is_unknown() || peer_nat_info.is_sym() {
             let remote_addr: SocketAddr = remote_mapped_addr.into();
@@ -1255,6 +1422,49 @@ pub mod tests {
         assert_eq!(plan.socket_limit, super::REMOTE_SYM_SCAN_SOCKET_LIMIT);
         assert_eq!(plan.port_count(), u16::MAX as usize);
         assert_eq!(&plan.ports[..5], &[45_678, 45_679, 45_677, 45_680, 45_676]);
+    }
+
+    #[test]
+    fn stable_predictable_port_window_covers_sampled_ports() {
+        let prediction = super::stable_predictable_port_window(&[61_552, 61_553, 61_555]).unwrap();
+        assert_eq!(prediction.max_port_num, super::STABLE_PUNCH_WINDOW);
+        assert!(prediction.is_incremental);
+
+        let ports = super::easy_sym_target_ports(
+            prediction.base_port_num as u32,
+            prediction.max_port_num,
+            prediction.is_incremental,
+        );
+        assert!(ports.contains(&61_552));
+        assert!(ports.contains(&61_553));
+        assert!(ports.contains(&61_555));
+    }
+
+    #[test]
+    fn runtime_port_prediction_uses_sample_spread_for_stable_socket_gate() {
+        let stable = super::RuntimePortPrediction {
+            predictable_port_window: Some(super::PredictablePortWindow {
+                base_port_num: 61_555,
+                max_port_num: super::HARD_SYM_PREDICT_WINDOW,
+                is_incremental: true,
+            }),
+            mapped_ports: vec![61_552, 61_553, 61_555],
+        };
+        assert_eq!(stable.observed_port_spread(), 3);
+        assert!(stable.should_try_stable_socket_punch());
+
+        let unstable = super::RuntimePortPrediction {
+            predictable_port_window: stable.predictable_port_window,
+            mapped_ports: vec![10_000, 10_256],
+        };
+        assert_eq!(unstable.observed_port_spread(), 256);
+        assert!(!unstable.should_try_stable_socket_punch());
+
+        let no_window = super::RuntimePortPrediction {
+            predictable_port_window: None,
+            mapped_ports: vec![61_552, 61_553, 61_555],
+        };
+        assert!(!no_window.should_try_stable_socket_punch());
     }
 
     #[test]
