@@ -62,6 +62,35 @@ fn easy_sym_target_ports(base_port_num: u32, max_port_num: u32, is_incremental: 
     }
 }
 
+fn best_effort_cached_udp_mapped_addr(
+    global_ctx: &crate::common::global_ctx::ArcGlobalCtx,
+    local_port: u16,
+) -> Option<SocketAddr> {
+    let stun_info = global_ctx.get_stun_info_collector().get_stun_info();
+    let public_ip = stun_info
+        .public_ip
+        .iter()
+        .find_map(|ip| ip.parse::<Ipv4Addr>().ok())?;
+
+    let min_port = u16::try_from(stun_info.min_port)
+        .ok()
+        .filter(|port| *port != 0);
+    let max_port = u16::try_from(stun_info.max_port)
+        .ok()
+        .filter(|port| *port != 0);
+    let port = match (min_port, max_port) {
+        (Some(min_port), Some(max_port)) => {
+            let lo = min_port.min(max_port) as u32;
+            let hi = min_port.max(max_port) as u32;
+            (lo + hi.saturating_sub(lo) / 2) as u16
+        }
+        _ if local_port != 0 => local_port,
+        _ => 1,
+    };
+
+    Some(SocketAddr::V4(SocketAddrV4::new(public_ip, port)))
+}
+
 #[derive(Debug)]
 struct CoordinatedSymPortPlan {
     public_ip: Ipv4Addr,
@@ -220,29 +249,13 @@ impl PunchBothEasySymHoleServer {
         let udp_array = UdpSocketArray::new(socket_count, global_ctx.net_ns.clone());
         let cur_mapped_addr = if coordinated {
             let sockets = udp_array.bind_sockets().await?;
-            let mapped_addr = if let Some(socket) = sockets.first() {
-                match global_ctx
-                    .get_stun_info_collector()
-                    .get_udp_port_mapping_with_socket(socket.clone())
-                    .await
-                {
-                    Ok(mapped_addr) => mapped_addr,
-                    Err(e) => {
-                        tracing::warn!(?e, "failed to map coordinated udp array socket");
-                        global_ctx
-                            .get_stun_info_collector()
-                            .get_udp_port_mapping(0)
-                            .await
-                            .with_context(|| "failed to get fallback udp port mapping")?
-                    }
-                }
-            } else {
-                global_ctx
-                    .get_stun_info_collector()
-                    .get_udp_port_mapping(0)
-                    .await
-                    .with_context(|| "failed to get udp port mapping")?
-            };
+            let local_port = sockets
+                .first()
+                .and_then(|socket| socket.local_addr().ok())
+                .map(|addr| addr.port())
+                .unwrap_or(0);
+            let mapped_addr = best_effort_cached_udp_mapped_addr(&global_ctx, local_port)
+                .ok_or(anyhow::anyhow!("failed to get cached udp mapped addr"))?;
             udp_array.start_with_sockets(sockets).await?;
             mapped_addr
         } else {
