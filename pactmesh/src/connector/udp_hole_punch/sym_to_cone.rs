@@ -57,6 +57,7 @@ const STABLE_PUNCH_SPREAD_MAX: u32 = 64;
 // Use a wider centered spray than the STUN-observed spread: some symmetric NATs
 // shift the mapped port further when the destination changes from STUN to peer.
 const STABLE_PUNCH_WINDOW: u32 = 4096;
+const STABLE_PUNCH_WINDOWS: [u32; 3] = [4096, 8192, 16384];
 const HARD_SYM_PREDICT_WINDOW: u32 = 32768;
 const STABLE_PUNCH_WAIT_MS: u128 = 5000;
 
@@ -148,13 +149,16 @@ fn hard_sym_centered_port_window(first: u16, last: u16) -> PredictablePortWindow
 }
 
 fn stable_predictable_port_window(mapped_ports: &[u16]) -> Option<PredictablePortWindow> {
+    stable_predictable_port_window_with_width(mapped_ports, STABLE_PUNCH_WINDOW)
+}
+
+fn stable_predictable_port_window_with_width(
+    mapped_ports: &[u16],
+    window: u32,
+) -> Option<PredictablePortWindow> {
     let first = *mapped_ports.iter().min()?;
     let last = *mapped_ports.iter().max()?;
-    Some(centered_predictable_port_window(
-        first,
-        last,
-        STABLE_PUNCH_WINDOW,
-    ))
+    Some(centered_predictable_port_window(first, last, window))
 }
 
 fn nat_info_for_port_prediction(my_nat_info: UdpNatType) -> Option<UdpNatType> {
@@ -657,81 +661,103 @@ impl PunchSymToConeHoleClient {
         peer_nat_info: UdpNatType,
         mapped_ports: &[u16],
     ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
-        let Some(port_window) = stable_predictable_port_window(mapped_ports) else {
-            return Ok(None);
-        };
         let global_ctx = self.peer_mgr.get_global_ctx();
-        let tid: u32 = rand::thread_rng().r#gen();
-        let packet = new_hole_punch_packet(tid, HOLE_PUNCH_PACKET_BODY_LEN).into_bytes();
-        udp_array.add_intreast_tid(tid);
-        defer! { udp_array.remove_intreast_tid(tid); }
-
         let remote_addr: SocketAddr = remote_mapped_addr.into();
-        udp_array.send_with_all(&packet, remote_addr).await?;
 
-        let proto_ips = public_ips.iter().map(|x| (*x).into()).collect();
-        let mapped_ports = mapped_ports.to_vec();
-        let rpc_stub = self.get_rpc_stub(dst_peer_id).await;
-        let punch_task = AbortOnDropHandle::new(tokio::spawn(async move {
-            let req = SendPunchPacketEasySymRequest {
-                listener_mapped_addr: remote_mapped_addr.into(),
-                public_ips: proto_ips,
-                transaction_id: tid,
-                base_port_num: port_window.base_port_num as u32,
-                max_port_num: port_window.max_port_num,
-                is_incremental: port_window.is_incremental,
+        for window in STABLE_PUNCH_WINDOWS {
+            let Some(port_window) = stable_predictable_port_window_with_width(mapped_ports, window)
+            else {
+                continue;
             };
-            tracing::info!(
-                ?req,
-                ?mapped_ports,
-                "runtime stable punch: ask peer to target sampled mapped ports"
-            );
-            if let Err(e) = rpc_stub
-                .send_punch_packet_easy_sym(
-                    BaseController {
-                        timeout_ms: 8000,
-                        trace_id: 0,
-                        ..Default::default()
-                    },
-                    req,
-                )
-                .await
-            {
-                tracing::warn!(?e, "runtime stable punch: remote easy-sym spray failed");
-            }
-        }));
 
-        let mut remote_scan = if peer_nat_info.is_unknown() || peer_nat_info.is_sym() {
-            let plan = RemotePortScanPlan::new(remote_addr, peer_nat_info);
-            if let Some(plan) = plan.as_ref() {
+            let tid: u32 = rand::thread_rng().r#gen();
+            let packet = new_hole_punch_packet(tid, HOLE_PUNCH_PACKET_BODY_LEN).into_bytes();
+            udp_array.add_intreast_tid(tid);
+            defer! { udp_array.remove_intreast_tid(tid); }
+
+            udp_array.send_with_all(&packet, remote_addr).await?;
+
+            let proto_ips = public_ips.iter().map(|x| (*x).into()).collect();
+            let mapped_ports_for_rpc = mapped_ports.to_vec();
+            let rpc_stub = self.get_rpc_stub(dst_peer_id).await;
+            let punch_task = AbortOnDropHandle::new(tokio::spawn(async move {
+                let req = SendPunchPacketEasySymRequest {
+                    listener_mapped_addr: remote_mapped_addr.into(),
+                    public_ips: proto_ips,
+                    transaction_id: tid,
+                    base_port_num: port_window.base_port_num as u32,
+                    max_port_num: port_window.max_port_num,
+                    is_incremental: port_window.is_incremental,
+                };
                 tracing::info!(
-                    ?remote_addr,
-                    ?peer_nat_info,
-                    scan_kind = ?plan.kind(),
-                    ports_per_tick = plan.ports_per_tick,
-                    socket_limit = plan.socket_limit,
-                    port_count = plan.port_count(),
-                    scan_window = REMOTE_SYM_SCAN_WINDOW,
-                    "runtime stable punch: enable remote symmetric port scan"
+                    ?req,
+                    ?mapped_ports_for_rpc,
+                    window,
+                    "runtime stable punch: ask peer to target sampled mapped ports"
                 );
-            }
-            plan
-        } else {
-            None
-        };
+                if let Err(e) = rpc_stub
+                    .send_punch_packet_easy_sym(
+                        BaseController {
+                            timeout_ms: 8000,
+                            trace_id: 0,
+                            ..Default::default()
+                        },
+                        req,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        ?e,
+                        window,
+                        "runtime stable punch: remote easy-sym spray failed"
+                    );
+                }
+            }));
 
-        let tunnel = Self::check_hole_punch_result(
-            global_ctx,
-            udp_array,
-            &packet,
-            tid,
-            remote_mapped_addr,
-            &punch_task,
-            remote_scan.as_mut(),
-        )
-        .await?;
-        let _ = punch_task.await;
-        Ok(tunnel)
+            let mut remote_scan = if peer_nat_info.is_unknown() || peer_nat_info.is_sym() {
+                let plan = RemotePortScanPlan::new(remote_addr, peer_nat_info);
+                if let Some(plan) = plan.as_ref() {
+                    tracing::info!(
+                        ?remote_addr,
+                        ?peer_nat_info,
+                        window,
+                        scan_kind = ?plan.kind(),
+                        ports_per_tick = plan.ports_per_tick,
+                        socket_limit = plan.socket_limit,
+                        port_count = plan.port_count(),
+                        scan_window = REMOTE_SYM_SCAN_WINDOW,
+                        "runtime stable punch: enable remote symmetric port scan"
+                    );
+                }
+                plan
+            } else {
+                None
+            };
+
+            let tunnel = Self::check_hole_punch_result(
+                global_ctx.clone(),
+                udp_array,
+                &packet,
+                tid,
+                remote_mapped_addr,
+                &punch_task,
+                remote_scan.as_mut(),
+            )
+            .await?;
+            let _ = punch_task.await;
+
+            if tunnel.is_some() {
+                return Ok(tunnel);
+            }
+
+            tracing::info!(
+                window,
+                ?mapped_ports,
+                "runtime stable punch window finished without direct path"
+            );
+        }
+
+        Ok(None)
     }
 
     async fn prepare_udp_array(
@@ -1437,6 +1463,26 @@ pub mod tests {
         assert!(ports.contains(&61_552));
         assert!(ports.contains(&61_553));
         assert!(ports.contains(&61_555));
+    }
+
+    #[test]
+    fn wider_stable_predictable_port_window_keeps_samples_centered() {
+        let prediction =
+            super::stable_predictable_port_window_with_width(&[13_002, 13_003, 13_004], 16_384)
+                .unwrap();
+        assert_eq!(prediction.max_port_num, 16_384);
+        assert!(prediction.is_incremental);
+
+        let ports = super::easy_sym_target_ports(
+            prediction.base_port_num as u32,
+            prediction.max_port_num,
+            prediction.is_incremental,
+        );
+        assert!(ports.contains(&13_002));
+        assert!(ports.contains(&13_003));
+        assert!(ports.contains(&13_004));
+        assert_eq!(ports.first().copied(), Some(4_811));
+        assert_eq!(ports.last().copied(), Some(21_194));
     }
 
     #[test]

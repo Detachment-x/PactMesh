@@ -297,7 +297,47 @@ impl UdpSocketArray {
                         }
                     };
 
-                    tracing::debug!(?len, ?addr, "got raw packet");
+                    if len >= UDP_TUNNEL_HEADER_SIZE {
+                        let header = UDPTunnelHeader::ref_from_prefix(&buf[..len]);
+                        let is_stun_like =
+                            buf[4..8] == [0x21, 0x12, 0xA4, 0x42] && buf[0] & 0xC0 == 0;
+                        if let Some(header) = header {
+                            let tid = header.conn_id.get();
+                            let msg_type = header.msg_type;
+                            let body_len = header.len.get();
+                            let expected_len = UDP_TUNNEL_HEADER_SIZE + body_len as usize;
+                            let is_hole_punch = msg_type == UdpPacketType::HolePunch as u8;
+                            let is_interesting_tid = intreast_tids.contains(&tid);
+                            tracing::debug!(
+                                len,
+                                ?addr,
+                                ?local_addr,
+                                tid,
+                                msg_type,
+                                body_len,
+                                expected_len,
+                                is_hole_punch,
+                                is_interesting_tid,
+                                is_stun_like,
+                                "got raw packet"
+                            );
+                        } else {
+                            tracing::debug!(
+                                len,
+                                ?addr,
+                                ?local_addr,
+                                is_stun_like,
+                                "got raw packet without udp tunnel header"
+                            );
+                        }
+                    } else {
+                        tracing::debug!(
+                            len,
+                            ?addr,
+                            ?local_addr,
+                            "got raw packet shorter than udp tunnel header"
+                        );
+                    }
 
                     if len != UDP_TUNNEL_HEADER_SIZE + HOLE_PUNCH_PACKET_BODY_LEN as usize {
                         continue;
