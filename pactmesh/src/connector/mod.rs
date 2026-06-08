@@ -1,7 +1,6 @@
-use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
-    sync::Arc,
-};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+
+use pnet::ipnetwork::IpNetwork;
 
 use crate::{
     common::{error::Error, global_ctx::ArcGlobalCtx, idn, network::IPCollector},
@@ -56,7 +55,7 @@ pub(crate) fn should_background_p2p_with_peer(
 async fn set_bind_addr_for_peer_connector(
     connector: &mut (impl TunnelConnector + ?Sized),
     dst_addr: SocketAddr,
-    ip_collector: &Arc<IPCollector>,
+    global_ctx: &ArcGlobalCtx,
 ) {
     if cfg!(any(
         target_os = "android",
@@ -69,25 +68,7 @@ async fn set_bind_addr_for_peer_connector(
         return;
     }
 
-    let ips = ip_collector.collect_ip_addrs().await;
-    let bind_addrs = match dst_addr {
-        SocketAddr::V4(dst) => ips
-            .interface_ipv4s
-            .into_iter()
-            .map(Ipv4Addr::from)
-            .filter(|src| should_bind_ipv4_source_for_dst(*src, *dst.ip()))
-            .map(|src| SocketAddrV4::new(src, 0).into())
-            .collect::<Vec<_>>(),
-        SocketAddr::V6(dst) => ips
-            .interface_ipv6s
-            .iter()
-            .chain(ips.public_ipv6.iter())
-            .map(|src| Ipv6Addr::from(*src))
-            .filter(|src| should_bind_ipv6_source_for_dst(*src, *dst.ip()))
-            .map(|src| SocketAddrV6::new(src, 0, 0, 0).into())
-            .collect::<Vec<_>>(),
-    };
-
+    let bind_addrs = collect_route_matched_bind_addrs(global_ctx, dst_addr).await;
     if bind_addrs.is_empty() {
         tracing::debug!(
             ?dst_addr,
@@ -96,6 +77,34 @@ async fn set_bind_addr_for_peer_connector(
     }
     connector.set_bind_addrs(bind_addrs);
     let _ = connector;
+}
+
+async fn collect_route_matched_bind_addrs(
+    global_ctx: &ArcGlobalCtx,
+    dst_addr: SocketAddr,
+) -> Vec<SocketAddr> {
+    match dst_addr {
+        SocketAddr::V4(dst) => IPCollector::collect_interfaces(global_ctx.net_ns.clone(), true)
+            .await
+            .into_iter()
+            .flat_map(|iface| iface.ips.into_iter())
+            .filter_map(|ip| match ip {
+                IpNetwork::V4(network) if network.contains(*dst.ip()) => Some(network.ip()),
+                _ => None,
+            })
+            .map(|src| SocketAddrV4::new(src, 0).into())
+            .collect::<Vec<_>>(),
+        SocketAddr::V6(dst) => {
+            let ips = global_ctx.get_ip_collector().collect_ip_addrs().await;
+            ips.interface_ipv6s
+                .iter()
+                .chain(ips.public_ipv6.iter())
+                .map(|src| Ipv6Addr::from(*src))
+                .filter(|src| should_bind_ipv6_source_for_dst(*src, *dst.ip()))
+                .map(|src| SocketAddrV6::new(src, 0, 0, 0).into())
+                .collect::<Vec<_>>()
+        }
+    }
 }
 
 fn private_ipv4_family(ip: Ipv4Addr) -> Option<u8> {
@@ -169,12 +178,7 @@ pub async fn create_connector_by_url(
             let bind_device = global_ctx.config.get_flags().bind_device;
             let should_bind_device = bind_device && should_bind_device_for_dst(dst_addr);
             if should_bind_device {
-                set_bind_addr_for_peer_connector(
-                    &mut connector,
-                    dst_addr,
-                    &global_ctx.get_ip_collector(),
-                )
-                .await;
+                set_bind_addr_for_peer_connector(&mut connector, dst_addr, global_ctx).await;
             } else if bind_device {
                 tracing::debug!(
                     ?dst_addr,
@@ -209,8 +213,8 @@ mod tests {
     use crate::proto::common::PeerFeatureFlag;
 
     use super::{
-        should_background_p2p_with_peer, should_bind_device_for_dst,
-        should_bind_ipv4_source_for_dst, should_try_p2p_with_peer,
+        private_ipv4_family, should_background_p2p_with_peer, should_bind_device_for_dst,
+        should_try_p2p_with_peer,
     };
 
     #[test]
@@ -277,32 +281,26 @@ mod tests {
     }
 
     #[test]
-    fn bind_device_source_filter_matches_private_address_family() {
-        assert!(should_bind_ipv4_source_for_dst(
-            "192.168.6.128".parse().unwrap(),
-            "192.168.0.156".parse().unwrap()
-        ));
-        assert!(should_bind_ipv4_source_for_dst(
-            "10.0.0.101".parse().unwrap(),
-            "10.0.0.100".parse().unwrap()
-        ));
-        assert!(should_bind_ipv4_source_for_dst(
-            "172.20.1.2".parse().unwrap(),
-            "172.16.4.8".parse().unwrap()
-        ));
+    fn private_ipv4_family_recognizes_rfc1918_ranges() {
+        assert_eq!(
+            private_ipv4_family("10.0.0.100".parse().unwrap()),
+            Some(10)
+        );
+        assert_eq!(
+            private_ipv4_family("172.16.4.8".parse().unwrap()),
+            Some(172)
+        );
+        assert_eq!(
+            private_ipv4_family("172.31.4.8".parse().unwrap()),
+            Some(172)
+        );
+        assert_eq!(
+            private_ipv4_family("192.168.6.128".parse().unwrap()),
+            Some(192)
+        );
 
-        assert!(!should_bind_ipv4_source_for_dst(
-            "10.0.0.100".parse().unwrap(),
-            "192.168.0.156".parse().unwrap()
-        ));
-        assert!(!should_bind_ipv4_source_for_dst(
-            "192.168.0.156".parse().unwrap(),
-            "10.0.0.100".parse().unwrap()
-        ));
-        assert!(!should_bind_ipv4_source_for_dst(
-            "192.168.6.128".parse().unwrap(),
-            "203.0.113.9".parse().unwrap()
-        ));
+        assert_eq!(private_ipv4_family("172.32.4.8".parse().unwrap()), None);
+        assert_eq!(private_ipv4_family("203.0.113.9".parse().unwrap()), None);
     }
 
     #[test]
