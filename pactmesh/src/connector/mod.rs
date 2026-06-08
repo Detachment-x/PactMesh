@@ -1,5 +1,5 @@
 use std::{
-    net::{SocketAddr, SocketAddrV4, SocketAddrV6},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     sync::Arc,
 };
 
@@ -55,7 +55,7 @@ pub(crate) fn should_background_p2p_with_peer(
 
 async fn set_bind_addr_for_peer_connector(
     connector: &mut (impl TunnelConnector + ?Sized),
-    is_ipv4: bool,
+    dst_addr: SocketAddr,
     ip_collector: &Arc<IPCollector>,
 ) {
     if cfg!(any(
@@ -70,26 +70,62 @@ async fn set_bind_addr_for_peer_connector(
     }
 
     let ips = ip_collector.collect_ip_addrs().await;
-    if is_ipv4 {
-        let mut bind_addrs = vec![];
-        for ipv4 in ips.interface_ipv4s {
-            let socket_addr = SocketAddrV4::new(ipv4.into(), 0).into();
-            bind_addrs.push(socket_addr);
-        }
-        connector.set_bind_addrs(bind_addrs);
-    } else {
-        let mut bind_addrs = vec![];
-        for ipv6 in ips.interface_ipv6s.iter().chain(ips.public_ipv6.iter()) {
-            let socket_addr = SocketAddrV6::new(std::net::Ipv6Addr::from(*ipv6), 0, 0, 0).into();
-            bind_addrs.push(socket_addr);
-        }
-        connector.set_bind_addrs(bind_addrs);
+    let bind_addrs = match dst_addr {
+        SocketAddr::V4(dst) => ips
+            .interface_ipv4s
+            .into_iter()
+            .map(Ipv4Addr::from)
+            .filter(|src| should_bind_ipv4_source_for_dst(*src, *dst.ip()))
+            .map(|src| SocketAddrV4::new(src, 0).into())
+            .collect::<Vec<_>>(),
+        SocketAddr::V6(dst) => ips
+            .interface_ipv6s
+            .iter()
+            .chain(ips.public_ipv6.iter())
+            .map(|src| Ipv6Addr::from(*src))
+            .filter(|src| should_bind_ipv6_source_for_dst(*src, *dst.ip()))
+            .map(|src| SocketAddrV6::new(src, 0, 0, 0).into())
+            .collect::<Vec<_>>(),
+    };
+
+    if bind_addrs.is_empty() {
+        tracing::debug!(
+            ?dst_addr,
+            "no route-matched bind-device source addresses for direct connector"
+        );
     }
+    connector.set_bind_addrs(bind_addrs);
     let _ = connector;
 }
 
+fn private_ipv4_family(ip: Ipv4Addr) -> Option<u8> {
+    let octets = ip.octets();
+    if octets[0] == 10 {
+        Some(10)
+    } else if octets[0] == 172 && (16..=31).contains(&octets[1]) {
+        Some(172)
+    } else if octets[0] == 192 && octets[1] == 168 {
+        Some(192)
+    } else {
+        None
+    }
+}
+
+fn should_bind_ipv4_source_for_dst(src: Ipv4Addr, dst: Ipv4Addr) -> bool {
+    private_ipv4_family(dst).is_some_and(|family| private_ipv4_family(src) == Some(family))
+}
+
+fn should_bind_ipv6_source_for_dst(src: Ipv6Addr, dst: Ipv6Addr) -> bool {
+    dst.is_unique_local() && src.is_unique_local()
+}
+
 fn should_bind_device_for_dst(dst_addr: SocketAddr) -> bool {
-    !dst_addr.ip().is_loopback()
+    match dst_addr.ip() {
+        // Keep explicit source binding only for private LAN or overlay candidates;
+        // public targets should use the OS route table's chosen source address.
+        IpAddr::V4(ip) => private_ipv4_family(ip).is_some(),
+        IpAddr::V6(ip) => ip.is_unique_local(),
+    }
 }
 
 pub async fn create_connector_by_url(
@@ -130,13 +166,20 @@ pub async fn create_connector_by_url(
                 #[cfg(feature = "faketcp")]
                 IpScheme::FakeTcp => tunnel::fake_tcp::FakeTcpTunnelConnector::new(url).boxed(),
             };
-            if global_ctx.config.get_flags().bind_device && should_bind_device_for_dst(dst_addr) {
+            let bind_device = global_ctx.config.get_flags().bind_device;
+            let should_bind_device = bind_device && should_bind_device_for_dst(dst_addr);
+            if should_bind_device {
                 set_bind_addr_for_peer_connector(
                     &mut connector,
-                    dst_addr.is_ipv4(),
+                    dst_addr,
                     &global_ctx.get_ip_collector(),
                 )
                 .await;
+            } else if bind_device {
+                tracing::debug!(
+                    ?dst_addr,
+                    "skip bind-device for default-routed direct connector destination"
+                );
             }
             connector
         }
@@ -165,7 +208,10 @@ pub async fn create_connector_by_url(
 mod tests {
     use crate::proto::common::PeerFeatureFlag;
 
-    use super::{should_background_p2p_with_peer, should_try_p2p_with_peer};
+    use super::{
+        should_background_p2p_with_peer, should_bind_device_for_dst,
+        should_bind_ipv4_source_for_dst, should_try_p2p_with_peer,
+    };
 
     #[test]
     fn lazy_background_p2p_requires_need_p2p() {
@@ -198,6 +244,64 @@ mod tests {
             true,
             false,
             false
+        ));
+    }
+
+    #[test]
+    fn bind_device_is_only_used_for_private_direct_targets() {
+        assert!(should_bind_device_for_dst(
+            "192.168.6.128:11030".parse().unwrap()
+        ));
+        assert!(should_bind_device_for_dst(
+            "10.0.0.100:11030".parse().unwrap()
+        ));
+        assert!(should_bind_device_for_dst(
+            "172.16.4.8:11030".parse().unwrap()
+        ));
+        assert!(should_bind_device_for_dst(
+            "[fd7b:cf81:ff54::785]:11030".parse().unwrap()
+        ));
+
+        assert!(!should_bind_device_for_dst(
+            "203.0.113.9:11020".parse().unwrap()
+        ));
+        assert!(!should_bind_device_for_dst(
+            "203.0.113.16:11010".parse().unwrap()
+        ));
+        assert!(!should_bind_device_for_dst(
+            "127.0.0.1:11020".parse().unwrap()
+        ));
+        assert!(!should_bind_device_for_dst(
+            "[2001:4860:4860::8888]:443".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn bind_device_source_filter_matches_private_address_family() {
+        assert!(should_bind_ipv4_source_for_dst(
+            "192.168.6.128".parse().unwrap(),
+            "192.168.0.156".parse().unwrap()
+        ));
+        assert!(should_bind_ipv4_source_for_dst(
+            "10.0.0.101".parse().unwrap(),
+            "10.0.0.100".parse().unwrap()
+        ));
+        assert!(should_bind_ipv4_source_for_dst(
+            "172.20.1.2".parse().unwrap(),
+            "172.16.4.8".parse().unwrap()
+        ));
+
+        assert!(!should_bind_ipv4_source_for_dst(
+            "10.0.0.100".parse().unwrap(),
+            "192.168.0.156".parse().unwrap()
+        ));
+        assert!(!should_bind_ipv4_source_for_dst(
+            "192.168.0.156".parse().unwrap(),
+            "10.0.0.100".parse().unwrap()
+        ));
+        assert!(!should_bind_ipv4_source_for_dst(
+            "192.168.6.128".parse().unwrap(),
+            "203.0.113.9".parse().unwrap()
         ));
     }
 
