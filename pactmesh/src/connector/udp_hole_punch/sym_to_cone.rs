@@ -1,5 +1,7 @@
 use std::{
+    future::Future,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -66,6 +68,9 @@ const REMOTE_SYM_SCAN_PORTS_PER_TICK: usize = 32;
 const REMOTE_HARD_SYM_SCAN_PORTS_PER_TICK: usize = 128;
 const REMOTE_SYM_SCAN_WINDOW: u16 = 4096;
 const REMOTE_SYM_SCAN_SOCKET_LIMIT: usize = 16;
+
+type UdpHolePunchRpcStub =
+    Box<dyn UdpHolePunchRpc<Controller = BaseController> + std::marker::Send + Sync + 'static>;
 
 fn easy_sym_predict_window(_observed_span: u32) -> u32 {
     EASY_SYM_PREDICT_WINDOW
@@ -807,11 +812,7 @@ impl PunchSymToConeHoleClient {
         }
     }
 
-    async fn get_rpc_stub(
-        &self,
-        dst_peer_id: PeerId,
-    ) -> Box<dyn UdpHolePunchRpc<Controller = BaseController> + std::marker::Send + Sync + 'static>
-    {
+    async fn get_rpc_stub(&self, dst_peer_id: PeerId) -> UdpHolePunchRpcStub {
         self.peer_mgr
             .get_peer_rpc_mgr()
             .rpc_client()
@@ -820,6 +821,50 @@ impl PunchSymToConeHoleClient {
                 dst_peer_id,
                 self.peer_mgr.get_global_ctx().get_network_name(),
             )
+    }
+
+    async fn remote_send_hole_punch_packets(
+        predictable_rpc_stub: Option<UdpHolePunchRpcStub>,
+        random_rpc_stub: Option<UdpHolePunchRpcStub>,
+        predictable_port_window: Option<PredictablePortWindow>,
+        my_nat_info: UdpNatType,
+        remote_mapped_addr: crate::proto::common::SocketAddr,
+        public_ips: Vec<Ipv4Addr>,
+        tid: u32,
+        round: u32,
+        port_index: u32,
+    ) -> Option<u32> {
+        let predictable_public_ips = public_ips.clone();
+        let predictable_fut: Pin<Box<dyn Future<Output = ()> + Send>> =
+            if let Some(rpc_stub) = predictable_rpc_stub {
+                Box::pin(Self::remote_send_hole_punch_packet_predicable(
+                    rpc_stub,
+                    predictable_port_window,
+                    my_nat_info,
+                    remote_mapped_addr,
+                    predictable_public_ips,
+                    tid,
+                ))
+            } else {
+                Box::pin(async {})
+            };
+
+        let random_fut: Pin<Box<dyn Future<Output = Option<u32>> + Send>> =
+            if let Some(rpc_stub) = random_rpc_stub {
+                Box::pin(Self::remote_send_hole_punch_packet_random(
+                    rpc_stub,
+                    remote_mapped_addr,
+                    public_ips,
+                    tid,
+                    round,
+                    port_index,
+                ))
+            } else {
+                Box::pin(async { None })
+            };
+
+        let (_, next_port_index) = tokio::join!(predictable_fut, random_fut);
+        next_port_index
     }
 
     async fn check_hole_punch_result<T>(
@@ -1027,45 +1072,34 @@ impl PunchSymToConeHoleClient {
             .send_with_all(&packet, remote_mapped_addr.into())
             .await?;
 
-        if predictable_port_window.is_some() {
-            let rpc_stub = self.get_rpc_stub(dst_peer_id).await;
-            let punch_task = AbortOnDropHandle::new(tokio::spawn(
-                Self::remote_send_hole_punch_packet_predicable(
-                    rpc_stub,
-                    predictable_port_window,
-                    runtime_my_nat_info,
-                    remote_mapped_addr,
-                    public_ips.clone(),
-                    tid,
-                ),
-            ));
-            let ret_tunnel = Self::check_hole_punch_result(
-                global_ctx.clone(),
-                &udp_array,
-                &packet,
-                tid,
-                remote_mapped_addr,
-                &punch_task,
-                remote_scan.as_mut(),
-            )
-            .await?;
-
-            let task_ret = punch_task.await;
-            tracing::info!(?ret_tunnel, ?task_ret, "predictable punch task got result");
-            if let Some(tunnel) = ret_tunnel {
-                return Ok(Some(tunnel));
-            }
+        let punch_predictably = predictable_port_window.is_some();
+        let punch_randomly = self.punch_randomly.load(Ordering::Relaxed);
+        if !punch_predictably {
+            tracing::debug!("skip predictable symmetric punch without usable port window");
         }
-
-        if !self.punch_randomly.load(Ordering::Relaxed) {
+        if !punch_randomly {
             tracing::debug!("skip random symmetric punch because punch_randomly=false");
+        }
+        if !punch_predictably && !punch_randomly {
             return Ok(None);
         }
 
-        let rpc_stub = self.get_rpc_stub(dst_peer_id).await;
+        let predictable_rpc_stub = if punch_predictably {
+            Some(self.get_rpc_stub(dst_peer_id).await)
+        } else {
+            None
+        };
+        let random_rpc_stub = if punch_randomly {
+            Some(self.get_rpc_stub(dst_peer_id).await)
+        } else {
+            None
+        };
         let punch_task =
-            AbortOnDropHandle::new(tokio::spawn(Self::remote_send_hole_punch_packet_random(
-                rpc_stub,
+            AbortOnDropHandle::new(tokio::spawn(Self::remote_send_hole_punch_packets(
+                predictable_rpc_stub,
+                random_rpc_stub,
+                predictable_port_window,
+                runtime_my_nat_info,
                 remote_mapped_addr,
                 public_ips.clone(),
                 tid,
@@ -1083,13 +1117,24 @@ impl PunchSymToConeHoleClient {
         )
         .await?;
 
-        let punch_task_result = punch_task.await;
-        tracing::info!(?punch_task_result, ?ret_tunnel, "punch task got result");
+        if ret_tunnel.is_some() {
+            tracing::info!(?ret_tunnel, "sym punch tasks produced tunnel");
+            return Ok(ret_tunnel);
+        }
 
-        if let Ok(Some(next_port_idx)) = punch_task_result {
-            *last_port_idx = next_port_idx as usize;
-        } else {
-            *last_port_idx = rand::random();
+        let punch_task_result = punch_task.await;
+        tracing::info!(
+            ?punch_task_result,
+            ?ret_tunnel,
+            "sym punch tasks got result"
+        );
+
+        if punch_randomly {
+            if let Ok(Some(next_port_idx)) = punch_task_result {
+                *last_port_idx = next_port_idx as usize;
+            } else {
+                *last_port_idx = rand::random();
+            }
         }
 
         Ok(ret_tunnel)
