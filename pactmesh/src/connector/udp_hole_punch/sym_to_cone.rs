@@ -75,6 +75,8 @@ const REMOTE_SYM_SCAN_PORTS_PER_TICK: usize = 32;
 const REMOTE_HARD_SYM_SCAN_PORTS_PER_TICK: usize = 128;
 const REMOTE_SYM_SCAN_WINDOW: u16 = 4096;
 const REMOTE_SYM_SCAN_SOCKET_LIMIT: usize = 16;
+const REMOTE_HARD_SYM_CENTERED_PORTS_PER_TICK: usize = 64;
+const REMOTE_HARD_SYM_RANDOM_PORTS_PER_TICK: usize = 64;
 
 type UdpHolePunchRpcStub =
     Box<dyn UdpHolePunchRpc<Controller = BaseController> + std::marker::Send + Sync + 'static>;
@@ -241,8 +243,10 @@ enum RemotePortScanKind {
 
 struct RemotePortScanPlan {
     public_ip: Ipv4Addr,
-    ports: Vec<u16>,
-    next_idx: usize,
+    centered_ports: Vec<u16>,
+    random_ports: Vec<u16>,
+    next_centered_idx: usize,
+    next_random_idx: usize,
     ports_per_tick: usize,
     socket_limit: usize,
     kind: RemotePortScanKind,
@@ -288,12 +292,12 @@ impl RemotePortScanPlan {
             }
             remaining_ports.shuffle(&mut rand::thread_rng());
 
-            let mut ports = centered_ports;
-            ports.extend(remaining_ports);
             return Some(Self {
                 public_ip,
-                ports,
-                next_idx: 0,
+                centered_ports,
+                random_ports: remaining_ports,
+                next_centered_idx: 0,
+                next_random_idx: 0,
                 ports_per_tick: REMOTE_HARD_SYM_SCAN_PORTS_PER_TICK,
                 socket_limit: REMOTE_SYM_SCAN_SOCKET_LIMIT,
                 kind: RemotePortScanKind::CenteredThenRandom,
@@ -302,8 +306,10 @@ impl RemotePortScanPlan {
 
         Some(Self {
             public_ip,
-            ports: centered_ports,
-            next_idx: 0,
+            centered_ports,
+            random_ports: Vec::new(),
+            next_centered_idx: 0,
+            next_random_idx: 0,
             ports_per_tick: REMOTE_SYM_SCAN_PORTS_PER_TICK,
             socket_limit: usize::MAX,
             kind: RemotePortScanKind::Centered,
@@ -315,7 +321,69 @@ impl RemotePortScanPlan {
     }
 
     fn port_count(&self) -> usize {
-        self.ports.len()
+        self.centered_ports.len() + self.random_ports.len()
+    }
+
+    fn preview_ports(&self, count: usize) -> Vec<u16> {
+        match self.kind {
+            RemotePortScanKind::Centered => {
+                self.centered_ports.iter().copied().take(count).collect()
+            }
+            RemotePortScanKind::CenteredThenRandom => self
+                .centered_ports
+                .iter()
+                .copied()
+                .take(REMOTE_HARD_SYM_CENTERED_PORTS_PER_TICK.min(count))
+                .chain(
+                    self.random_ports
+                        .iter()
+                        .copied()
+                        .take(count.saturating_sub(REMOTE_HARD_SYM_CENTERED_PORTS_PER_TICK)),
+                )
+                .collect(),
+        }
+    }
+
+    fn next_ports_for_tick(&mut self) -> Vec<u16> {
+        match self.kind {
+            RemotePortScanKind::Centered => {
+                let mut ports = Vec::with_capacity(self.ports_per_tick);
+                for _ in 0..self.ports_per_tick {
+                    ports.push(
+                        self.centered_ports[self.next_centered_idx % self.centered_ports.len()],
+                    );
+                    self.next_centered_idx =
+                        (self.next_centered_idx + 1) % self.centered_ports.len();
+                }
+                ports
+            }
+            RemotePortScanKind::CenteredThenRandom => {
+                let centered_count =
+                    REMOTE_HARD_SYM_CENTERED_PORTS_PER_TICK.min(self.ports_per_tick);
+                let random_count = REMOTE_HARD_SYM_RANDOM_PORTS_PER_TICK
+                    .min(self.ports_per_tick.saturating_sub(centered_count));
+                let mut ports = Vec::with_capacity(centered_count + random_count);
+
+                for _ in 0..centered_count {
+                    ports.push(
+                        self.centered_ports[self.next_centered_idx % self.centered_ports.len()],
+                    );
+                    self.next_centered_idx =
+                        (self.next_centered_idx + 1) % self.centered_ports.len();
+                }
+
+                if !self.random_ports.is_empty() {
+                    for _ in 0..random_count {
+                        ports.push(
+                            self.random_ports[self.next_random_idx % self.random_ports.len()],
+                        );
+                        self.next_random_idx = (self.next_random_idx + 1) % self.random_ports.len();
+                    }
+                }
+
+                ports
+            }
+        }
     }
 
     async fn send_next(
@@ -329,9 +397,7 @@ impl RemotePortScanPlan {
         }
 
         let socket_count = self.socket_limit.min(sockets.len());
-        for _ in 0..self.ports_per_tick {
-            let port = self.ports[self.next_idx % self.ports.len()];
-            self.next_idx = (self.next_idx + 1) % self.ports.len();
+        for port in self.next_ports_for_tick() {
             let addr = SocketAddr::V4(SocketAddrV4::new(self.public_ip, port));
             for socket in sockets.iter().take(socket_count) {
                 for _ in 0..3 {
@@ -1507,7 +1573,28 @@ pub mod tests {
         );
         assert_eq!(plan.socket_limit, super::REMOTE_SYM_SCAN_SOCKET_LIMIT);
         assert_eq!(plan.port_count(), u16::MAX as usize);
-        assert_eq!(&plan.ports[..5], &[45_678, 45_679, 45_677, 45_680, 45_676]);
+        assert_eq!(
+            plan.preview_ports(5),
+            vec![45_678, 45_679, 45_677, 45_680, 45_676]
+        );
+    }
+
+    #[test]
+    fn hard_symmetric_remote_scan_interleaves_centered_and_random_ports() {
+        let mut plan = super::RemotePortScanPlan::new(
+            "198.51.100.10:45678".parse().unwrap(),
+            super::UdpNatType::Unknown,
+        )
+        .unwrap();
+
+        let ports = plan.next_ports_for_tick();
+        assert_eq!(ports.len(), super::REMOTE_HARD_SYM_SCAN_PORTS_PER_TICK);
+        assert_eq!(&ports[..5], &[45_678, 45_679, 45_677, 45_680, 45_676]);
+        assert!(
+            ports[super::REMOTE_HARD_SYM_CENTERED_PORTS_PER_TICK..]
+                .iter()
+                .all(|port| !plan.centered_ports.contains(port))
+        );
     }
 
     #[test]
