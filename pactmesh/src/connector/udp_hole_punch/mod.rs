@@ -39,7 +39,9 @@ pub(crate) mod common;
 pub(crate) mod cone;
 pub(crate) mod sym_to_cone;
 
-// sym punch should be serialized
+// Client-side symmetric punch orchestration should be serialized per local
+// peer. Server-side spray RPCs must not take this lock: peers need us to spray
+// during their active receive window, even while our own punch round is waiting.
 static SYM_PUNCH_LOCK: Lazy<DashMap<PeerId, Arc<Mutex<()>>>> = Lazy::new(DashMap::new);
 pub static RUN_TESTING: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 
@@ -117,9 +119,6 @@ impl UdpHolePunchRpc for UdpHolePunchServer {
         _ctrl: Self::Controller,
         input: SendPunchPacketHardSymRequest,
     ) -> rpc_types::error::Result<SendPunchPacketHardSymResponse> {
-        let _locked = get_sym_punch_lock(self.common.get_peer_mgr().my_peer_id())
-            .lock_owned()
-            .await;
         self.sym_to_cone_server
             .send_punch_packet_hard_sym(input)
             .await
@@ -130,9 +129,6 @@ impl UdpHolePunchRpc for UdpHolePunchServer {
         _ctrl: Self::Controller,
         input: SendPunchPacketEasySymRequest,
     ) -> rpc_types::error::Result<Void> {
-        let _locked = get_sym_punch_lock(self.common.get_peer_mgr().my_peer_id())
-            .lock_owned()
-            .await;
         self.sym_to_cone_server
             .send_punch_packet_easy_sym(input)
             .await
@@ -145,9 +141,6 @@ impl UdpHolePunchRpc for UdpHolePunchServer {
         _ctrl: Self::Controller,
         input: SendPunchPacketBothEasySymRequest,
     ) -> rpc_types::error::Result<SendPunchPacketBothEasySymResponse> {
-        let _locked = get_sym_punch_lock(self.common.get_peer_mgr().my_peer_id())
-            .lock_owned()
-            .await;
         self.both_easy_sym_server
             .send_punch_packet_both_easy_sym(input)
             .await
