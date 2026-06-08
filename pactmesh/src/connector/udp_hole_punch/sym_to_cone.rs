@@ -113,6 +113,16 @@ fn hard_sym_centered_port_window(first: u16, last: u16) -> PredictablePortWindow
     }
 }
 
+fn nat_info_for_port_prediction(my_nat_info: UdpNatType) -> Option<UdpNatType> {
+    if my_nat_info.is_sym() {
+        Some(my_nat_info)
+    } else if my_nat_info.is_unknown() {
+        Some(UdpNatType::HardSymmetric(NatType::Symmetric))
+    } else {
+        None
+    }
+}
+
 fn predictable_port_window_from_samples(
     my_nat_info: UdpNatType,
     mapped_ports: &[u16],
@@ -627,14 +637,12 @@ impl PunchSymToConeHoleClient {
         my_nat_info: UdpNatType,
         prediction_sockets: Option<&[Arc<UdpSocket>]>,
     ) -> Option<PredictablePortWindow> {
-        if !my_nat_info.is_sym() {
-            return None;
-        }
+        let prediction_nat_info = nat_info_for_port_prediction(my_nat_info)?;
 
         let global_ctx = self.peer_mgr.get_global_ctx();
         let stun_collector = global_ctx.get_stun_info_collector();
         let mut mapped_ports = Vec::new();
-        let target_samples = if my_nat_info.get_inc_of_easy_sym().is_some() {
+        let target_samples = if prediction_nat_info.get_inc_of_easy_sym().is_some() {
             1
         } else {
             HARD_SYM_PREDICT_MIN_SAMPLES
@@ -706,11 +714,12 @@ impl PunchSymToConeHoleClient {
             }
         }
 
-        let prediction = predictable_port_window_from_samples(my_nat_info, &mapped_ports);
+        let prediction = predictable_port_window_from_samples(prediction_nat_info, &mapped_ports);
         tracing::info!(
             ?mapped_ports,
             ?prediction,
             ?my_nat_info,
+            ?prediction_nat_info,
             target_samples,
             from_udp_array = prediction_sockets.is_some(),
             "symmetric nat prediction based on sampled udp sockets"
@@ -1142,6 +1151,31 @@ pub mod tests {
             runtime_nat,
             super::UdpNatType::HardSymmetric(NatType::Symmetric)
         );
+    }
+
+    #[test]
+    fn unknown_nat_uses_hard_symmetric_port_prediction() {
+        assert_eq!(
+            super::nat_info_for_port_prediction(super::UdpNatType::Unknown),
+            Some(super::UdpNatType::HardSymmetric(NatType::Symmetric))
+        );
+
+        let prediction = super::predictable_port_window_from_samples(
+            super::nat_info_for_port_prediction(super::UdpNatType::Unknown).unwrap(),
+            &[55_900, 56_010, 56_140],
+        )
+        .unwrap();
+
+        assert_eq!(prediction.max_port_num, super::HARD_SYM_PREDICT_WINDOW);
+        assert!(prediction.is_incremental);
+
+        let ports = super::easy_sym_target_ports(
+            prediction.base_port_num as u32,
+            prediction.max_port_num,
+            prediction.is_incremental,
+        );
+        assert!(ports.contains(&55_900));
+        assert!(ports.contains(&56_140));
     }
 
     #[test]
