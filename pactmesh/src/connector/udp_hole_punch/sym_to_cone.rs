@@ -33,9 +33,9 @@ use crate::{
     proto::{
         common::NatType,
         peer_rpc::{
-            SelectPunchListenerRequest, SendPunchPacketEasySymRequest,
-            SendPunchPacketHardSymRequest, SendPunchPacketHardSymResponse, UdpHolePunchRpc,
-            UdpHolePunchRpcClientFactory,
+            SelectPunchListenerRequest, SendPunchPacketBothEasySymRequest,
+            SendPunchPacketEasySymRequest, SendPunchPacketHardSymRequest,
+            SendPunchPacketHardSymResponse, UdpHolePunchRpc, UdpHolePunchRpcClientFactory,
         },
         rpc_types::{self, controller::BaseController},
     },
@@ -77,6 +77,9 @@ const REMOTE_SYM_SCAN_WINDOW: u16 = 4096;
 const REMOTE_SYM_SCAN_SOCKET_LIMIT: usize = 16;
 const REMOTE_HARD_SYM_CENTERED_PORTS_PER_TICK: usize = 64;
 const REMOTE_HARD_SYM_RANDOM_PORTS_PER_TICK: usize = 64;
+const COORDINATED_SYM_ARRAY_SIZE: usize = 48;
+const COORDINATED_SYM_WAIT_MS: u64 = 12_000;
+const COORDINATED_SYM_SCAN_WINDOW: u32 = HARD_SYM_PREDICT_WINDOW;
 
 type UdpHolePunchRpcStub =
     Box<dyn UdpHolePunchRpc<Controller = BaseController> + std::marker::Send + Sync + 'static>;
@@ -167,6 +170,44 @@ fn stable_predictable_port_window_with_width(
     let first = *mapped_ports.iter().min()?;
     let last = *mapped_ports.iter().max()?;
     Some(centered_predictable_port_window(first, last, window))
+}
+
+fn should_try_coordinated_symmetric_punch(
+    my_nat_info: UdpNatType,
+    peer_nat_info: UdpNatType,
+) -> bool {
+    (my_nat_info.is_unknown() || my_nat_info.is_sym())
+        && (peer_nat_info.is_unknown() || peer_nat_info.is_sym())
+}
+
+fn stun_info_port_window(
+    stun_info: &crate::proto::common::StunInfo,
+) -> Option<PredictablePortWindow> {
+    let min_port = u16::try_from(stun_info.min_port).ok()?;
+    let max_port = u16::try_from(stun_info.max_port).ok()?;
+    if min_port == 0 || max_port == 0 {
+        return None;
+    }
+
+    Some(centered_predictable_port_window(
+        min_port.min(max_port),
+        min_port.max(max_port),
+        COORDINATED_SYM_SCAN_WINDOW,
+    ))
+}
+
+fn coordinated_symmetric_target_window(
+    runtime_prediction: Option<&RuntimePortPrediction>,
+    stun_info: &crate::proto::common::StunInfo,
+) -> Option<PredictablePortWindow> {
+    runtime_prediction
+        .and_then(|prediction| {
+            stable_predictable_port_window_with_width(
+                &prediction.mapped_ports,
+                COORDINATED_SYM_SCAN_WINDOW,
+            )
+        })
+        .or_else(|| stun_info_port_window(stun_info))
 }
 
 fn nat_info_for_port_prediction(my_nat_info: UdpNatType) -> Option<UdpNatType> {
@@ -1165,6 +1206,105 @@ impl PunchSymToConeHoleClient {
         next_port_index
     }
 
+    async fn try_coordinated_symmetric_punch(
+        &self,
+        dst_peer_id: PeerId,
+        udp_array: &Arc<UdpSocketArray>,
+        runtime_port_prediction: Option<&RuntimePortPrediction>,
+        stun_info: &crate::proto::common::StunInfo,
+        public_ips: &[Ipv4Addr],
+        peer_nat_info: UdpNatType,
+    ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
+        let Some(public_ip) = public_ips.first().copied() else {
+            return Ok(None);
+        };
+        let Some(target_window) =
+            coordinated_symmetric_target_window(runtime_port_prediction, stun_info)
+        else {
+            tracing::warn!(
+                ?stun_info,
+                "coordinated symmetric punch skipped without local target port window"
+            );
+            return Ok(None);
+        };
+
+        let tid: u32 = rand::thread_rng().r#gen();
+        let packet = new_hole_punch_packet(tid, HOLE_PUNCH_PACKET_BODY_LEN).into_bytes();
+        udp_array.add_intreast_tid(tid);
+        defer! { udp_array.remove_intreast_tid(tid); }
+
+        let rpc_stub = self.get_rpc_stub(dst_peer_id).await;
+        let req = SendPunchPacketBothEasySymRequest {
+            udp_socket_count: COORDINATED_SYM_ARRAY_SIZE as u32,
+            public_ip: Some(public_ip.into()),
+            transaction_id: tid,
+            dst_port_num: 0,
+            wait_time_ms: COORDINATED_SYM_WAIT_MS as u32,
+            dst_base_port_num: target_window.base_port_num as u32,
+            dst_max_port_num: target_window.max_port_num,
+            dst_is_incremental: target_window.is_incremental,
+            dst_random_scan: true,
+        };
+        tracing::info!(
+            ?req,
+            ?target_window,
+            "coordinated symmetric punch: request remote udp array scan"
+        );
+        let remote_ret = rpc_stub
+            .send_punch_packet_both_easy_sym(
+                BaseController {
+                    timeout_ms: 5000,
+                    trace_id: 0,
+                    ..Default::default()
+                },
+                req,
+            )
+            .await;
+        let remote_ret = handle_rpc_result(remote_ret, dst_peer_id, &self.blacklist)?;
+        if remote_ret.is_busy {
+            tracing::debug!(?dst_peer_id, "coordinated symmetric punch: remote is busy");
+            return Ok(None);
+        }
+
+        let remote_mapped_addr = remote_ret.base_mapped_addr.ok_or(anyhow::anyhow!(
+            "coordinated symmetric punch response missing remote mapped addr"
+        ))?;
+        let remote_addr: SocketAddr = remote_mapped_addr.into();
+        let mut remote_scan = RemotePortScanPlan::new(remote_addr, peer_nat_info);
+        if let Some(plan) = remote_scan.as_ref() {
+            tracing::info!(
+                ?remote_addr,
+                ?peer_nat_info,
+                scan_kind = ?plan.kind(),
+                ports_per_tick = plan.ports_per_tick,
+                socket_limit = plan.socket_limit,
+                port_count = plan.port_count(),
+                "coordinated symmetric punch: local udp array scan enabled"
+            );
+        }
+
+        udp_array.send_with_all(&packet, remote_addr).await?;
+        let wait_task = AbortOnDropHandle::new(tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(COORDINATED_SYM_WAIT_MS + 1000)).await;
+        }));
+        let tunnel = Self::check_hole_punch_result(
+            self.peer_mgr.get_global_ctx(),
+            udp_array,
+            &packet,
+            tid,
+            remote_mapped_addr,
+            &wait_task,
+            remote_scan.as_mut(),
+        )
+        .await?;
+        let _ = wait_task.await;
+
+        if tunnel.is_some() {
+            tracing::info!(?dst_peer_id, "coordinated symmetric punch produced tunnel");
+        }
+        Ok(tunnel)
+    }
+
     async fn check_hole_punch_result<T>(
         global_ctx: ArcGlobalCtx,
         udp_array: &Arc<UdpSocketArray>,
@@ -1379,6 +1519,22 @@ impl PunchSymToConeHoleClient {
                 return Ok(Some(tunnel));
             }
         }
+
+        if should_try_coordinated_symmetric_punch(runtime_my_nat_info, peer_nat_info)
+            && let Some(tunnel) = self
+                .try_coordinated_symmetric_punch(
+                    dst_peer_id,
+                    &udp_array,
+                    runtime_port_prediction.as_ref(),
+                    &stun_info,
+                    &public_ips,
+                    peer_nat_info,
+                )
+                .await?
+        {
+            return Ok(Some(tunnel));
+        }
+
         let mut remote_scan = if peer_nat_info.is_unknown() || peer_nat_info.is_sym() {
             let remote_addr: SocketAddr = remote_mapped_addr.into();
             let plan = RemotePortScanPlan::new(remote_addr, peer_nat_info);
@@ -1757,6 +1913,48 @@ pub mod tests {
         );
 
         assert!(prediction.is_none());
+    }
+
+    #[test]
+    fn coordinated_symmetric_punch_is_used_for_unknown_or_symmetric_peers() {
+        assert!(super::should_try_coordinated_symmetric_punch(
+            super::UdpNatType::Unknown,
+            super::UdpNatType::HardSymmetric(NatType::Symmetric),
+        ));
+        assert!(super::should_try_coordinated_symmetric_punch(
+            super::UdpNatType::HardSymmetric(NatType::Symmetric),
+            super::UdpNatType::Unknown,
+        ));
+        assert!(!super::should_try_coordinated_symmetric_punch(
+            super::UdpNatType::HardSymmetric(NatType::Symmetric),
+            super::UdpNatType::Cone(NatType::PortRestricted),
+        ));
+    }
+
+    #[test]
+    fn coordinated_symmetric_target_window_prefers_runtime_samples() {
+        let runtime = super::RuntimePortPrediction {
+            predictable_port_window: None,
+            mapped_ports: vec![12_423, 12_450, 12_510],
+        };
+        let stun_info = crate::proto::common::StunInfo {
+            min_port: 50_000,
+            max_port: 50_100,
+            ..Default::default()
+        };
+
+        let window =
+            super::coordinated_symmetric_target_window(Some(&runtime), &stun_info).unwrap();
+        let ports = super::easy_sym_target_ports(
+            window.base_port_num as u32,
+            window.max_port_num,
+            window.is_incremental,
+        );
+
+        assert_eq!(window.max_port_num, super::COORDINATED_SYM_SCAN_WINDOW);
+        assert!(ports.contains(&12_423));
+        assert!(ports.contains(&12_510));
+        assert!(!ports.contains(&50_000));
     }
 
     #[tokio::test]

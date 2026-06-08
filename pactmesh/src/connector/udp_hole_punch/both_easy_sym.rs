@@ -1,10 +1,11 @@
 use std::{
-    net::{IpAddr, SocketAddr, SocketAddrV4},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use anyhow::Context;
+use rand::seq::SliceRandom;
 use tokio::sync::Mutex;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -30,6 +31,149 @@ use super::common::{PunchHoleServerCommon, UdpNatType, UdpSocketArray};
 const UDP_ARRAY_SIZE_FOR_BOTH_EASY_SYM: usize = 25;
 const DST_PORT_OFFSET: u16 = 20;
 const REMOTE_WAIT_TIME_MS: u64 = 5000;
+const COORDINATED_SYM_MAX_WAIT_TIME_MS: u32 = 20_000;
+const COORDINATED_SYM_PORTS_PER_TICK: usize = 128;
+const COORDINATED_SYM_CENTERED_PORTS_PER_TICK: usize = 64;
+const COORDINATED_SYM_RANDOM_PORTS_PER_TICK: usize = 64;
+const COORDINATED_SYM_SOCKET_LIMIT: usize = 16;
+
+fn port_range_to_vec(start: u32, end: u32) -> Vec<u16> {
+    let start = start.max(1);
+    let end = end.min(u16::MAX as u32);
+    if end < start {
+        return Vec::new();
+    }
+
+    (start..=end).map(|port| port as u16).collect()
+}
+
+fn easy_sym_target_ports(base_port_num: u32, max_port_num: u32, is_incremental: bool) -> Vec<u16> {
+    let max_port_num = max_port_num.max(1);
+    if is_incremental {
+        port_range_to_vec(
+            base_port_num.saturating_add(1),
+            base_port_num.saturating_add(max_port_num),
+        )
+    } else {
+        port_range_to_vec(
+            base_port_num.saturating_sub(max_port_num),
+            base_port_num.saturating_sub(1),
+        )
+    }
+}
+
+#[derive(Debug)]
+struct CoordinatedSymPortPlan {
+    public_ip: Ipv4Addr,
+    centered_ports: Vec<u16>,
+    random_ports: Vec<u16>,
+    next_centered_idx: usize,
+    next_random_idx: usize,
+    coordinated: bool,
+}
+
+impl CoordinatedSymPortPlan {
+    fn new(request: &SendPunchPacketBothEasySymRequest, public_ip: Ipv4Addr) -> Self {
+        let coordinated = request.dst_max_port_num > 0 || request.dst_random_scan;
+        let centered_ports = if request.dst_max_port_num > 0 {
+            easy_sym_target_ports(
+                request.dst_base_port_num,
+                request.dst_max_port_num,
+                request.dst_is_incremental,
+            )
+        } else if request.dst_port_num == 0 {
+            Vec::new()
+        } else {
+            vec![request.dst_port_num as u16]
+        };
+
+        let mut random_ports = Vec::new();
+        if request.dst_random_scan {
+            let mut included = vec![false; u16::MAX as usize + 1];
+            for port in centered_ports.iter().copied() {
+                included[port as usize] = true;
+            }
+            random_ports.reserve(u16::MAX as usize - centered_ports.len());
+            for port in 1..=u16::MAX {
+                if !included[port as usize] {
+                    random_ports.push(port);
+                }
+            }
+            random_ports.shuffle(&mut rand::thread_rng());
+        }
+
+        Self {
+            public_ip,
+            centered_ports,
+            random_ports,
+            next_centered_idx: 0,
+            next_random_idx: 0,
+            coordinated,
+        }
+    }
+
+    fn port_count(&self) -> usize {
+        self.centered_ports.len() + self.random_ports.len()
+    }
+
+    fn next_ports_for_tick(&mut self) -> Vec<u16> {
+        if !self.coordinated {
+            return self.centered_ports.first().copied().into_iter().collect();
+        }
+
+        let centered_count = if self.random_ports.is_empty() {
+            COORDINATED_SYM_PORTS_PER_TICK
+        } else {
+            COORDINATED_SYM_CENTERED_PORTS_PER_TICK
+        }
+        .min(self.centered_ports.len());
+        let random_count = if self.random_ports.is_empty() {
+            0
+        } else {
+            COORDINATED_SYM_RANDOM_PORTS_PER_TICK
+        }
+        .min(self.random_ports.len());
+
+        let mut ports = Vec::with_capacity(centered_count + random_count);
+        for _ in 0..centered_count {
+            ports.push(self.centered_ports[self.next_centered_idx % self.centered_ports.len()]);
+            self.next_centered_idx = (self.next_centered_idx + 1) % self.centered_ports.len();
+        }
+        for _ in 0..random_count {
+            ports.push(self.random_ports[self.next_random_idx % self.random_ports.len()]);
+            self.next_random_idx = (self.next_random_idx + 1) % self.random_ports.len();
+        }
+
+        ports
+    }
+
+    async fn send_next(
+        &mut self,
+        udp_array: &UdpSocketArray,
+        packet: &[u8],
+    ) -> Result<(), anyhow::Error> {
+        let ports = self.next_ports_for_tick();
+        if ports.is_empty() {
+            return Ok(());
+        }
+
+        let sockets = udp_array.sockets();
+        let socket_limit = if self.coordinated {
+            COORDINATED_SYM_SOCKET_LIMIT.min(sockets.len())
+        } else {
+            sockets.len()
+        };
+        for port in ports {
+            let addr = SocketAddr::V4(SocketAddrV4::new(self.public_ip, port));
+            for socket in sockets.iter().take(socket_limit) {
+                for _ in 0..3 {
+                    socket.send_to(packet, addr).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 pub(crate) struct PunchBothEasySymHoleServer {
     common: Arc<PunchHoleServerCommon>,
@@ -63,22 +207,53 @@ impl PunchBothEasySymHoleServer {
         }
 
         let global_ctx = self.common.get_global_ctx();
-        let cur_mapped_addr = global_ctx
-            .get_stun_info_collector()
-            .get_udp_port_mapping(0)
-            .await
-            .with_context(|| "failed to get udp port mapping")?;
 
         tracing::info!("send_punch_packet_hard_sym start");
         let socket_count = request.udp_socket_count as usize;
-        let public_ips = request
+        let public_ip = request
             .public_ip
             .ok_or(anyhow::anyhow!("public_ip is required"))?;
+        let public_ip = Ipv4Addr::from(public_ip);
         let transaction_id = request.transaction_id;
+        let coordinated = request.dst_max_port_num > 0 || request.dst_random_scan;
 
-        let udp_array =
-            UdpSocketArray::new(socket_count, self.common.get_global_ctx().net_ns.clone());
-        udp_array.start().await?;
+        let udp_array = UdpSocketArray::new(socket_count, global_ctx.net_ns.clone());
+        let cur_mapped_addr = if coordinated {
+            let sockets = udp_array.bind_sockets().await?;
+            let mapped_addr = if let Some(socket) = sockets.first() {
+                match global_ctx
+                    .get_stun_info_collector()
+                    .get_udp_port_mapping_with_socket(socket.clone())
+                    .await
+                {
+                    Ok(mapped_addr) => mapped_addr,
+                    Err(e) => {
+                        tracing::warn!(?e, "failed to map coordinated udp array socket");
+                        global_ctx
+                            .get_stun_info_collector()
+                            .get_udp_port_mapping(0)
+                            .await
+                            .with_context(|| "failed to get fallback udp port mapping")?
+                    }
+                }
+            } else {
+                global_ctx
+                    .get_stun_info_collector()
+                    .get_udp_port_mapping(0)
+                    .await
+                    .with_context(|| "failed to get udp port mapping")?
+            };
+            udp_array.start_with_sockets(sockets).await?;
+            mapped_addr
+        } else {
+            let mapped_addr = global_ctx
+                .get_stun_info_collector()
+                .get_udp_port_mapping(0)
+                .await
+                .with_context(|| "failed to get udp port mapping")?;
+            udp_array.start().await?;
+            mapped_addr
+        };
         udp_array.add_intreast_tid(transaction_id);
         let peer_mgr = self.common.get_peer_mgr();
 
@@ -86,23 +261,25 @@ impl PunchBothEasySymHoleServer {
             new_hole_punch_packet(transaction_id, HOLE_PUNCH_PACKET_BODY_LEN).into_bytes();
         let mut punched = vec![];
         let common = self.common.clone();
+        let mut port_plan = CoordinatedSymPortPlan::new(&request, public_ip);
+        tracing::info!(
+            coordinated,
+            mapped_addr = ?cur_mapped_addr,
+            target_port_count = port_plan.port_count(),
+            "send_punch_packet_both_easy_sym target plan"
+        );
 
         let task = tokio::spawn(async move {
             let mut listeners = Vec::new();
             let start_time = Instant::now();
-            let wait_time_ms = request.wait_time_ms.min(8000);
+            let wait_time_ms = if coordinated {
+                request.wait_time_ms.min(COORDINATED_SYM_MAX_WAIT_TIME_MS)
+            } else {
+                request.wait_time_ms.min(8000)
+            };
             while start_time.elapsed() < Duration::from_millis(wait_time_ms as u64) {
-                if let Err(e) = udp_array
-                    .send_with_all(
-                        &punch_packet,
-                        SocketAddr::V4(SocketAddrV4::new(
-                            public_ips.into(),
-                            request.dst_port_num as u16,
-                        )),
-                    )
-                    .await
-                {
-                    tracing::error!(?e, "failed to send hole punch packet");
+                if let Err(e) = port_plan.send_next(&udp_array, &punch_packet).await {
+                    tracing::error!(?e, "failed to send coordinated hole punch packet");
                     break;
                 }
 
@@ -257,6 +434,10 @@ impl PunchBothEasySymHoleClient {
                     } as u32,
                     udp_socket_count: UDP_ARRAY_SIZE_FOR_BOTH_EASY_SYM as u32,
                     wait_time_ms: REMOTE_WAIT_TIME_MS as u32,
+                    dst_base_port_num: 0,
+                    dst_max_port_num: 0,
+                    dst_is_incremental: false,
+                    dst_random_scan: false,
                 },
             )
             .await;

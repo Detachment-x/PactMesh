@@ -202,6 +202,14 @@ message SendPunchPacketBothEasySymRequest {
 
   uint32 dst_port_num = 4;
   uint32 wait_time_ms = 5;
+
+  // Optional extended scan window for coordinated hard/unknown symmetric NAT
+  // punching. When dst_max_port_num is zero, dst_port_num keeps the legacy
+  // single-port behavior.
+  uint32 dst_base_port_num = 6;
+  uint32 dst_max_port_num = 7;
+  bool dst_is_incremental = 8;
+  bool dst_random_scan = 9;
 }
 
 message SendPunchPacketBothEasySymResponse {
