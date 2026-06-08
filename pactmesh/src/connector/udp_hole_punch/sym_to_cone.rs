@@ -1203,8 +1203,7 @@ impl PunchSymToConeHoleClient {
             self.publish_udp_array(udp_array.clone()).await;
         }
 
-        if !attempted_global_stable_punch
-            && punch_predictably
+        if punch_predictably
             && let Some(runtime_port_prediction) = runtime_port_prediction.as_ref()
             && runtime_port_prediction.should_try_stable_socket_punch()
         {
