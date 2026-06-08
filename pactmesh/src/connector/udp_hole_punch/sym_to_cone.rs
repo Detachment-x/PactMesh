@@ -16,7 +16,12 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::Level;
 
 use crate::{
-    common::{PeerId, global_ctx::ArcGlobalCtx, stun::StunInfoCollectorTrait, upnp},
+    common::{
+        PeerId,
+        global_ctx::ArcGlobalCtx,
+        stun::{StunInfoCollectorTrait, get_udp_port_mapping_with_socket_and_server},
+        upnp,
+    },
     connector::udp_hole_punch::{
         common::{
             HOLE_PUNCH_PACKET_BODY_LEN, send_symmetric_hole_punch_packet, try_connect_with_socket,
@@ -41,7 +46,8 @@ use super::common::{PunchHoleServerCommon, UdpNatType, UdpSocketArray};
 
 const UDP_ARRAY_SIZE_FOR_HARD_SYM: usize = 84;
 const MAX_EASY_SYM_MAPPING_PROBES: usize = 32;
-const EASY_SYM_MAPPING_TIMEOUT_MS: u64 = 2500;
+const EASY_SYM_MAPPING_TIMEOUT_MS: u64 = 6000;
+const PEER_REFLEXIVE_MAPPING_TIMEOUT_MS: u64 = 800;
 const PUNCH_RESULT_GRACE_MS: u128 = 2000;
 const PREDICTABLE_PUNCH_RPC_TIMEOUT_MS: i32 = 30_000;
 const RANDOM_PUNCH_RPC_TIMEOUT_MS: i32 = 12_000;
@@ -807,12 +813,14 @@ impl PunchSymToConeHoleClient {
     async fn sample_runtime_port_prediction(
         &self,
         my_nat_info: UdpNatType,
+        remote_mapped_addr: crate::proto::common::SocketAddr,
         prediction_sockets: Option<&[Arc<UdpSocket>]>,
     ) -> Option<RuntimePortPrediction> {
         let prediction_nat_info = nat_info_for_port_prediction(my_nat_info)?;
 
         let global_ctx = self.peer_mgr.get_global_ctx();
         let stun_collector = global_ctx.get_stun_info_collector();
+        let peer_stun_server: SocketAddr = remote_mapped_addr.into();
         let mut mapped_ports = Vec::new();
         let target_samples = if prediction_nat_info.get_inc_of_easy_sym().is_some() {
             1
@@ -822,10 +830,36 @@ impl PunchSymToConeHoleClient {
 
         if let Some(prediction_sockets) = prediction_sockets {
             for socket in prediction_sockets.iter().take(MAX_EASY_SYM_MAPPING_PROBES) {
-                match stun_collector
-                    .get_udp_port_mapping_with_socket(socket.clone())
-                    .await
-                {
+                let peer_mapping = get_udp_port_mapping_with_socket_and_server(
+                    socket.clone(),
+                    peer_stun_server,
+                    Duration::from_millis(PEER_REFLEXIVE_MAPPING_TIMEOUT_MS),
+                )
+                .await;
+                let mapping = match peer_mapping {
+                    Ok(addr) => {
+                        tracing::info!(
+                            ?addr,
+                            ?peer_stun_server,
+                            local_addr = ?socket.local_addr().ok(),
+                            "peer-reflexive udp array socket mapping sampled"
+                        );
+                        Ok(addr)
+                    }
+                    Err(peer_err) => {
+                        tracing::warn!(
+                            ?peer_err,
+                            ?peer_stun_server,
+                            local_addr = ?socket.local_addr().ok(),
+                            "peer-reflexive udp array socket mapping failed; falling back to public STUN"
+                        );
+                        stun_collector
+                            .get_udp_port_mapping_with_socket(socket.clone())
+                            .await
+                    }
+                };
+
+                match mapping {
                     Ok(addr) => {
                         mapped_ports.push(addr.port());
                         if mapped_ports.len() >= target_samples {
@@ -855,10 +889,36 @@ impl PunchSymToConeHoleClient {
                     }
                 };
 
-                match stun_collector
-                    .get_udp_port_mapping_with_socket(socket)
-                    .await
-                {
+                let peer_mapping = get_udp_port_mapping_with_socket_and_server(
+                    socket.clone(),
+                    peer_stun_server,
+                    Duration::from_millis(PEER_REFLEXIVE_MAPPING_TIMEOUT_MS),
+                )
+                .await;
+                let mapping = match peer_mapping {
+                    Ok(addr) => {
+                        tracing::info!(
+                            ?addr,
+                            ?peer_stun_server,
+                            local_addr = ?socket.local_addr().ok(),
+                            "peer-reflexive temporary udp socket mapping sampled"
+                        );
+                        Ok(addr)
+                    }
+                    Err(peer_err) => {
+                        tracing::warn!(
+                            ?peer_err,
+                            ?peer_stun_server,
+                            local_addr = ?socket.local_addr().ok(),
+                            "peer-reflexive temporary udp socket mapping failed; falling back to public STUN"
+                        );
+                        stun_collector
+                            .get_udp_port_mapping_with_socket(socket)
+                            .await
+                    }
+                };
+
+                match mapping {
                     Ok(addr) => {
                         mapped_ports.push(addr.port());
                         if mapped_ports.len() >= target_samples {
@@ -1196,6 +1256,7 @@ impl PunchSymToConeHoleClient {
                     Duration::from_millis(EASY_SYM_MAPPING_TIMEOUT_MS),
                     self.sample_runtime_port_prediction(
                         runtime_my_nat_info,
+                        remote_mapped_addr,
                         Some(prediction_sockets),
                     ),
                 )

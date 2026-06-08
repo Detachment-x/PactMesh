@@ -1056,6 +1056,20 @@ pub trait StunInfoCollectorTrait: Send + Sync {
     async fn get_tcp_port_mapping(&self, local_port: u16) -> Result<SocketAddr, Error>;
 }
 
+pub async fn get_udp_port_mapping_with_socket_and_server(
+    udp: Arc<UdpSocket>,
+    stun_server: SocketAddr,
+    resp_timeout: Duration,
+) -> Result<SocketAddr, Error> {
+    let mut client_builder = StunClientBuilder::new(udp);
+    let mut client = client_builder.new_stun_client(stun_server);
+    client.resp_timeout = resp_timeout;
+    let ret = client.bind_request(false, false).await;
+    client_builder.stop().await;
+
+    ret?.mapped_socket_addr.ok_or(Error::NotFound)
+}
+
 pub struct StunInfoCollector {
     stun_servers: Arc<RwLock<Vec<String>>>,
     tcp_stun_servers: Arc<RwLock<Vec<String>>>,
@@ -1716,6 +1730,28 @@ mod tests {
         let ret = detector.detect_nat_type(0).await;
         println!("{:#?}, {:?}", ret, ret.as_ref().unwrap().nat_type());
         assert_eq!(ret.unwrap().nat_type(), NatType::Restricted);
+    }
+
+    #[tokio::test]
+    async fn test_internal_stun_mapping_helper_against_udp_listener() {
+        let mut listener = UdpTunnelListener::new("udp://127.0.0.1:0".parse().unwrap());
+        listener.listen().await.unwrap();
+
+        let server_addr = format!("127.0.0.1:{}", listener.local_url().port().unwrap())
+            .parse()
+            .unwrap();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let local_addr = socket.local_addr().unwrap();
+
+        let mapped = get_udp_port_mapping_with_socket_and_server(
+            socket,
+            server_addr,
+            Duration::from_millis(800),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(mapped, local_addr);
     }
 
     #[tokio::test]
