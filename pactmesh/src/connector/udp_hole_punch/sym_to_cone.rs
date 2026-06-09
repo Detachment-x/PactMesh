@@ -50,7 +50,7 @@ const EASY_SYM_MAPPING_TIMEOUT_MS: u64 = 6000;
 const PEER_REFLEXIVE_MAPPING_TIMEOUT_MS: u64 = 800;
 const PUNCH_RESULT_GRACE_MS: u128 = 2000;
 const PREDICTABLE_PUNCH_RPC_TIMEOUT_MS: i32 = 30_000;
-const RANDOM_PUNCH_RPC_TIMEOUT_MS: i32 = 12_000;
+const RANDOM_PUNCH_RPC_TIMEOUT_MS: i32 = 20_000;
 const EASY_SYM_PREDICT_WINDOW: u32 = 8192;
 const EASY_SYM_SPRAY_CHUNK_SIZE: usize = 512;
 const EASY_SYM_SPRAY_CHUNK_PAUSE_MS: u64 = 20;
@@ -67,20 +67,20 @@ const STABLE_PUNCH_WINDOWS: [u32; 3] = [4096, 8192, 16384];
 const HARD_SYM_PREDICT_WINDOW: u32 = 32768;
 const STABLE_PUNCH_WAIT_MS: u128 = 5000;
 
-const HARD_SYM_RANDOM_PASSES: usize = 2;
-const HARD_SYM_RANDOM_PORTS_PER_PASS_MIN: u32 = 2048;
-const HARD_SYM_RANDOM_PORTS_PER_PASS_MAX: u32 = 3072;
+const HARD_SYM_RANDOM_PASSES: usize = 3;
+const HARD_SYM_RANDOM_PORTS_PER_PASS_MIN: u32 = 3072;
+const HARD_SYM_RANDOM_PORTS_PER_PASS_MAX: u32 = 4096;
 const HARD_SYM_PREDICT_MIN_SAMPLES: usize = 3;
 const REMOTE_SYM_SCAN_PORTS_PER_TICK: usize = 32;
-const REMOTE_HARD_SYM_SCAN_PORTS_PER_TICK: usize = 128;
+const REMOTE_HARD_SYM_SCAN_PORTS_PER_TICK: usize = 192;
 const REMOTE_SYM_SCAN_WINDOW: u16 = 4096;
 const REMOTE_SYM_SCAN_SOCKET_LIMIT: usize = 16;
 const REMOTE_HARD_SYM_CENTERED_PORTS_PER_TICK: usize = 64;
-const REMOTE_HARD_SYM_RANDOM_PORTS_PER_TICK: usize = 64;
-const REMOTE_SYM_PRIORITY_PORTS_PER_TICK: usize = 64;
+const REMOTE_HARD_SYM_RANDOM_PORTS_PER_TICK: usize = 128;
+const REMOTE_SYM_PRIORITY_PORTS_PER_TICK: usize = 32;
 const REMOTE_SYM_PRIORITY_SCAN_WINDOW: u16 = 2048;
 const COORDINATED_SYM_ARRAY_SIZE: usize = 48;
-const COORDINATED_SYM_WAIT_MS: u64 = 12_000;
+const COORDINATED_SYM_WAIT_MS: u64 = 30_000;
 const COORDINATED_SYM_SCAN_WINDOW: u32 = HARD_SYM_PREDICT_WINDOW;
 const LEARNED_ENDPOINTS_PER_TICK: usize = 8;
 
@@ -1486,7 +1486,7 @@ impl PunchSymToConeHoleClient {
         let remote_ret = rpc_stub
             .send_punch_packet_both_easy_sym(
                 BaseController {
-                    timeout_ms: 5000,
+                    timeout_ms: 12_000,
                     trace_id: 0,
                     ..Default::default()
                 },

@@ -31,15 +31,15 @@ use super::common::{PunchHoleServerCommon, UdpNatType, UdpSocketArray};
 const UDP_ARRAY_SIZE_FOR_BOTH_EASY_SYM: usize = 25;
 const DST_PORT_OFFSET: u16 = 20;
 const REMOTE_WAIT_TIME_MS: u64 = 5000;
-const COORDINATED_SYM_MAX_WAIT_TIME_MS: u32 = 20_000;
-const COORDINATED_SYM_PORTS_PER_TICK: usize = 128;
+const COORDINATED_SYM_MAX_WAIT_TIME_MS: u32 = 40_000;
+const COORDINATED_SYM_PORTS_PER_TICK: usize = 192;
 const COORDINATED_SYM_CENTERED_PORTS_PER_TICK: usize = 64;
-const COORDINATED_SYM_RANDOM_PORTS_PER_TICK: usize = 64;
-const COORDINATED_SYM_PRIORITY_PORTS_PER_TICK: usize = 64;
+const COORDINATED_SYM_RANDOM_PORTS_PER_TICK: usize = 128;
+const COORDINATED_SYM_PRIORITY_PORTS_PER_TICK: usize = 32;
 const COORDINATED_SYM_PRIORITY_SCAN_WINDOW: u16 = 2048;
 const COORDINATED_SYM_SOCKET_LIMIT: usize = 16;
 const COORDINATED_SYM_MAPPING_SAMPLE_COUNT: usize = 12;
-const COORDINATED_SYM_MAPPING_TIMEOUT_MS: u64 = 1500;
+const COORDINATED_SYM_MAPPING_TIMEOUT_MS: u64 = 6000;
 
 fn port_range_to_vec(start: u32, end: u32) -> Vec<u16> {
     let start = start.max(1);
@@ -346,7 +346,11 @@ impl CoordinatedSymPortPlan {
         } else if self.centered_ports.is_empty() {
             (0, remaining_count.min(self.random_ports.len()))
         } else {
-            let centered_count = (remaining_count / 2).min(self.centered_ports.len());
+            let total_share =
+                COORDINATED_SYM_CENTERED_PORTS_PER_TICK + COORDINATED_SYM_RANDOM_PORTS_PER_TICK;
+            let centered_count = (remaining_count * COORDINATED_SYM_CENTERED_PORTS_PER_TICK
+                / total_share)
+                .min(self.centered_ports.len());
             let random_count = remaining_count
                 .saturating_sub(centered_count)
                 .min(self.random_ports.len());
