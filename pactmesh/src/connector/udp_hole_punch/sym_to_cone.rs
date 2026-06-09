@@ -285,6 +285,13 @@ fn coordinated_symmetric_target_window(
         .or_else(|| stun_info_port_window(stun_info))
 }
 
+fn select_runtime_port_prediction(
+    sampled_prediction: Option<RuntimePortPrediction>,
+    cached_prediction: Option<RuntimePortPrediction>,
+) -> Option<RuntimePortPrediction> {
+    sampled_prediction.or(cached_prediction)
+}
+
 fn nat_info_for_port_prediction(my_nat_info: UdpNatType) -> Option<UdpNatType> {
     if my_nat_info.is_sym() {
         Some(my_nat_info)
@@ -830,6 +837,7 @@ pub(crate) struct PunchSymToConeHoleClient {
     peer_mgr: Arc<PeerManager>,
     udp_array: RwLock<Option<Arc<UdpSocketArray>>>,
     udp_array_predictable_port_window: RwLock<Option<PredictablePortWindow>>,
+    udp_array_runtime_port_prediction: RwLock<Option<RuntimePortPrediction>>,
     try_direct_connect: AtomicBool,
     punch_predicablely: AtomicBool,
     punch_randomly: AtomicBool,
@@ -845,6 +853,7 @@ impl PunchSymToConeHoleClient {
             peer_mgr,
             udp_array: RwLock::new(None),
             udp_array_predictable_port_window: RwLock::new(None),
+            udp_array_runtime_port_prediction: RwLock::new(None),
             try_direct_connect: AtomicBool::new(true),
             punch_predicablely: AtomicBool::new(true),
             punch_randomly: AtomicBool::new(true),
@@ -1108,11 +1117,26 @@ impl PunchSymToConeHoleClient {
         }
     }
 
+    async fn cache_runtime_port_prediction(&self, prediction: &RuntimePortPrediction) {
+        if prediction.mapped_ports.is_empty() {
+            return;
+        }
+
+        let mut wlocked = self.udp_array_runtime_port_prediction.write().await;
+        wlocked.replace(prediction.clone());
+    }
+
+    async fn cached_runtime_port_prediction(&self) -> Option<RuntimePortPrediction> {
+        self.udp_array_runtime_port_prediction.read().await.clone()
+    }
+
     pub(crate) async fn clear_udp_array(&self) {
         let mut wlocked = self.udp_array.write().await;
         wlocked.take();
         let mut prediction = self.udp_array_predictable_port_window.write().await;
         prediction.take();
+        let mut runtime_prediction = self.udp_array_runtime_port_prediction.write().await;
+        runtime_prediction.take();
     }
 
     async fn sample_runtime_port_prediction(
@@ -1666,7 +1690,7 @@ impl PunchSymToConeHoleClient {
 
         let port_index = *last_port_idx as u32;
         let (udp_array, prediction_sockets) = self.prepare_udp_array().await?;
-        let runtime_port_prediction = if punch_predictably {
+        let sampled_runtime_port_prediction = if punch_predictably {
             if let Some(prediction_sockets) = prediction_sockets.as_deref() {
                 tokio::time::timeout(
                     Duration::from_millis(EASY_SYM_MAPPING_TIMEOUT_MS),
@@ -1687,6 +1711,31 @@ impl PunchSymToConeHoleClient {
             } else {
                 None
             }
+        } else {
+            None
+        };
+        if let Some(prediction) = sampled_runtime_port_prediction.as_ref() {
+            self.cache_runtime_port_prediction(prediction).await;
+        }
+
+        let runtime_port_prediction = if punch_predictably {
+            let cached_prediction = if sampled_runtime_port_prediction.is_none() {
+                self.cached_runtime_port_prediction().await
+            } else {
+                None
+            };
+            let prediction =
+                select_runtime_port_prediction(sampled_runtime_port_prediction, cached_prediction);
+            if prediction_sockets.is_none()
+                && let Some(prediction) = prediction.as_ref()
+            {
+                tracing::info!(
+                    mapped_ports = ?prediction.mapped_ports,
+                    prediction = ?prediction.predictable_port_window,
+                    "reuse cached symmetric nat prediction for udp array"
+                );
+            }
+            prediction
         } else {
             None
         };
@@ -2199,6 +2248,55 @@ pub mod tests {
         assert!(ports.contains(&12_423));
         assert!(ports.contains(&12_510));
         assert!(!ports.contains(&50_000));
+    }
+
+    #[test]
+    fn runtime_port_prediction_falls_back_to_cached_udp_array_samples() {
+        let cached = super::RuntimePortPrediction {
+            predictable_port_window: Some(super::PredictablePortWindow {
+                base_port_num: 36_447,
+                max_port_num: super::HARD_SYM_PREDICT_WINDOW,
+                is_incremental: true,
+            }),
+            mapped_ports: vec![36_447, 36_451, 36_459],
+        };
+        let sampled = super::RuntimePortPrediction {
+            predictable_port_window: None,
+            mapped_ports: vec![53_100],
+        };
+
+        assert_eq!(
+            super::select_runtime_port_prediction(None, Some(cached.clone())),
+            Some(cached.clone())
+        );
+        assert_eq!(
+            super::select_runtime_port_prediction(Some(sampled.clone()), Some(cached)),
+            Some(sampled)
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_runtime_port_prediction_is_cleared_with_udp_array() {
+        let peer_mgr = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
+        let client =
+            super::PunchSymToConeHoleClient::new(peer_mgr, Arc::new(timedmap::TimedMap::new()));
+        let prediction = super::RuntimePortPrediction {
+            predictable_port_window: Some(super::PredictablePortWindow {
+                base_port_num: 36_447,
+                max_port_num: super::HARD_SYM_PREDICT_WINDOW,
+                is_incremental: true,
+            }),
+            mapped_ports: vec![36_447, 36_451, 36_459],
+        };
+
+        client.cache_runtime_port_prediction(&prediction).await;
+        assert_eq!(
+            client.cached_runtime_port_prediction().await,
+            Some(prediction)
+        );
+
+        client.clear_udp_array().await;
+        assert_eq!(client.cached_runtime_port_prediction().await, None);
     }
 
     #[tokio::test]
