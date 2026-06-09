@@ -210,12 +210,20 @@ message SendPunchPacketBothEasySymRequest {
   uint32 dst_max_port_num = 7;
   bool dst_is_incremental = 8;
   bool dst_random_scan = 9;
+
+  // Runtime sampled ports to prioritize before broad scans. These are hints,
+  // not exact targets: the receiver scans a small centered band around each.
+  repeated uint32 dst_priority_port_nums = 10;
 }
 
 message SendPunchPacketBothEasySymResponse {
   // is doing punch with other peer
   bool is_busy = 1;
   common.SocketAddr base_mapped_addr = 2;
+
+  // Receiver-side runtime/cached mapped ports. The caller prioritizes them
+  // while scanning back toward this receiver's UDP array.
+  repeated uint32 base_priority_port_nums = 3;
 }
 
 service UdpHolePunchRpc {

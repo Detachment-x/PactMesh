@@ -77,6 +77,8 @@ const REMOTE_SYM_SCAN_WINDOW: u16 = 4096;
 const REMOTE_SYM_SCAN_SOCKET_LIMIT: usize = 16;
 const REMOTE_HARD_SYM_CENTERED_PORTS_PER_TICK: usize = 64;
 const REMOTE_HARD_SYM_RANDOM_PORTS_PER_TICK: usize = 64;
+const REMOTE_SYM_PRIORITY_PORTS_PER_TICK: usize = 64;
+const REMOTE_SYM_PRIORITY_SCAN_WINDOW: u16 = 2048;
 const COORDINATED_SYM_ARRAY_SIZE: usize = 48;
 const COORDINATED_SYM_WAIT_MS: u64 = 12_000;
 const COORDINATED_SYM_SCAN_WINDOW: u32 = HARD_SYM_PREDICT_WINDOW;
@@ -103,14 +105,7 @@ struct RuntimePortPrediction {
 
 impl RuntimePortPrediction {
     fn observed_port_spread(&self) -> u32 {
-        let Some(min_port) = self.mapped_ports.iter().min() else {
-            return 0;
-        };
-        let Some(max_port) = self.mapped_ports.iter().max() else {
-            return 0;
-        };
-
-        max_port.saturating_sub(*min_port) as u32
+        observed_port_spread(&self.mapped_ports)
     }
 
     fn should_try_stable_socket_punch(&self) -> bool {
@@ -119,18 +114,96 @@ impl RuntimePortPrediction {
     }
 }
 
-fn infer_ordered_port_direction(mapped_ports: &[u16]) -> Option<bool> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OrderedPortSamples {
+    is_incremental: bool,
+    crosses_boundary: bool,
+    spread: u32,
+    last: u16,
+    min: u16,
+    max: u16,
+}
+
+fn forward_port_delta(from: u16, to: u16) -> u32 {
+    if to >= from {
+        to.saturating_sub(from) as u32
+    } else {
+        u16::MAX as u32 - from as u32 + to as u32
+    }
+}
+
+fn backward_port_delta(from: u16, to: u16) -> u32 {
+    if from >= to {
+        from.saturating_sub(to) as u32
+    } else {
+        from as u32 + u16::MAX as u32 - to as u32
+    }
+}
+
+fn ordered_delta_sum(mapped_ports: &[u16], is_incremental: bool) -> Option<(u32, bool)> {
+    let mut spread = 0u32;
+    let mut crosses_boundary = false;
+    for ports in mapped_ports.windows(2) {
+        let delta = if is_incremental {
+            crosses_boundary |= ports[1] < ports[0];
+            forward_port_delta(ports[0], ports[1])
+        } else {
+            crosses_boundary |= ports[1] > ports[0];
+            backward_port_delta(ports[0], ports[1])
+        };
+        if delta == 0 || delta > HARD_SYM_PREDICT_WINDOW {
+            return None;
+        }
+        spread = spread.saturating_add(delta);
+        if spread > HARD_SYM_PREDICT_WINDOW {
+            return None;
+        }
+    }
+    Some((spread, crosses_boundary))
+}
+
+fn infer_ordered_port_samples(mapped_ports: &[u16]) -> Option<OrderedPortSamples> {
     if mapped_ports.len() < HARD_SYM_PREDICT_MIN_SAMPLES {
         return None;
     }
 
-    if mapped_ports.windows(2).all(|w| w[1] > w[0]) {
-        Some(true)
-    } else if mapped_ports.windows(2).all(|w| w[1] < w[0]) {
-        Some(false)
-    } else {
-        None
+    let inc = ordered_delta_sum(mapped_ports, true);
+    let dec = ordered_delta_sum(mapped_ports, false);
+    let (is_incremental, spread, crosses_boundary) = match (inc, dec) {
+        (Some((spread, crosses_boundary)), None) => (true, spread, crosses_boundary),
+        (None, Some((spread, crosses_boundary))) => (false, spread, crosses_boundary),
+        _ => return None,
+    };
+
+    let min = *mapped_ports.iter().min()?;
+    let max = *mapped_ports.iter().max()?;
+    Some(OrderedPortSamples {
+        is_incremental,
+        crosses_boundary,
+        spread,
+        last: *mapped_ports.last()?,
+        min,
+        max,
+    })
+}
+
+fn infer_ordered_port_direction(mapped_ports: &[u16]) -> Option<bool> {
+    infer_ordered_port_samples(mapped_ports).map(|samples| samples.is_incremental)
+}
+
+fn observed_port_spread(mapped_ports: &[u16]) -> u32 {
+    if let Some(samples) = infer_ordered_port_samples(mapped_ports) {
+        return samples.spread;
     }
+
+    let Some(min_port) = mapped_ports.iter().min() else {
+        return 0;
+    };
+    let Some(max_port) = mapped_ports.iter().max() else {
+        return 0;
+    };
+
+    max_port.saturating_sub(*min_port) as u32
 }
 
 fn centered_predictable_port_window(first: u16, last: u16, window: u32) -> PredictablePortWindow {
@@ -202,10 +275,12 @@ fn coordinated_symmetric_target_window(
 ) -> Option<PredictablePortWindow> {
     runtime_prediction
         .and_then(|prediction| {
-            stable_predictable_port_window_with_width(
-                &prediction.mapped_ports,
-                COORDINATED_SYM_SCAN_WINDOW,
-            )
+            prediction.predictable_port_window.or_else(|| {
+                stable_predictable_port_window_with_width(
+                    &prediction.mapped_ports,
+                    COORDINATED_SYM_SCAN_WINDOW,
+                )
+            })
         })
         .or_else(|| stun_info_port_window(stun_info))
 }
@@ -233,14 +308,21 @@ fn predictable_port_window_from_samples(
     sorted_ports.sort_unstable();
     let first = *sorted_ports.first().unwrap();
     let last = *sorted_ports.last().unwrap();
-    let observed_span = last.saturating_sub(first) as u32;
+    let observed_span = observed_port_spread(mapped_ports);
 
     let Some(is_incremental) = known_inc else {
-        infer_ordered_port_direction(mapped_ports)?;
-        if observed_span > STABLE_PUNCH_WINDOW {
-            return None;
+        let ordered_samples = infer_ordered_port_samples(mapped_ports)?;
+        if ordered_samples.crosses_boundary {
+            return Some(PredictablePortWindow {
+                base_port_num: ordered_samples.last,
+                max_port_num: HARD_SYM_PREDICT_WINDOW,
+                is_incremental: ordered_samples.is_incremental,
+            });
         }
-        return Some(hard_sym_centered_port_window(first, last));
+        return Some(hard_sym_centered_port_window(
+            ordered_samples.min,
+            ordered_samples.max,
+        ));
     };
 
     let base_port_num = if is_incremental { last } else { first };
@@ -284,8 +366,10 @@ enum RemotePortScanKind {
 
 struct RemotePortScanPlan {
     public_ip: Ipv4Addr,
+    priority_ports: Vec<u16>,
     centered_ports: Vec<u16>,
     random_ports: Vec<u16>,
+    next_priority_idx: usize,
     next_centered_idx: usize,
     next_random_idx: usize,
     ports_per_tick: usize,
@@ -309,23 +393,87 @@ fn centered_ports_around(base_port: u16, window: u16) -> Vec<u16> {
     ports
 }
 
+fn wrapping_add_port(base: u16, offset: u16) -> u16 {
+    ((base as u32 + offset as u32 - 1) % u16::MAX as u32 + 1) as u16
+}
+
+fn wrapping_sub_port(base: u16, offset: u16) -> u16 {
+    ((base as i32 - offset as i32 - 1).rem_euclid(u16::MAX as i32) + 1) as u16
+}
+
+fn push_unique_port(ports: &mut Vec<u16>, seen_ports: &mut [bool], port: u16) {
+    if !seen_ports[port as usize] {
+        seen_ports[port as usize] = true;
+        ports.push(port);
+    }
+}
+
+fn priority_ports_around_hints(hints: &[u32], window: u16) -> Vec<u16> {
+    let mut bases = Vec::new();
+    let mut seen_bases = vec![false; u16::MAX as usize + 1];
+    for port in hints.iter().filter_map(|port| u16::try_from(*port).ok()) {
+        if port == 0 || seen_bases[port as usize] {
+            continue;
+        }
+        seen_bases[port as usize] = true;
+        bases.push(port);
+    }
+
+    let mut seen_ports = vec![false; u16::MAX as usize + 1];
+    let mut ports = Vec::new();
+    for offset in 0..=window {
+        for base in bases.iter().copied() {
+            if offset == 0 {
+                push_unique_port(&mut ports, &mut seen_ports, base);
+                continue;
+            }
+
+            push_unique_port(&mut ports, &mut seen_ports, wrapping_add_port(base, offset));
+            push_unique_port(&mut ports, &mut seen_ports, wrapping_sub_port(base, offset));
+        }
+    }
+
+    ports
+}
+
+fn filter_known_ports(ports: Vec<u16>, known_ports: &[bool]) -> Vec<u16> {
+    ports
+        .into_iter()
+        .filter(|port| !known_ports[*port as usize])
+        .collect()
+}
+
+fn mark_ports(known_ports: &mut [bool], ports: &[u16]) {
+    for port in ports.iter().copied() {
+        known_ports[port as usize] = true;
+    }
+}
+
 impl RemotePortScanPlan {
-    fn new(remote_addr: SocketAddr, peer_nat_info: UdpNatType) -> Option<Self> {
+    fn new(
+        remote_addr: SocketAddr,
+        peer_nat_info: UdpNatType,
+        priority_port_nums: &[u32],
+    ) -> Option<Self> {
         let remote_addr = match remote_addr {
             SocketAddr::V4(addr) => addr,
             SocketAddr::V6(_) => return None,
         };
         let public_ip = *remote_addr.ip();
         let base_port = remote_addr.port();
-        let centered_ports = centered_ports_around(base_port, REMOTE_SYM_SCAN_WINDOW);
+        let priority_ports =
+            priority_ports_around_hints(priority_port_nums, REMOTE_SYM_PRIORITY_SCAN_WINDOW);
+        let mut included = vec![false; u16::MAX as usize + 1];
+        mark_ports(&mut included, &priority_ports);
+        let centered_ports = filter_known_ports(
+            centered_ports_around(base_port, REMOTE_SYM_SCAN_WINDOW),
+            &included,
+        );
+        mark_ports(&mut included, &centered_ports);
 
         if peer_nat_info.is_unknown() || peer_nat_info.is_hard_sym() {
-            let mut included = vec![false; u16::MAX as usize + 1];
-            for port in centered_ports.iter().copied() {
-                included[port as usize] = true;
-            }
-
-            let mut remaining_ports = Vec::with_capacity(u16::MAX as usize - centered_ports.len());
+            let mut remaining_ports =
+                Vec::with_capacity(u16::MAX as usize - priority_ports.len() - centered_ports.len());
             for port in 1..=u16::MAX {
                 if !included[port as usize] {
                     remaining_ports.push(port);
@@ -335,8 +483,10 @@ impl RemotePortScanPlan {
 
             return Some(Self {
                 public_ip,
+                priority_ports,
                 centered_ports,
                 random_ports: remaining_ports,
+                next_priority_idx: 0,
                 next_centered_idx: 0,
                 next_random_idx: 0,
                 ports_per_tick: REMOTE_HARD_SYM_SCAN_PORTS_PER_TICK,
@@ -347,8 +497,10 @@ impl RemotePortScanPlan {
 
         Some(Self {
             public_ip,
+            priority_ports,
             centered_ports,
             random_ports: Vec::new(),
+            next_priority_idx: 0,
             next_centered_idx: 0,
             next_random_idx: 0,
             ports_per_tick: REMOTE_SYM_SCAN_PORTS_PER_TICK,
@@ -362,65 +514,111 @@ impl RemotePortScanPlan {
     }
 
     fn port_count(&self) -> usize {
-        self.centered_ports.len() + self.random_ports.len()
+        self.priority_ports.len() + self.centered_ports.len() + self.random_ports.len()
     }
 
     fn preview_ports(&self, count: usize) -> Vec<u16> {
+        let priority_count = REMOTE_SYM_PRIORITY_PORTS_PER_TICK
+            .min(self.priority_ports.len())
+            .min(count);
+        let remaining_count = count.saturating_sub(priority_count);
+        let mut ports: Vec<u16> = self
+            .priority_ports
+            .iter()
+            .copied()
+            .take(priority_count)
+            .collect();
         match self.kind {
             RemotePortScanKind::Centered => {
-                self.centered_ports.iter().copied().take(count).collect()
+                ports.extend(self.centered_ports.iter().copied().take(remaining_count))
             }
-            RemotePortScanKind::CenteredThenRandom => self
-                .centered_ports
-                .iter()
-                .copied()
-                .take(REMOTE_HARD_SYM_CENTERED_PORTS_PER_TICK.min(count))
-                .chain(
+            RemotePortScanKind::CenteredThenRandom => {
+                let centered_count = if self.priority_ports.is_empty() {
+                    REMOTE_HARD_SYM_CENTERED_PORTS_PER_TICK.min(remaining_count)
+                } else {
+                    (remaining_count / 2).min(self.centered_ports.len())
+                };
+                ports.extend(self.centered_ports.iter().copied().take(centered_count));
+                ports.extend(
                     self.random_ports
                         .iter()
                         .copied()
-                        .take(count.saturating_sub(REMOTE_HARD_SYM_CENTERED_PORTS_PER_TICK)),
-                )
-                .collect(),
+                        .take(remaining_count.saturating_sub(centered_count)),
+                );
+            }
+        }
+        ports
+    }
+
+    fn push_cyclic_ports(dst: &mut Vec<u16>, src: &[u16], next_idx: &mut usize, count: usize) {
+        if src.is_empty() {
+            return;
+        }
+        for _ in 0..count.min(src.len()) {
+            dst.push(src[*next_idx % src.len()]);
+            *next_idx = (*next_idx + 1) % src.len();
         }
     }
 
     fn next_ports_for_tick(&mut self) -> Vec<u16> {
+        let priority_count = REMOTE_SYM_PRIORITY_PORTS_PER_TICK.min(self.priority_ports.len());
         match self.kind {
             RemotePortScanKind::Centered => {
-                let mut ports = Vec::with_capacity(self.ports_per_tick);
-                for _ in 0..self.ports_per_tick {
-                    ports.push(
-                        self.centered_ports[self.next_centered_idx % self.centered_ports.len()],
-                    );
-                    self.next_centered_idx =
-                        (self.next_centered_idx + 1) % self.centered_ports.len();
-                }
+                let centered_count = self
+                    .ports_per_tick
+                    .saturating_sub(priority_count)
+                    .min(self.centered_ports.len());
+                let mut ports = Vec::with_capacity(priority_count + centered_count);
+                Self::push_cyclic_ports(
+                    &mut ports,
+                    &self.priority_ports,
+                    &mut self.next_priority_idx,
+                    priority_count,
+                );
+                Self::push_cyclic_ports(
+                    &mut ports,
+                    &self.centered_ports,
+                    &mut self.next_centered_idx,
+                    centered_count,
+                );
                 ports
             }
             RemotePortScanKind::CenteredThenRandom => {
-                let centered_count =
-                    REMOTE_HARD_SYM_CENTERED_PORTS_PER_TICK.min(self.ports_per_tick);
-                let random_count = REMOTE_HARD_SYM_RANDOM_PORTS_PER_TICK
-                    .min(self.ports_per_tick.saturating_sub(centered_count));
-                let mut ports = Vec::with_capacity(centered_count + random_count);
-
-                for _ in 0..centered_count {
-                    ports.push(
-                        self.centered_ports[self.next_centered_idx % self.centered_ports.len()],
-                    );
-                    self.next_centered_idx =
-                        (self.next_centered_idx + 1) % self.centered_ports.len();
-                }
-
-                if !self.random_ports.is_empty() {
-                    for _ in 0..random_count {
-                        ports.push(
-                            self.random_ports[self.next_random_idx % self.random_ports.len()],
-                        );
-                        self.next_random_idx = (self.next_random_idx + 1) % self.random_ports.len();
-                    }
-                }
+                let remaining_count = self.ports_per_tick.saturating_sub(priority_count);
+                let (centered_count, random_count) = if self.centered_ports.is_empty() {
+                    (0, remaining_count.min(self.random_ports.len()))
+                } else if self.random_ports.is_empty() {
+                    (remaining_count.min(self.centered_ports.len()), 0)
+                } else {
+                    let total_share = REMOTE_HARD_SYM_CENTERED_PORTS_PER_TICK
+                        + REMOTE_HARD_SYM_RANDOM_PORTS_PER_TICK;
+                    let centered_count =
+                        (remaining_count * REMOTE_HARD_SYM_CENTERED_PORTS_PER_TICK / total_share)
+                            .min(self.centered_ports.len());
+                    let random_count = remaining_count
+                        .saturating_sub(centered_count)
+                        .min(self.random_ports.len());
+                    (centered_count, random_count)
+                };
+                let mut ports = Vec::with_capacity(priority_count + centered_count + random_count);
+                Self::push_cyclic_ports(
+                    &mut ports,
+                    &self.priority_ports,
+                    &mut self.next_priority_idx,
+                    priority_count,
+                );
+                Self::push_cyclic_ports(
+                    &mut ports,
+                    &self.centered_ports,
+                    &mut self.next_centered_idx,
+                    centered_count,
+                );
+                Self::push_cyclic_ports(
+                    &mut ports,
+                    &self.random_ports,
+                    &mut self.next_random_idx,
+                    random_count,
+                );
 
                 ports
             }
@@ -828,7 +1026,7 @@ impl PunchSymToConeHoleClient {
             }));
 
             let mut remote_scan = if peer_nat_info.is_unknown() || peer_nat_info.is_sym() {
-                let plan = RemotePortScanPlan::new(remote_addr, peer_nat_info);
+                let plan = RemotePortScanPlan::new(remote_addr, peer_nat_info, &[]);
                 if let Some(plan) = plan.as_ref() {
                     tracing::info!(
                         ?remote_addr,
@@ -1244,6 +1442,16 @@ impl PunchSymToConeHoleClient {
             dst_max_port_num: target_window.max_port_num,
             dst_is_incremental: target_window.is_incremental,
             dst_random_scan: true,
+            dst_priority_port_nums: runtime_port_prediction
+                .map(|prediction| {
+                    prediction
+                        .mapped_ports
+                        .iter()
+                        .copied()
+                        .map(u32::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
         };
         tracing::info!(
             ?req,
@@ -1266,11 +1474,13 @@ impl PunchSymToConeHoleClient {
             return Ok(None);
         }
 
+        let remote_priority_port_nums = remote_ret.base_priority_port_nums.clone();
         let remote_mapped_addr = remote_ret.base_mapped_addr.ok_or(anyhow::anyhow!(
             "coordinated symmetric punch response missing remote mapped addr"
         ))?;
         let remote_addr: SocketAddr = remote_mapped_addr.into();
-        let mut remote_scan = RemotePortScanPlan::new(remote_addr, peer_nat_info);
+        let mut remote_scan =
+            RemotePortScanPlan::new(remote_addr, peer_nat_info, &remote_priority_port_nums);
         if let Some(plan) = remote_scan.as_ref() {
             tracing::info!(
                 ?remote_addr,
@@ -1537,7 +1747,7 @@ impl PunchSymToConeHoleClient {
 
         let mut remote_scan = if peer_nat_info.is_unknown() || peer_nat_info.is_sym() {
             let remote_addr: SocketAddr = remote_mapped_addr.into();
-            let plan = RemotePortScanPlan::new(remote_addr, peer_nat_info);
+            let plan = RemotePortScanPlan::new(remote_addr, peer_nat_info, &[]);
             if let Some(plan) = plan.as_ref() {
                 tracing::info!(
                     ?remote_addr,
@@ -1719,6 +1929,7 @@ pub mod tests {
         let plan = super::RemotePortScanPlan::new(
             "198.51.100.10:45678".parse().unwrap(),
             super::UdpNatType::Unknown,
+            &[],
         )
         .unwrap();
 
@@ -1740,6 +1951,7 @@ pub mod tests {
         let mut plan = super::RemotePortScanPlan::new(
             "198.51.100.10:45678".parse().unwrap(),
             super::UdpNatType::Unknown,
+            &[],
         )
         .unwrap();
 
@@ -1751,6 +1963,24 @@ pub mod tests {
                 .iter()
                 .all(|port| !plan.centered_ports.contains(port))
         );
+    }
+
+    #[test]
+    fn remote_scan_prioritizes_runtime_port_hints() {
+        let mut plan = super::RemotePortScanPlan::new(
+            "198.51.100.10:45678".parse().unwrap(),
+            super::UdpNatType::Unknown,
+            &[48_667],
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.preview_ports(5),
+            vec![48_667, 48_668, 48_666, 48_669, 48_665]
+        );
+        let first_tick = plan.next_ports_for_tick();
+        assert_eq!(&first_tick[..5], &[48_667, 48_668, 48_666, 48_669, 48_665]);
+        assert!(first_tick.contains(&45_678));
     }
 
     #[test]
@@ -1903,6 +2133,20 @@ pub mod tests {
         assert!(ports.contains(&4_866));
         assert!(ports.contains(&8_121));
         assert!(ports.contains(&8_561));
+    }
+
+    #[test]
+    fn hard_sym_wraparound_samples_stay_predictable() {
+        let prediction = super::predictable_port_window_from_samples(
+            super::UdpNatType::HardSymmetric(NatType::Symmetric),
+            &[62_050, 4_867, 4_868],
+        )
+        .unwrap();
+
+        assert_eq!(prediction.base_port_num, 4_868);
+        assert_eq!(prediction.max_port_num, super::HARD_SYM_PREDICT_WINDOW);
+        assert!(prediction.is_incremental);
+        assert_eq!(super::observed_port_spread(&[62_050, 4_867, 4_868]), 8_353);
     }
 
     #[test]

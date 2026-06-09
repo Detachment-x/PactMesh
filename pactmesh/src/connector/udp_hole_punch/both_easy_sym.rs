@@ -35,6 +35,8 @@ const COORDINATED_SYM_MAX_WAIT_TIME_MS: u32 = 20_000;
 const COORDINATED_SYM_PORTS_PER_TICK: usize = 128;
 const COORDINATED_SYM_CENTERED_PORTS_PER_TICK: usize = 64;
 const COORDINATED_SYM_RANDOM_PORTS_PER_TICK: usize = 64;
+const COORDINATED_SYM_PRIORITY_PORTS_PER_TICK: usize = 64;
+const COORDINATED_SYM_PRIORITY_SCAN_WINDOW: u16 = 2048;
 const COORDINATED_SYM_SOCKET_LIMIT: usize = 16;
 
 fn port_range_to_vec(start: u32, end: u32) -> Vec<u16> {
@@ -62,6 +64,98 @@ fn easy_sym_target_ports(base_port_num: u32, max_port_num: u32, is_incremental: 
     }
 }
 
+fn centered_port_order(mut ports: Vec<u16>) -> Vec<u16> {
+    if ports.len() <= 1 {
+        return ports;
+    }
+
+    ports.sort_unstable();
+    ports.dedup();
+
+    let center_idx = ports.len() / 2;
+    let mut ordered = Vec::with_capacity(ports.len());
+    ordered.push(ports[center_idx]);
+    for offset in 1..ports.len() {
+        if let Some(idx) = center_idx.checked_add(offset)
+            && idx < ports.len()
+        {
+            ordered.push(ports[idx]);
+        }
+        if let Some(idx) = center_idx.checked_sub(offset) {
+            ordered.push(ports[idx]);
+        }
+    }
+
+    ordered
+}
+
+fn wrapping_add_port(base: u16, offset: u16) -> u16 {
+    ((base as u32 + offset as u32 - 1) % u16::MAX as u32 + 1) as u16
+}
+
+fn wrapping_sub_port(base: u16, offset: u16) -> u16 {
+    ((base as i32 - offset as i32 - 1).rem_euclid(u16::MAX as i32) + 1) as u16
+}
+
+fn push_unique_port(ports: &mut Vec<u16>, seen_ports: &mut [bool], port: u16) {
+    if !seen_ports[port as usize] {
+        seen_ports[port as usize] = true;
+        ports.push(port);
+    }
+}
+
+fn priority_ports_around_hints(hints: &[u32], window: u16) -> Vec<u16> {
+    let mut bases = Vec::new();
+    let mut seen_bases = vec![false; u16::MAX as usize + 1];
+    for port in hints.iter().filter_map(|port| u16::try_from(*port).ok()) {
+        if port == 0 || seen_bases[port as usize] {
+            continue;
+        }
+        seen_bases[port as usize] = true;
+        bases.push(port);
+    }
+
+    let mut seen_ports = vec![false; u16::MAX as usize + 1];
+    let mut ports = Vec::new();
+    for offset in 0..=window {
+        for base in bases.iter().copied() {
+            if offset == 0 {
+                push_unique_port(&mut ports, &mut seen_ports, base);
+                continue;
+            }
+
+            push_unique_port(&mut ports, &mut seen_ports, wrapping_add_port(base, offset));
+            push_unique_port(&mut ports, &mut seen_ports, wrapping_sub_port(base, offset));
+        }
+    }
+
+    ports
+}
+
+fn filter_known_ports(ports: Vec<u16>, known_ports: &[bool]) -> Vec<u16> {
+    ports
+        .into_iter()
+        .filter(|port| !known_ports[*port as usize])
+        .collect()
+}
+
+fn mark_ports(known_ports: &mut [bool], ports: &[u16]) {
+    for port in ports.iter().copied() {
+        known_ports[port as usize] = true;
+    }
+}
+
+fn cached_udp_priority_port_nums(global_ctx: &crate::common::global_ctx::ArcGlobalCtx) -> Vec<u32> {
+    let stun_info = global_ctx.get_stun_info_collector().get_stun_info();
+    let mut ports = Vec::new();
+    for port in [stun_info.min_port, stun_info.max_port] {
+        if u16::try_from(port).is_ok_and(|port| port != 0) && !ports.contains(&port) {
+            ports.push(port);
+        }
+    }
+    ports
+}
+
 fn best_effort_cached_udp_mapped_addr(
     global_ctx: &crate::common::global_ctx::ArcGlobalCtx,
     local_port: u16,
@@ -82,7 +176,11 @@ fn best_effort_cached_udp_mapped_addr(
         (Some(min_port), Some(max_port)) => {
             let lo = min_port.min(max_port) as u32;
             let hi = min_port.max(max_port) as u32;
-            (lo + hi.saturating_sub(lo) / 2) as u16
+            if hi.saturating_sub(lo) > (u16::MAX as u32 / 2) {
+                lo as u16
+            } else {
+                (lo + hi.saturating_sub(lo) / 2) as u16
+            }
         }
         _ if local_port != 0 => local_port,
         _ => 1,
@@ -94,8 +192,10 @@ fn best_effort_cached_udp_mapped_addr(
 #[derive(Debug)]
 struct CoordinatedSymPortPlan {
     public_ip: Ipv4Addr,
+    priority_ports: Vec<u16>,
     centered_ports: Vec<u16>,
     random_ports: Vec<u16>,
+    next_priority_idx: usize,
     next_centered_idx: usize,
     next_random_idx: usize,
     coordinated: bool,
@@ -103,26 +203,33 @@ struct CoordinatedSymPortPlan {
 
 impl CoordinatedSymPortPlan {
     fn new(request: &SendPunchPacketBothEasySymRequest, public_ip: Ipv4Addr) -> Self {
-        let coordinated = request.dst_max_port_num > 0 || request.dst_random_scan;
+        let priority_ports = priority_ports_around_hints(
+            &request.dst_priority_port_nums,
+            COORDINATED_SYM_PRIORITY_SCAN_WINDOW,
+        );
+        let mut included = vec![false; u16::MAX as usize + 1];
+        mark_ports(&mut included, &priority_ports);
+
+        let coordinated = request.dst_max_port_num > 0
+            || request.dst_random_scan
+            || !request.dst_priority_port_nums.is_empty();
         let centered_ports = if request.dst_max_port_num > 0 {
-            easy_sym_target_ports(
+            let ports = easy_sym_target_ports(
                 request.dst_base_port_num,
                 request.dst_max_port_num,
                 request.dst_is_incremental,
-            )
+            );
+            filter_known_ports(centered_port_order(ports), &included)
         } else if request.dst_port_num == 0 {
             Vec::new()
         } else {
-            vec![request.dst_port_num as u16]
+            filter_known_ports(vec![request.dst_port_num as u16], &included)
         };
+        mark_ports(&mut included, &centered_ports);
 
         let mut random_ports = Vec::new();
         if request.dst_random_scan {
-            let mut included = vec![false; u16::MAX as usize + 1];
-            for port in centered_ports.iter().copied() {
-                included[port as usize] = true;
-            }
-            random_ports.reserve(u16::MAX as usize - centered_ports.len());
+            random_ports.reserve(u16::MAX as usize - priority_ports.len() - centered_ports.len());
             for port in 1..=u16::MAX {
                 if !included[port as usize] {
                     random_ports.push(port);
@@ -133,8 +240,10 @@ impl CoordinatedSymPortPlan {
 
         Self {
             public_ip,
+            priority_ports,
             centered_ports,
             random_ports,
+            next_priority_idx: 0,
             next_centered_idx: 0,
             next_random_idx: 0,
             coordinated,
@@ -142,7 +251,17 @@ impl CoordinatedSymPortPlan {
     }
 
     fn port_count(&self) -> usize {
-        self.centered_ports.len() + self.random_ports.len()
+        self.priority_ports.len() + self.centered_ports.len() + self.random_ports.len()
+    }
+
+    fn push_cyclic_ports(dst: &mut Vec<u16>, src: &[u16], next_idx: &mut usize, count: usize) {
+        if src.is_empty() {
+            return;
+        }
+        for _ in 0..count.min(src.len()) {
+            dst.push(src[*next_idx % src.len()]);
+            *next_idx = (*next_idx + 1) % src.len();
+        }
     }
 
     fn next_ports_for_tick(&mut self) -> Vec<u16> {
@@ -150,28 +269,39 @@ impl CoordinatedSymPortPlan {
             return self.centered_ports.first().copied().into_iter().collect();
         }
 
-        let centered_count = if self.random_ports.is_empty() {
-            COORDINATED_SYM_PORTS_PER_TICK
+        let priority_count = COORDINATED_SYM_PRIORITY_PORTS_PER_TICK.min(self.priority_ports.len());
+        let remaining_count = COORDINATED_SYM_PORTS_PER_TICK.saturating_sub(priority_count);
+        let (centered_count, random_count) = if self.random_ports.is_empty() {
+            (remaining_count.min(self.centered_ports.len()), 0)
+        } else if self.centered_ports.is_empty() {
+            (0, remaining_count.min(self.random_ports.len()))
         } else {
-            COORDINATED_SYM_CENTERED_PORTS_PER_TICK
-        }
-        .min(self.centered_ports.len());
-        let random_count = if self.random_ports.is_empty() {
-            0
-        } else {
-            COORDINATED_SYM_RANDOM_PORTS_PER_TICK
-        }
-        .min(self.random_ports.len());
+            let centered_count = (remaining_count / 2).min(self.centered_ports.len());
+            let random_count = remaining_count
+                .saturating_sub(centered_count)
+                .min(self.random_ports.len());
+            (centered_count, random_count)
+        };
 
-        let mut ports = Vec::with_capacity(centered_count + random_count);
-        for _ in 0..centered_count {
-            ports.push(self.centered_ports[self.next_centered_idx % self.centered_ports.len()]);
-            self.next_centered_idx = (self.next_centered_idx + 1) % self.centered_ports.len();
-        }
-        for _ in 0..random_count {
-            ports.push(self.random_ports[self.next_random_idx % self.random_ports.len()]);
-            self.next_random_idx = (self.next_random_idx + 1) % self.random_ports.len();
-        }
+        let mut ports = Vec::with_capacity(priority_count + centered_count + random_count);
+        Self::push_cyclic_ports(
+            &mut ports,
+            &self.priority_ports,
+            &mut self.next_priority_idx,
+            priority_count,
+        );
+        Self::push_cyclic_ports(
+            &mut ports,
+            &self.centered_ports,
+            &mut self.next_centered_idx,
+            centered_count,
+        );
+        Self::push_cyclic_ports(
+            &mut ports,
+            &self.random_ports,
+            &mut self.next_random_idx,
+            random_count,
+        );
 
         ports
     }
@@ -244,9 +374,16 @@ impl PunchBothEasySymHoleServer {
             .ok_or(anyhow::anyhow!("public_ip is required"))?;
         let public_ip = Ipv4Addr::from(public_ip);
         let transaction_id = request.transaction_id;
-        let coordinated = request.dst_max_port_num > 0 || request.dst_random_scan;
+        let coordinated = request.dst_max_port_num > 0
+            || request.dst_random_scan
+            || !request.dst_priority_port_nums.is_empty();
 
         let udp_array = UdpSocketArray::new(socket_count, global_ctx.net_ns.clone());
+        let mut base_priority_port_nums = if coordinated {
+            cached_udp_priority_port_nums(&global_ctx)
+        } else {
+            Vec::new()
+        };
         let cur_mapped_addr = if coordinated {
             let sockets = udp_array.bind_sockets().await?;
             let local_port = sockets
@@ -267,6 +404,12 @@ impl PunchBothEasySymHoleServer {
             udp_array.start().await?;
             mapped_addr
         };
+        if coordinated {
+            let port = cur_mapped_addr.port() as u32;
+            if !base_priority_port_nums.contains(&port) {
+                base_priority_port_nums.push(port);
+            }
+        }
         udp_array.add_intreast_tid(transaction_id);
         let peer_mgr = self.common.get_peer_mgr();
 
@@ -356,6 +499,7 @@ impl PunchBothEasySymHoleServer {
         return Ok(SendPunchPacketBothEasySymResponse {
             is_busy: false,
             base_mapped_addr: Some(cur_mapped_addr.into()),
+            base_priority_port_nums,
         });
     }
 }
@@ -451,6 +595,7 @@ impl PunchBothEasySymHoleClient {
                     dst_max_port_num: 0,
                     dst_is_incremental: false,
                     dst_random_scan: false,
+                    dst_priority_port_nums: Vec::new(),
                 },
             )
             .await;
@@ -551,6 +696,43 @@ pub mod tests {
         tunnel::common::tests::wait_for_condition,
     };
 
+    #[test]
+    fn coordinated_scan_prioritizes_runtime_hints_and_repeats() {
+        let request = crate::proto::peer_rpc::SendPunchPacketBothEasySymRequest {
+            public_ip: Some(std::net::Ipv4Addr::new(198, 51, 100, 10).into()),
+            dst_base_port_num: 40_000,
+            dst_max_port_num: 256,
+            dst_is_incremental: true,
+            dst_random_scan: true,
+            dst_priority_port_nums: vec![48_667],
+            ..Default::default()
+        };
+        let mut plan =
+            super::CoordinatedSymPortPlan::new(&request, std::net::Ipv4Addr::new(198, 51, 100, 10));
+
+        let first_tick = plan.next_ports_for_tick();
+        assert_eq!(&first_tick[..5], &[48_667, 48_668, 48_666, 48_669, 48_665]);
+        assert!(first_tick.contains(&40_129));
+
+        for _ in 0..32 {
+            plan.next_ports_for_tick();
+        }
+        let repeated_tick = plan.next_ports_for_tick();
+        assert!(
+            repeated_tick
+                .iter()
+                .any(|port| (46_619..=50_715).contains(port))
+        );
+    }
+
+    #[test]
+    fn priority_hints_wrap_around_port_boundary() {
+        let ports = super::priority_ports_around_hints(&[65_534], 4);
+        assert_eq!(
+            &ports[..9],
+            &[65_534, 65_535, 65_533, 1, 65_532, 2, 65_531, 3, 65_530]
+        );
+    }
     #[rstest::rstest]
     #[tokio::test]
     #[serial_test::serial(hole_punch)]
