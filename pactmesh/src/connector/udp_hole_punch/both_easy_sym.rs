@@ -158,6 +158,12 @@ fn push_unique_port_num(ports: &mut Vec<u32>, port: u16) {
     }
 }
 
+fn push_unique_socket_addr(addrs: &mut Vec<SocketAddr>, addr: SocketAddr) {
+    if !addrs.contains(&addr) {
+        addrs.push(addr);
+    }
+}
+
 fn cached_udp_priority_port_nums(global_ctx: &crate::common::global_ctx::ArcGlobalCtx) -> Vec<u32> {
     let stun_info = global_ctx.get_stun_info_collector().get_stun_info();
     let mut ports = Vec::new();
@@ -257,6 +263,16 @@ fn best_effort_cached_udp_mapped_addr(
     };
 
     Some(SocketAddr::V4(SocketAddrV4::new(public_ip, port)))
+}
+
+#[derive(Debug, Default)]
+struct PortScanTickStats {
+    port_count: usize,
+    socket_count: usize,
+    packet_count: usize,
+    first_port: Option<u16>,
+    last_port: Option<u16>,
+    sample_ports: Vec<u16>,
 }
 
 #[derive(Debug)]
@@ -384,10 +400,10 @@ impl CoordinatedSymPortPlan {
         &mut self,
         udp_array: &UdpSocketArray,
         packet: &[u8],
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<PortScanTickStats, anyhow::Error> {
         let ports = self.next_ports_for_tick();
         if ports.is_empty() {
-            return Ok(());
+            return Ok(PortScanTickStats::default());
         }
 
         let sockets = udp_array.sockets();
@@ -396,15 +412,25 @@ impl CoordinatedSymPortPlan {
         } else {
             sockets.len()
         };
-        for port in ports {
+        let mut packet_count = 0usize;
+        for port in ports.iter().copied() {
             let addr = SocketAddr::V4(SocketAddrV4::new(self.public_ip, port));
             for socket in sockets.iter().take(socket_limit) {
                 for _ in 0..3 {
                     socket.send_to(packet, addr).await?;
+                    packet_count += 1;
                 }
             }
         }
-        Ok(())
+
+        Ok(PortScanTickStats {
+            port_count: ports.len(),
+            socket_count: socket_limit,
+            packet_count,
+            first_port: ports.first().copied(),
+            last_port: ports.last().copied(),
+            sample_ports: ports.iter().copied().take(8).collect(),
+        })
     }
 }
 
@@ -458,6 +484,7 @@ impl PunchBothEasySymHoleServer {
         } else {
             Vec::new()
         };
+        let mut response_mapped_addrs = Vec::new();
         let cur_mapped_addr = if coordinated {
             let sockets = udp_array.bind_sockets().await?;
             let local_port = sockets
@@ -469,6 +496,7 @@ impl PunchBothEasySymHoleServer {
                 sample_udp_array_public_mapped_addrs(&global_ctx, &sockets).await;
             for addr in sampled_mapped_addrs.iter().copied() {
                 push_unique_port_num(&mut base_priority_port_nums, addr.port());
+                push_unique_socket_addr(&mut response_mapped_addrs, addr);
             }
             let mapped_addr = sampled_mapped_addrs
                 .first()
@@ -483,12 +511,14 @@ impl PunchBothEasySymHoleServer {
                 .get_udp_port_mapping(0)
                 .await
                 .with_context(|| "failed to get udp port mapping")?;
+            push_unique_socket_addr(&mut response_mapped_addrs, mapped_addr);
             udp_array.start().await?;
             mapped_addr
         };
         if coordinated {
             push_unique_port_num(&mut base_priority_port_nums, cur_mapped_addr.port());
         }
+        push_unique_socket_addr(&mut response_mapped_addrs, cur_mapped_addr);
         udp_array.add_intreast_tid(transaction_id);
         let peer_mgr = self.common.get_peer_mgr();
 
@@ -512,10 +542,28 @@ impl PunchBothEasySymHoleServer {
             } else {
                 request.wait_time_ms.min(8000)
             };
+            let mut tick_idx = 0usize;
             while start_time.elapsed() < Duration::from_millis(wait_time_ms as u64) {
-                if let Err(e) = port_plan.send_next(&udp_array, &punch_packet).await {
-                    tracing::error!(?e, "failed to send coordinated hole punch packet");
-                    break;
+                let tick_stats = match port_plan.send_next(&udp_array, &punch_packet).await {
+                    Ok(stats) => stats,
+                    Err(e) => {
+                        tracing::error!(?e, "failed to send coordinated hole punch packet");
+                        break;
+                    }
+                };
+                tick_idx += 1;
+                if coordinated && (tick_idx <= 3 || tick_idx % 20 == 0) {
+                    tracing::info!(
+                        tick_idx,
+                        public_ip = ?port_plan.public_ip,
+                        port_count = tick_stats.port_count,
+                        socket_count = tick_stats.socket_count,
+                        packet_count = tick_stats.packet_count,
+                        first_port = ?tick_stats.first_port,
+                        last_port = ?tick_stats.last_port,
+                        sample_ports = ?tick_stats.sample_ports,
+                        "coordinated symmetric punch: remote scan tick sent"
+                    );
                 }
 
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -579,6 +627,7 @@ impl PunchBothEasySymHoleServer {
             is_busy: false,
             base_mapped_addr: Some(cur_mapped_addr.into()),
             base_priority_port_nums,
+            mapped_addrs: response_mapped_addrs.into_iter().map(Into::into).collect(),
         });
     }
 }

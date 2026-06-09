@@ -372,6 +372,16 @@ enum RemotePortScanKind {
     CenteredThenRandom,
 }
 
+#[derive(Debug, Default)]
+struct PortScanTickStats {
+    port_count: usize,
+    socket_count: usize,
+    packet_count: usize,
+    first_port: Option<u16>,
+    last_port: Option<u16>,
+    sample_ports: Vec<u16>,
+}
+
 struct RemotePortScanPlan {
     public_ip: Ipv4Addr,
     priority_ports: Vec<u16>,
@@ -454,6 +464,23 @@ fn filter_known_ports(ports: Vec<u16>, known_ports: &[bool]) -> Vec<u16> {
 fn mark_ports(known_ports: &mut [bool], ports: &[u16]) {
     for port in ports.iter().copied() {
         known_ports[port as usize] = true;
+    }
+}
+
+fn push_unique_port_num(ports: &mut Vec<u32>, port: u16) {
+    if port == 0 {
+        return;
+    }
+
+    let port = port as u32;
+    if !ports.contains(&port) {
+        ports.push(port);
+    }
+}
+
+fn push_unique_socket_addr(addrs: &mut Vec<SocketAddr>, addr: SocketAddr) {
+    if !addrs.contains(&addr) {
+        addrs.push(addr);
     }
 }
 
@@ -637,22 +664,37 @@ impl RemotePortScanPlan {
         &mut self,
         udp_array: &Arc<UdpSocketArray>,
         packet: &[u8],
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<PortScanTickStats, anyhow::Error> {
         let sockets = udp_array.sockets();
         if sockets.is_empty() {
-            return Ok(());
+            return Ok(PortScanTickStats::default());
         }
 
         let socket_count = self.socket_limit.min(sockets.len());
-        for port in self.next_ports_for_tick() {
+        let ports = self.next_ports_for_tick();
+        if ports.is_empty() {
+            return Ok(PortScanTickStats::default());
+        }
+
+        let mut packet_count = 0usize;
+        for port in ports.iter().copied() {
             let addr = SocketAddr::V4(SocketAddrV4::new(self.public_ip, port));
             for socket in sockets.iter().take(socket_count) {
                 for _ in 0..3 {
                     socket.send_to(packet, addr).await?;
+                    packet_count += 1;
                 }
             }
         }
-        Ok(())
+
+        Ok(PortScanTickStats {
+            port_count: ports.len(),
+            socket_count,
+            packet_count,
+            first_port: ports.first().copied(),
+            last_port: ports.last().copied(),
+            sample_ports: ports.iter().copied().take(8).collect(),
+        })
     }
 }
 
@@ -1063,6 +1105,7 @@ impl PunchSymToConeHoleClient {
                 remote_mapped_addr,
                 &punch_task,
                 remote_scan.as_mut(),
+                &[],
             )
             .await?;
             let _ = punch_task.await;
@@ -1499,16 +1542,29 @@ impl PunchSymToConeHoleClient {
             return Ok(None);
         }
 
-        let remote_priority_port_nums = remote_ret.base_priority_port_nums.clone();
+        let mut remote_priority_port_nums = remote_ret.base_priority_port_nums.clone();
         let remote_mapped_addr = remote_ret.base_mapped_addr.ok_or(anyhow::anyhow!(
             "coordinated symmetric punch response missing remote mapped addr"
         ))?;
-        let remote_addr: SocketAddr = remote_mapped_addr.into();
+        let remote_addr: SocketAddr = remote_mapped_addr.clone().into();
+        let mut remote_candidate_addrs = Vec::new();
+        push_unique_socket_addr(&mut remote_candidate_addrs, remote_addr);
+        for addr in remote_ret.mapped_addrs {
+            let addr: SocketAddr = addr.into();
+            if !addr.ip().is_ipv4() || addr.ip().is_unspecified() || addr.port() == 0 {
+                continue;
+            }
+            push_unique_socket_addr(&mut remote_candidate_addrs, addr);
+            push_unique_port_num(&mut remote_priority_port_nums, addr.port());
+        }
+
         let mut remote_scan =
             RemotePortScanPlan::new(remote_addr, peer_nat_info, &remote_priority_port_nums);
         if let Some(plan) = remote_scan.as_ref() {
             tracing::info!(
                 ?remote_addr,
+                ?remote_candidate_addrs,
+                ?remote_priority_port_nums,
                 ?peer_nat_info,
                 scan_kind = ?plan.kind(),
                 ports_per_tick = plan.ports_per_tick,
@@ -1518,7 +1574,9 @@ impl PunchSymToConeHoleClient {
             );
         }
 
-        udp_array.send_with_all(&packet, remote_addr).await?;
+        for addr in remote_candidate_addrs.iter().copied() {
+            udp_array.send_with_all(&packet, addr).await?;
+        }
         let wait_task = AbortOnDropHandle::new(tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(COORDINATED_SYM_WAIT_MS + 1000)).await;
         }));
@@ -1530,6 +1588,7 @@ impl PunchSymToConeHoleClient {
             remote_mapped_addr,
             &wait_task,
             remote_scan.as_mut(),
+            &remote_candidate_addrs,
         )
         .await?;
         let _ = wait_task.await;
@@ -1548,21 +1607,47 @@ impl PunchSymToConeHoleClient {
         remote_mapped_addr: crate::proto::common::SocketAddr,
         punch_task: &AbortOnDropHandle<T>,
         mut remote_scan: Option<&mut RemotePortScanPlan>,
+        remote_candidate_addrs: &[SocketAddr],
     ) -> Result<Option<Box<dyn Tunnel>>, anyhow::Error> {
         // no matter what the result is, we should check if we received any hole punching packet
         let mut ret_tunnel: Option<Box<dyn Tunnel>> = None;
         let mut finish_time: Option<Instant> = None;
+        let mut scan_tick_idx = 0usize;
         while finish_time.is_none()
             || finish_time.as_ref().unwrap().elapsed().as_millis() < PUNCH_RESULT_GRACE_MS
         {
-            udp_array
-                .send_with_all(packet, remote_mapped_addr.into())
-                .await?;
+            let remote_addr: SocketAddr = remote_mapped_addr.clone().into();
+            udp_array.send_with_all(packet, remote_addr).await?;
+            for candidate_addr in remote_candidate_addrs
+                .iter()
+                .copied()
+                .filter(|addr| *addr != remote_addr)
+            {
+                tracing::debug!(
+                    ?candidate_addr,
+                    ?tid,
+                    "send hole punch packet to remote candidate endpoint"
+                );
+                udp_array.send_with_all(packet, candidate_addr).await?;
+            }
             if let Some(remote_scan) = remote_scan.as_deref_mut() {
-                remote_scan.send_next(udp_array, packet).await?;
+                let scan_stats = remote_scan.send_next(udp_array, packet).await?;
+                scan_tick_idx += 1;
+                if scan_tick_idx <= 3 || scan_tick_idx % 20 == 0 {
+                    tracing::info!(
+                        scan_tick_idx,
+                        remote_ip = ?remote_scan.public_ip,
+                        port_count = scan_stats.port_count,
+                        socket_count = scan_stats.socket_count,
+                        packet_count = scan_stats.packet_count,
+                        first_port = ?scan_stats.first_port,
+                        last_port = ?scan_stats.last_port,
+                        sample_ports = ?scan_stats.sample_ports,
+                        "symmetric punch: local remote scan tick sent"
+                    );
+                }
             }
 
-            let remote_addr: SocketAddr = remote_mapped_addr.into();
             for learned_addr in udp_array
                 .recent_punch_addrs()
                 .into_iter()
@@ -1880,6 +1965,7 @@ impl PunchSymToConeHoleClient {
             remote_mapped_addr,
             &punch_task,
             remote_scan.as_mut(),
+            &[],
         )
         .await?;
 

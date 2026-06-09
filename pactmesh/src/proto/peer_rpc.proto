@@ -224,6 +224,11 @@ message SendPunchPacketBothEasySymResponse {
   // Receiver-side runtime/cached mapped ports. The caller prioritizes them
   // while scanning back toward this receiver's UDP array.
   repeated uint32 base_priority_port_nums = 3;
+
+  // Current sampled public endpoints for the receiver's UDP array. Symmetric
+  // NATs may expose different mapped ports per socket or destination, so the
+  // caller treats these as candidate endpoints and keeps scanning around them.
+  repeated common.SocketAddr mapped_addrs = 4;
 }
 
 service UdpHolePunchRpc {
