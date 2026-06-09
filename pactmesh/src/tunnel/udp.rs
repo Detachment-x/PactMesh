@@ -144,11 +144,11 @@ fn extrace_dst_addr_from_hole_punch_packet(buf: &[u8]) -> Option<SocketAddrV6> {
     Some(SocketAddrV6::new(ip, body.dst_port.get(), 0, 0))
 }
 
-fn is_stun_packet(b: &[u8]) -> bool {
+pub(crate) fn is_stun_packet(b: &[u8]) -> bool {
     // stun has following pattern:
     // 1. first two bits are 0b00
     // 2. magic cookie between 32-64 bits: 0x2112A442
-    b[4..8] == [0x21, 0x12, 0xA4, 0x42] && b[0] & 0xC0 == 0
+    b.len() >= 8 && b[4..8] == [0x21, 0x12, 0xA4, 0x42] && b[0] & 0xC0 == 0
 }
 
 pub async fn send_v6_hole_punch_packet(
@@ -181,7 +181,7 @@ pub async fn send_v4_hole_punch_packet(
     Ok(())
 }
 
-async fn respond_stun_packet(
+pub(crate) async fn respond_stun_packet(
     socket: Arc<UdpSocket>,
     addr: SocketAddr,
     req_buf: Vec<u8>,

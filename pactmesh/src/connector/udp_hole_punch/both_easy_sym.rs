@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::Context;
 use rand::seq::SliceRandom;
-use tokio::sync::Mutex;
+use tokio::{net::UdpSocket, sync::Mutex};
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::{
@@ -38,6 +38,8 @@ const COORDINATED_SYM_RANDOM_PORTS_PER_TICK: usize = 64;
 const COORDINATED_SYM_PRIORITY_PORTS_PER_TICK: usize = 64;
 const COORDINATED_SYM_PRIORITY_SCAN_WINDOW: u16 = 2048;
 const COORDINATED_SYM_SOCKET_LIMIT: usize = 16;
+const COORDINATED_SYM_MAPPING_SAMPLE_COUNT: usize = 12;
+const COORDINATED_SYM_MAPPING_TIMEOUT_MS: u64 = 1500;
 
 fn port_range_to_vec(start: u32, end: u32) -> Vec<u16> {
     let start = start.max(1);
@@ -145,15 +147,83 @@ fn mark_ports(known_ports: &mut [bool], ports: &[u16]) {
     }
 }
 
+fn push_unique_port_num(ports: &mut Vec<u32>, port: u16) {
+    if port == 0 {
+        return;
+    }
+
+    let port = port as u32;
+    if !ports.contains(&port) {
+        ports.push(port);
+    }
+}
+
 fn cached_udp_priority_port_nums(global_ctx: &crate::common::global_ctx::ArcGlobalCtx) -> Vec<u32> {
     let stun_info = global_ctx.get_stun_info_collector().get_stun_info();
     let mut ports = Vec::new();
     for port in [stun_info.min_port, stun_info.max_port] {
-        if u16::try_from(port).is_ok_and(|port| port != 0) && !ports.contains(&port) {
-            ports.push(port);
+        if let Ok(port) = u16::try_from(port) {
+            push_unique_port_num(&mut ports, port);
         }
     }
     ports
+}
+
+async fn sample_udp_array_public_mapped_addrs(
+    global_ctx: &crate::common::global_ctx::ArcGlobalCtx,
+    sockets: &[Arc<UdpSocket>],
+) -> Vec<SocketAddr> {
+    let stun_collector = global_ctx.get_stun_info_collector();
+    let futures = sockets
+        .iter()
+        .take(COORDINATED_SYM_MAPPING_SAMPLE_COUNT)
+        .map(|socket| {
+            let stun_collector = stun_collector.clone();
+            let socket = socket.clone();
+            async move {
+                let local_addr = socket.local_addr().ok();
+                let ret = tokio::time::timeout(
+                    Duration::from_millis(COORDINATED_SYM_MAPPING_TIMEOUT_MS),
+                    stun_collector.get_udp_port_mapping_with_socket(socket),
+                )
+                .await;
+                (local_addr, ret)
+            }
+        });
+
+    let mut mapped_addrs = Vec::new();
+    for (local_addr, ret) in futures::future::join_all(futures).await {
+        match ret {
+            Ok(Ok(addr @ SocketAddr::V4(_))) => {
+                if !mapped_addrs.contains(&addr) {
+                    mapped_addrs.push(addr);
+                }
+            }
+            Ok(Ok(addr)) => tracing::debug!(
+                ?addr,
+                ?local_addr,
+                "ignore non-ipv4 udp array mapped addr for coordinated punch"
+            ),
+            Ok(Err(e)) => tracing::debug!(
+                ?e,
+                ?local_addr,
+                "failed to sample udp array mapped addr for coordinated punch"
+            ),
+            Err(e) => tracing::warn!(
+                ?e,
+                ?local_addr,
+                timeout_ms = COORDINATED_SYM_MAPPING_TIMEOUT_MS,
+                "timed out sampling udp array mapped addr for coordinated punch"
+            ),
+        }
+    }
+
+    tracing::info!(
+        mapped_addrs = ?mapped_addrs,
+        sampled_socket_count = sockets.len().min(COORDINATED_SYM_MAPPING_SAMPLE_COUNT),
+        "sampled udp array mapped addrs for coordinated punch"
+    );
+    mapped_addrs
 }
 
 fn best_effort_cached_udp_mapped_addr(
@@ -391,8 +461,16 @@ impl PunchBothEasySymHoleServer {
                 .and_then(|socket| socket.local_addr().ok())
                 .map(|addr| addr.port())
                 .unwrap_or(0);
-            let mapped_addr = best_effort_cached_udp_mapped_addr(&global_ctx, local_port)
-                .ok_or(anyhow::anyhow!("failed to get cached udp mapped addr"))?;
+            let sampled_mapped_addrs =
+                sample_udp_array_public_mapped_addrs(&global_ctx, &sockets).await;
+            for addr in sampled_mapped_addrs.iter().copied() {
+                push_unique_port_num(&mut base_priority_port_nums, addr.port());
+            }
+            let mapped_addr = sampled_mapped_addrs
+                .first()
+                .copied()
+                .or_else(|| best_effort_cached_udp_mapped_addr(&global_ctx, local_port))
+                .ok_or(anyhow::anyhow!("failed to get udp array mapped addr"))?;
             udp_array.start_with_sockets(sockets).await?;
             mapped_addr
         } else {
@@ -405,10 +483,7 @@ impl PunchBothEasySymHoleServer {
             mapped_addr
         };
         if coordinated {
-            let port = cur_mapped_addr.port() as u32;
-            if !base_priority_port_nums.contains(&port) {
-                base_priority_port_nums.push(port);
-            }
+            push_unique_port_num(&mut base_priority_port_nums, cur_mapped_addr.port());
         }
         udp_array.add_intreast_tid(transaction_id);
         let peer_mgr = self.common.get_peer_mgr();
@@ -695,6 +770,42 @@ pub mod tests {
         proto::common::NatType,
         tunnel::common::tests::wait_for_condition,
     };
+
+    #[tokio::test]
+    async fn coordinated_response_prioritizes_current_udp_array_mapped_ports() {
+        let peer_mgr = create_mock_peer_manager_with_mock_stun(NatType::Symmetric).await;
+        let common = Arc::new(
+            crate::connector::udp_hole_punch::common::PunchHoleServerCommon::new(peer_mgr),
+        );
+        let server = super::PunchBothEasySymHoleServer::new(common);
+
+        let response = server
+            .send_punch_packet_both_easy_sym(
+                crate::proto::peer_rpc::SendPunchPacketBothEasySymRequest {
+                    udp_socket_count: 2,
+                    public_ip: Some(std::net::Ipv4Addr::LOCALHOST.into()),
+                    transaction_id: 0x1234_5678,
+                    wait_time_ms: 1,
+                    dst_base_port_num: 40_000,
+                    dst_max_port_num: 1,
+                    dst_is_incremental: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let mapped_addr = response.base_mapped_addr.expect("mapped addr");
+        assert!(!response.is_busy);
+        assert!(mapped_addr.port > 0);
+        assert!(response.base_priority_port_nums.contains(&mapped_addr.port));
+        assert!(
+            response
+                .base_priority_port_nums
+                .iter()
+                .any(|port| *port != 100 && *port != 200)
+        );
+    }
 
     #[test]
     fn coordinated_scan_prioritizes_runtime_hints_and_repeats() {

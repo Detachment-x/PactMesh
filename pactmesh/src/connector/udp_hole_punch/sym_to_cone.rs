@@ -82,6 +82,7 @@ const REMOTE_SYM_PRIORITY_SCAN_WINDOW: u16 = 2048;
 const COORDINATED_SYM_ARRAY_SIZE: usize = 48;
 const COORDINATED_SYM_WAIT_MS: u64 = 12_000;
 const COORDINATED_SYM_SCAN_WINDOW: u32 = HARD_SYM_PREDICT_WINDOW;
+const LEARNED_ENDPOINTS_PER_TICK: usize = 8;
 
 type UdpHolePunchRpcStub =
     Box<dyn UdpHolePunchRpc<Controller = BaseController> + std::marker::Send + Sync + 'static>;
@@ -1561,6 +1562,21 @@ impl PunchSymToConeHoleClient {
                 remote_scan.send_next(udp_array, packet).await?;
             }
 
+            let remote_addr: SocketAddr = remote_mapped_addr.into();
+            for learned_addr in udp_array
+                .recent_punch_addrs()
+                .into_iter()
+                .filter(|addr| *addr != remote_addr)
+                .take(LEARNED_ENDPOINTS_PER_TICK)
+            {
+                tracing::debug!(
+                    ?learned_addr,
+                    ?tid,
+                    "send hole punch packet to learned endpoint"
+                );
+                udp_array.send_with_all(packet, learned_addr).await?;
+            }
+
             tokio::time::sleep(Duration::from_millis(200)).await;
 
             if finish_time.is_none() && punch_task.is_finished() {
@@ -2030,6 +2046,11 @@ pub mod tests {
         let first_tick = plan.next_ports_for_tick();
         assert_eq!(&first_tick[..5], &[48_667, 48_668, 48_666, 48_669, 48_665]);
         assert!(first_tick.contains(&45_678));
+    }
+
+    #[test]
+    fn learned_endpoint_limit_is_small() {
+        assert_eq!(super::LEARNED_ENDPOINTS_PER_TICK, 8);
     }
 
     #[test]

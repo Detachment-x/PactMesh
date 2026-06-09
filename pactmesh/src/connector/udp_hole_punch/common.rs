@@ -4,7 +4,7 @@ use anyhow::Context;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossbeam::atomic::AtomicCell;
@@ -24,7 +24,10 @@ use crate::{
     tunnel::{
         Tunnel, TunnelConnCounter, TunnelListener as _,
         packet_def::{UDP_TUNNEL_HEADER_SIZE, UDPTunnelHeader, UdpPacketType},
-        udp::{UdpTunnelConnector, UdpTunnelListener, new_hole_punch_packet},
+        udp::{
+            UdpTunnelConnector, UdpTunnelListener, is_stun_packet, new_hole_punch_packet,
+            respond_stun_packet,
+        },
     },
 };
 
@@ -32,6 +35,8 @@ pub(crate) const HOLE_PUNCH_PACKET_BODY_LEN: u16 = 16;
 const MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS: usize = 4;
 const UDP_SOCKET_ARRAY_RECV_BUF_SIZE: usize = u16::MAX as usize;
 const WINDOWS_WSAEMSGSIZE: i32 = 10040;
+const RECENT_PUNCH_ADDR_RETENTION: Duration = Duration::from_secs(30);
+const MAX_RECENT_PUNCH_ADDRS: usize = 256;
 
 fn is_windows_udp_message_too_large_error(raw_os_error: Option<i32>) -> bool {
     raw_os_error == Some(WINDOWS_WSAEMSGSIZE)
@@ -55,6 +60,16 @@ fn generate_shuffled_port_vec() -> Vec<u16> {
     let mut port_vec: Vec<u16> = (1..=65535).collect();
     port_vec.shuffle(&mut rng);
     port_vec
+}
+
+fn record_recent_punch_addr(recent_punch_addrs: &DashMap<SocketAddr, Instant>, addr: SocketAddr) {
+    let now = Instant::now();
+    recent_punch_addrs.insert(addr, now);
+    if recent_punch_addrs.len() > MAX_RECENT_PUNCH_ADDRS {
+        recent_punch_addrs.retain(|_, seen_at| {
+            now.saturating_duration_since(*seen_at) <= RECENT_PUNCH_ADDR_RETENTION
+        });
+    }
 }
 
 pub(crate) enum UdpPunchClientMethod {
@@ -229,6 +244,7 @@ pub(crate) struct UdpSocketArray {
 
     intreast_tids: Arc<DashSet<u32>>,
     tid_to_socket: Arc<DashMap<u32, Vec<PunchedUdpSocket>>>,
+    recent_punch_addrs: Arc<DashMap<SocketAddr, Instant>>,
 }
 
 impl UdpSocketArray {
@@ -244,6 +260,7 @@ impl UdpSocketArray {
 
             intreast_tids: Arc::new(DashSet::new()),
             tid_to_socket: Arc::new(DashMap::new()),
+            recent_punch_addrs: Arc::new(DashMap::new()),
         }
     }
 
@@ -274,6 +291,7 @@ impl UdpSocketArray {
         let local_addr = socket.local_addr()?;
         let intreast_tids = self.intreast_tids.clone();
         let tid_to_socket = self.tid_to_socket.clone();
+        let recent_punch_addrs = self.recent_punch_addrs.clone();
         socket_map.insert(local_addr, socket.clone());
         self.tasks.lock().unwrap().spawn(
             async move {
@@ -296,6 +314,22 @@ impl UdpSocketArray {
                             break;
                         }
                     };
+
+                    if is_stun_packet(&buf[..len]) {
+                        let socket = socket.clone();
+                        let req_buf = buf[..len].to_vec();
+                        tokio::spawn(async move {
+                            if let Err(e) = respond_stun_packet(socket, addr, req_buf).await {
+                                tracing::debug!(
+                                    ?e,
+                                    ?addr,
+                                    ?local_addr,
+                                    "udp array stun response failed"
+                                );
+                            }
+                        });
+                        continue;
+                    }
 
                     if len >= UDP_TUNNEL_HEADER_SIZE {
                         let header = UDPTunnelHeader::ref_from_prefix(&buf[..len]);
@@ -356,6 +390,7 @@ impl UdpSocketArray {
                         continue;
                     }
 
+                    record_recent_punch_addr(&recent_punch_addrs, addr);
                     if intreast_tids.contains(&tid) {
                         tracing::info!(?addr, ?tid, "got hole punching packet with intreast tid");
                         tid_to_socket
@@ -368,6 +403,12 @@ impl UdpSocketArray {
                             });
                         break;
                     }
+
+                    tracing::debug!(
+                        ?addr,
+                        ?tid,
+                        "got hole punching packet with uninterested tid; learned endpoint"
+                    );
                 }
                 tracing::debug!(?local_addr, "udp socket recv loop end");
             }
@@ -426,6 +467,17 @@ impl UdpSocketArray {
         self.tid_to_socket.get_mut(&tid)?.value_mut().pop()
     }
 
+    pub fn recent_punch_addrs(&self) -> Vec<SocketAddr> {
+        let now = Instant::now();
+        self.recent_punch_addrs
+            .iter()
+            .filter_map(|entry| {
+                (now.saturating_duration_since(*entry.value()) <= RECENT_PUNCH_ADDR_RETENTION)
+                    .then_some(*entry.key())
+            })
+            .collect()
+    }
+
     pub fn add_intreast_tid(&self, tid: u32) {
         self.intreast_tids.insert(tid);
     }
@@ -444,6 +496,7 @@ impl std::fmt::Debug for UdpSocketArray {
             .field("started", &self.started())
             .field("intreast_tids", &self.intreast_tids.len())
             .field("tid_to_socket", &self.tid_to_socket.len())
+            .field("recent_punch_addrs", &self.recent_punch_addrs.len())
             .finish()
     }
 }
@@ -927,6 +980,50 @@ mod tests {
         assert_eq!(punched.tid, tid);
         assert_eq!(punched.remote_addr, sender_addr);
         array.remove_intreast_tid(tid);
+    }
+
+    #[tokio::test]
+    async fn udp_socket_array_records_uninteresting_hole_punch_addr() {
+        let array = UdpSocketArray::new(1, NetNS::new(None));
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let local_addr = socket.local_addr().unwrap();
+        array.add_new_socket(socket).await.unwrap();
+
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender_addr = sender.local_addr().unwrap();
+        let packet = new_hole_punch_packet(0x1234_5678, HOLE_PUNCH_PACKET_BODY_LEN).into_bytes();
+        sender.send_to(&packet, local_addr).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if array.recent_punch_addrs().contains(&sender_addr) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for learned punch addr");
+    }
+
+    #[tokio::test]
+    async fn udp_socket_array_responds_to_stun_requests() {
+        let array = UdpSocketArray::new(1, NetNS::new(None));
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let server_addr = socket.local_addr().unwrap();
+        array.add_new_socket(socket).await.unwrap();
+
+        let client = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let client_addr = client.local_addr().unwrap();
+        let mapped_addr = crate::common::stun::get_udp_port_mapping_with_socket_and_server(
+            client,
+            server_addr,
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("udp array should respond to stun");
+
+        assert_eq!(mapped_addr, client_addr);
     }
 
     #[test]
