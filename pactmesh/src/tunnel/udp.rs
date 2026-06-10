@@ -199,6 +199,14 @@ pub(crate) async fn respond_stun_packet(
         .map_err(|e| anyhow::anyhow!("stun decode error: {:?}", e))?
         .map_err(|e| anyhow::anyhow!("stun decode broken message error: {:?}", e))?;
 
+    if req_msg.class() != MessageClass::Request || req_msg.method() != BINDING {
+        anyhow::bail!(
+            "ignore non-binding-request stun packet: class={:?}, method={:?}",
+            req_msg.class(),
+            req_msg.method()
+        );
+    }
+
     let tid = req_msg.transaction_id();
     // we only respond easytier stun req, whose tid has 0xdeadbeef prefix
     if tid.as_bytes()[0..4] != [0xde, 0xad, 0xbe, 0xef] {

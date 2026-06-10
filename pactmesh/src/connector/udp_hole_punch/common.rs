@@ -1,7 +1,7 @@
-#[cfg(target_os = "windows")]
 use anyhow::Context;
 
 use std::{
+    collections::HashSet,
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::Arc,
     time::{Duration, Instant},
@@ -39,6 +39,12 @@ const PUBLIC_LISTENER_ACTIVE_RETENTION: Duration = Duration::from_secs(120);
 const PUBLIC_LISTENER_SELECTED_RETENTION: Duration = Duration::from_secs(180);
 const RECENT_PUNCH_ADDR_RETENTION: Duration = Duration::from_secs(30);
 const MAX_RECENT_PUNCH_ADDRS: usize = 256;
+const PUNCH_LISTENER_WARM_PORT_WINDOW_MAX: u32 = 2048;
+const PUNCH_LISTENER_WARM_PACKET_COUNT_MAX: u32 = 3;
+const PUNCH_LISTENER_WARM_MAX_DESTS: usize = 12;
+const PUNCH_LISTENER_WARM_MAX_ADDRS: usize = 8192;
+const PUNCH_LISTENER_WARM_YIELD_EVERY: usize = 256;
+const PUNCH_LISTENER_WARM_PASS_PAUSE_MS: u64 = 30;
 
 fn is_windows_udp_message_too_large_error(raw_os_error: Option<i32>) -> bool {
     raw_os_error == Some(WINDOWS_WSAEMSGSIZE)
@@ -703,6 +709,62 @@ impl PunchHoleServerCommon {
         Some(listener)
     }
 
+    pub(crate) async fn warm_punch_listener(
+        &self,
+        listener_mapped_addr: SocketAddr,
+        dest_addrs: &[SocketAddr],
+        port_window: u32,
+        packet_count: u32,
+    ) -> Result<(), anyhow::Error> {
+        let Some(listener) = self
+            .find_listener_or_select_replacement(&listener_mapped_addr, true)
+            .await
+        else {
+            anyhow::bail!("no udp hole punching listener available for prewarm");
+        };
+
+        let warm_addrs = expand_warm_punch_dest_addrs(dest_addrs, port_window);
+        if warm_addrs.is_empty() {
+            tracing::debug!(
+                ?listener_mapped_addr,
+                "skip punch listener prewarm without destinations"
+            );
+            return Ok(());
+        }
+
+        let packet_count = packet_count.clamp(1, PUNCH_LISTENER_WARM_PACKET_COUNT_MAX);
+        tracing::info!(
+            ?listener_mapped_addr,
+            local_addr = ?listener.local_addr().ok(),
+            input_dest_count = dest_addrs.len(),
+            warm_addr_count = warm_addrs.len(),
+            packet_count,
+            "prewarm udp hole punching listener toward peer candidates"
+        );
+
+        let mut sent_packets = 0usize;
+        for pass in 0..packet_count {
+            let packet = new_stun_binding_request(rand::random::<u32>())?;
+            for addr in warm_addrs.iter().copied() {
+                listener.send_to(packet.as_slice(), addr).await?;
+                sent_packets += 1;
+                if sent_packets % PUNCH_LISTENER_WARM_YIELD_EVERY == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+            if pass + 1 < packet_count {
+                tokio::time::sleep(Duration::from_millis(PUNCH_LISTENER_WARM_PASS_PAUSE_MS)).await;
+            }
+        }
+
+        tracing::info!(
+            ?listener_mapped_addr,
+            sent_packets,
+            "prewarm udp hole punching listener finished"
+        );
+        Ok(())
+    }
+
     pub(crate) async fn my_udp_nat_type(&self) -> i32 {
         self.peer_mgr
             .get_global_ctx()
@@ -876,6 +938,67 @@ fn should_retry_public_listener_selection(
     }
 
     !force_new_listener && current_listener_count < MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS
+}
+
+fn new_stun_binding_request(tid: u32) -> Result<Vec<u8>, anyhow::Error> {
+    use bytecodec::EncodeExt as _;
+    use stun_codec::{Message, MessageClass, MessageEncoder, rfc5389::methods::BINDING};
+
+    let message = Message::<crate::common::stun_codec_ext::Attribute>::new(
+        MessageClass::Request,
+        BINDING,
+        crate::common::stun_codec_ext::u32_to_tid(tid),
+    );
+    let mut encoder = MessageEncoder::new();
+    encoder
+        .encode_into_bytes(message)
+        .with_context(|| "encode listener prewarm stun request")
+}
+
+fn expand_warm_punch_dest_addrs(dest_addrs: &[SocketAddr], port_window: u32) -> Vec<SocketAddr> {
+    let port_window = port_window.min(PUNCH_LISTENER_WARM_PORT_WINDOW_MAX);
+    let mut seen = HashSet::new();
+    let mut expanded = Vec::new();
+
+    for dest_addr in dest_addrs
+        .iter()
+        .copied()
+        .filter(|addr| !addr.ip().is_unspecified() && addr.port() != 0)
+        .take(PUNCH_LISTENER_WARM_MAX_DESTS)
+    {
+        for port in centered_port_window(dest_addr.port(), port_window) {
+            let mut addr = dest_addr;
+            addr.set_port(port);
+            if seen.insert(addr) {
+                expanded.push(addr);
+                if expanded.len() >= PUNCH_LISTENER_WARM_MAX_ADDRS {
+                    return expanded;
+                }
+            }
+        }
+    }
+
+    expanded
+}
+
+fn centered_port_window(base_port: u16, port_window: u32) -> Vec<u16> {
+    let mut ports = Vec::with_capacity((port_window.saturating_mul(2).saturating_add(1)) as usize);
+    ports.push(base_port);
+    for offset in 1..=port_window {
+        if let Some(port) = (base_port as u32)
+            .checked_add(offset)
+            .filter(|port| *port <= u16::MAX as u32)
+        {
+            ports.push(port as u16);
+        }
+        if let Some(port) = (base_port as u32)
+            .checked_sub(offset)
+            .filter(|port| *port != 0)
+        {
+            ports.push(port as u16);
+        }
+    }
+    ports
 }
 
 #[tracing::instrument(level = Level::TRACE, err, ret(level = Level::TRACE), skip(ports, udp, public_ips))]
@@ -1078,6 +1201,28 @@ mod tests {
         .expect("udp array should respond to stun");
 
         assert_eq!(mapped_addr, client_addr);
+    }
+
+    #[test]
+    fn warm_punch_dest_addrs_expand_centered_window_and_dedup() {
+        let addrs = super::expand_warm_punch_dest_addrs(
+            &[
+                "192.0.2.1:40000".parse().unwrap(),
+                "192.0.2.1:40000".parse().unwrap(),
+                "0.0.0.0:40000".parse().unwrap(),
+                "192.0.2.2:0".parse().unwrap(),
+            ],
+            2,
+        );
+
+        let expected = vec![
+            "192.0.2.1:40000".parse().unwrap(),
+            "192.0.2.1:40001".parse().unwrap(),
+            "192.0.2.1:39999".parse().unwrap(),
+            "192.0.2.1:40002".parse().unwrap(),
+            "192.0.2.1:39998".parse().unwrap(),
+        ];
+        assert_eq!(addrs, expected);
     }
 
     #[tokio::test]

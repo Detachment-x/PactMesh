@@ -25,7 +25,7 @@ use crate::{
             SendPunchPacketBothEasySymRequest, SendPunchPacketBothEasySymResponse,
             SendPunchPacketConeRequest, SendPunchPacketEasySymRequest,
             SendPunchPacketHardSymRequest, SendPunchPacketHardSymResponse, UdpHolePunchRpc,
-            UdpHolePunchRpcServer,
+            UdpHolePunchRpcServer, WarmPunchListenerRequest,
         },
         rpc_types::{self, controller::BaseController},
     },
@@ -102,6 +102,35 @@ impl UdpHolePunchRpc for UdpHolePunchServer {
         Ok(SelectPunchListenerResponse {
             listener_mapped_addr: Some(addr.into()),
         })
+    }
+
+    async fn warm_punch_listener(
+        &self,
+        _ctrl: Self::Controller,
+        input: WarmPunchListenerRequest,
+    ) -> rpc_types::error::Result<Void> {
+        let listener_mapped_addr = input
+            .listener_mapped_addr
+            .ok_or(anyhow::anyhow!(
+                "warm_punch_listener missing listener_mapped_addr"
+            ))?
+            .into();
+        let dest_addrs = input
+            .dest_addrs
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+
+        self.common
+            .warm_punch_listener(
+                listener_mapped_addr,
+                &dest_addrs,
+                input.port_window,
+                input.packet_count,
+            )
+            .await?;
+
+        Ok(Void {})
     }
 
     /// send packet to one remote_addr, used by nat1-3 to nat1-3

@@ -36,6 +36,7 @@ use crate::{
             SelectPunchListenerRequest, SendPunchPacketBothEasySymRequest,
             SendPunchPacketEasySymRequest, SendPunchPacketHardSymRequest,
             SendPunchPacketHardSymResponse, UdpHolePunchRpc, UdpHolePunchRpcClientFactory,
+            WarmPunchListenerRequest,
         },
         rpc_types::{self, controller::BaseController},
     },
@@ -48,6 +49,11 @@ const UDP_ARRAY_SIZE_FOR_HARD_SYM: usize = 84;
 const PEER_REFLEXIVE_MAPPING_PROBES: usize = 6;
 const EASY_SYM_MAPPING_TIMEOUT_MS: u64 = 30_000;
 const PEER_REFLEXIVE_MAPPING_TIMEOUT_MS: u64 = 2500;
+const PEER_REFLEXIVE_PREWARM_PORT_WINDOW: u32 = 2048;
+const PEER_REFLEXIVE_PREWARM_PACKET_COUNT: u32 = 2;
+const PEER_REFLEXIVE_PREWARM_CANDIDATE_PROBES: usize = 3;
+const PEER_REFLEXIVE_PREWARM_RPC_TIMEOUT_MS: i32 = 8_000;
+const PEER_REFLEXIVE_PREWARM_SETTLE_MS: u64 = 150;
 const PUNCH_RESULT_GRACE_MS: u128 = 2000;
 const PREDICTABLE_PUNCH_RPC_TIMEOUT_MS: i32 = 30_000;
 const RANDOM_PUNCH_RPC_TIMEOUT_MS: i32 = 20_000;
@@ -1209,8 +1215,52 @@ impl PunchSymToConeHoleClient {
         runtime_prediction.take();
     }
 
+    async fn warm_remote_punch_listener(
+        &self,
+        dst_peer_id: PeerId,
+        remote_mapped_addr: crate::proto::common::SocketAddr,
+        dest_addrs: &[SocketAddr],
+    ) {
+        if dest_addrs.is_empty() {
+            return;
+        }
+
+        let req = WarmPunchListenerRequest {
+            listener_mapped_addr: Some(remote_mapped_addr),
+            dest_addrs: dest_addrs.iter().copied().map(Into::into).collect(),
+            port_window: PEER_REFLEXIVE_PREWARM_PORT_WINDOW,
+            packet_count: PEER_REFLEXIVE_PREWARM_PACKET_COUNT,
+        };
+        tracing::info!(
+            ?dst_peer_id,
+            ?req,
+            "peer-reflexive sampling: request remote listener prewarm"
+        );
+
+        let ret = self
+            .get_rpc_stub(dst_peer_id)
+            .await
+            .warm_punch_listener(
+                BaseController {
+                    timeout_ms: PEER_REFLEXIVE_PREWARM_RPC_TIMEOUT_MS,
+                    trace_id: 0,
+                    ..Default::default()
+                },
+                req,
+            )
+            .await;
+        if let Err(err) = ret {
+            tracing::warn!(
+                ?dst_peer_id,
+                ?err,
+                "peer-reflexive sampling: remote listener prewarm failed"
+            );
+        }
+    }
+
     async fn sample_runtime_port_prediction(
         &self,
+        dst_peer_id: PeerId,
         my_nat_info: UdpNatType,
         remote_mapped_addr: crate::proto::common::SocketAddr,
         prediction_sockets: Option<&[Arc<UdpSocket>]>,
@@ -1228,74 +1278,15 @@ impl PunchSymToConeHoleClient {
 
         let mut peer_mapped_ports = Vec::new();
         let mut public_fallback_ports = Vec::new();
-
-        if let Some(prediction_sockets) = prediction_sockets {
-            for socket in prediction_sockets
+        let from_udp_array = prediction_sockets.is_some();
+        let mut owned_temp_sockets = Vec::new();
+        let sockets = if let Some(prediction_sockets) = prediction_sockets {
+            prediction_sockets
                 .iter()
                 .take(PEER_REFLEXIVE_MAPPING_PROBES)
-            {
-                match get_udp_port_mapping_with_socket_and_server(
-                    socket.clone(),
-                    peer_stun_server,
-                    Duration::from_millis(PEER_REFLEXIVE_MAPPING_TIMEOUT_MS),
-                )
-                .await
-                {
-                    Ok(addr) => {
-                        tracing::info!(
-                            ?addr,
-                            ?peer_stun_server,
-                            local_addr = ?socket.local_addr().ok(),
-                            sample_source = ?RuntimePortPredictionSource::PeerReflexive,
-                            "peer-reflexive udp array socket mapping sampled"
-                        );
-                        peer_mapped_ports.push(addr.port());
-                        if peer_mapped_ports.len() >= target_samples {
-                            break;
-                        }
-                    }
-                    Err(peer_err) => tracing::warn!(
-                        ?peer_err,
-                        ?peer_stun_server,
-                        local_addr = ?socket.local_addr().ok(),
-                        timeout_ms = PEER_REFLEXIVE_MAPPING_TIMEOUT_MS,
-                        "peer-reflexive udp array socket mapping failed"
-                    ),
-                }
-            }
-
-            if peer_mapped_ports.is_empty() {
-                tracing::warn!(
-                    ?peer_stun_server,
-                    target_samples,
-                    "peer-reflexive udp array socket mapping produced no samples; public STUN fallback is low-confidence"
-                );
-                for socket in prediction_sockets.iter().take(target_samples) {
-                    match stun_collector
-                        .get_udp_port_mapping_with_socket(socket.clone())
-                        .await
-                    {
-                        Ok(addr) => {
-                            tracing::info!(
-                                ?addr,
-                                local_addr = ?socket.local_addr().ok(),
-                                sample_source = ?RuntimePortPredictionSource::PublicStunFallback,
-                                "public STUN fallback udp array socket mapping sampled"
-                            );
-                            public_fallback_ports.push(addr.port());
-                            if public_fallback_ports.len() >= target_samples {
-                                break;
-                            }
-                        }
-                        ret => tracing::warn!(
-                            ?ret,
-                            "failed to map udp array socket through public STUN fallback"
-                        ),
-                    }
-                }
-            }
+                .cloned()
+                .collect::<Vec<_>>()
         } else {
-            let mut temp_sockets = Vec::new();
             for _ in 0..PEER_REFLEXIVE_MAPPING_PROBES {
                 let socket = {
                     let _g = global_ctx.net_ns.guard();
@@ -1307,85 +1298,106 @@ impl PunchSymToConeHoleClient {
                         }
                     }
                 };
-                temp_sockets.push(socket.clone());
+                owned_temp_sockets.push(socket);
+            }
+            owned_temp_sockets.clone()
+        };
 
-                match get_udp_port_mapping_with_socket_and_server(
-                    socket.clone(),
-                    peer_stun_server,
-                    Duration::from_millis(PEER_REFLEXIVE_MAPPING_TIMEOUT_MS),
-                )
+        if sockets.is_empty() {
+            tracing::warn!("failed to prepare any udp sockets for sym prediction");
+            return None;
+        }
+
+        let mut prewarm_candidate_addrs = Vec::new();
+        for socket in sockets.iter().take(PEER_REFLEXIVE_PREWARM_CANDIDATE_PROBES) {
+            match stun_collector
+                .get_udp_port_mapping_with_socket(socket.clone())
                 .await
-                {
-                    Ok(addr) => {
-                        tracing::info!(
-                            ?addr,
-                            ?peer_stun_server,
-                            local_addr = ?socket.local_addr().ok(),
-                            sample_source = ?RuntimePortPredictionSource::PeerReflexive,
-                            "peer-reflexive temporary udp socket mapping sampled"
-                        );
-                        peer_mapped_ports.push(addr.port());
-                        if peer_mapped_ports.len() >= target_samples {
-                            break;
-                        }
-                    }
-                    Err(peer_err) => tracing::warn!(
-                        ?peer_err,
+            {
+                Ok(addr) => {
+                    tracing::info!(
+                        ?addr,
+                        local_addr = ?socket.local_addr().ok(),
+                        sample_source = ?RuntimePortPredictionSource::PublicStunFallback,
+                        "public STUN candidate sampled for peer-reflexive prewarm"
+                    );
+                    push_unique_socket_addr(&mut prewarm_candidate_addrs, addr);
+                }
+                ret => tracing::warn!(
+                    ?ret,
+                    local_addr = ?socket.local_addr().ok(),
+                    "failed to map udp socket through public STUN for peer-reflexive prewarm"
+                ),
+            }
+        }
+
+        self.warm_remote_punch_listener(dst_peer_id, remote_mapped_addr, &prewarm_candidate_addrs)
+            .await;
+        if !prewarm_candidate_addrs.is_empty() {
+            tokio::time::sleep(Duration::from_millis(PEER_REFLEXIVE_PREWARM_SETTLE_MS)).await;
+        }
+
+        for socket in sockets.iter() {
+            match get_udp_port_mapping_with_socket_and_server(
+                socket.clone(),
+                peer_stun_server,
+                Duration::from_millis(PEER_REFLEXIVE_MAPPING_TIMEOUT_MS),
+            )
+            .await
+            {
+                Ok(addr) => {
+                    tracing::info!(
+                        ?addr,
                         ?peer_stun_server,
                         local_addr = ?socket.local_addr().ok(),
-                        timeout_ms = PEER_REFLEXIVE_MAPPING_TIMEOUT_MS,
-                        "peer-reflexive temporary udp socket mapping failed"
-                    ),
+                        sample_source = ?RuntimePortPredictionSource::PeerReflexive,
+                        "peer-reflexive udp socket mapping sampled"
+                    );
+                    peer_mapped_ports.push(addr.port());
+                    if peer_mapped_ports.len() >= target_samples {
+                        break;
+                    }
+                }
+                Err(peer_err) => tracing::warn!(
+                    ?peer_err,
+                    ?peer_stun_server,
+                    local_addr = ?socket.local_addr().ok(),
+                    timeout_ms = PEER_REFLEXIVE_MAPPING_TIMEOUT_MS,
+                    "peer-reflexive udp socket mapping failed"
+                ),
+            }
+        }
+
+        if peer_mapped_ports.is_empty() {
+            tracing::warn!(
+                ?peer_stun_server,
+                target_samples,
+                candidate_addrs = ?prewarm_candidate_addrs,
+                "peer-reflexive udp socket mapping produced no samples; public STUN fallback is low-confidence"
+            );
+            for addr in prewarm_candidate_addrs.iter().copied() {
+                public_fallback_ports.push(addr.port());
+                if public_fallback_ports.len() >= target_samples {
+                    break;
                 }
             }
 
-            if peer_mapped_ports.is_empty() {
-                tracing::warn!(
-                    ?peer_stun_server,
-                    target_samples,
-                    "peer-reflexive temporary udp socket mapping produced no samples; public STUN fallback is low-confidence"
-                );
-                for socket in temp_sockets {
-                    match stun_collector
-                        .get_udp_port_mapping_with_socket(socket.clone())
-                        .await
-                    {
-                        Ok(addr) => {
-                            tracing::info!(
-                                ?addr,
-                                local_addr = ?socket.local_addr().ok(),
-                                sample_source = ?RuntimePortPredictionSource::PublicStunFallback,
-                                "public STUN fallback temporary udp socket mapping sampled"
-                            );
-                            public_fallback_ports.push(addr.port());
-                            if public_fallback_ports.len() >= target_samples {
-                                break;
-                            }
-                        }
-                        ret => tracing::warn!(
-                            ?ret,
-                            "failed to map temporary udp socket through public STUN fallback"
-                        ),
+            if public_fallback_ports.is_empty() {
+                match stun_collector.get_udp_port_mapping(0).await {
+                    Ok(addr) => {
+                        tracing::info!(
+                            ?addr,
+                            sample_source = ?RuntimePortPredictionSource::PublicStunFallback,
+                            "public STUN fallback standalone udp mapping sampled"
+                        );
+                        public_fallback_ports.push(addr.port());
                     }
-                }
-
-                if public_fallback_ports.is_empty() {
-                    match stun_collector.get_udp_port_mapping(0).await {
-                        Ok(addr) => {
-                            tracing::info!(
-                                ?addr,
-                                sample_source = ?RuntimePortPredictionSource::PublicStunFallback,
-                                "public STUN fallback standalone udp mapping sampled"
-                            );
-                            public_fallback_ports.push(addr.port());
-                        }
-                        ret => {
-                            tracing::warn!(
-                                ?ret,
-                                "failed to get fallback udp port mapping for sym prediction"
-                            );
-                            return None;
-                        }
+                    ret => {
+                        tracing::warn!(
+                            ?ret,
+                            "failed to get fallback udp port mapping for sym prediction"
+                        );
+                        return None;
                     }
                 }
             }
@@ -1425,7 +1437,7 @@ impl PunchSymToConeHoleClient {
             ?my_nat_info,
             ?prediction_nat_info,
             target_samples,
-            from_udp_array = prediction_sockets.is_some(),
+            from_udp_array,
             "symmetric nat prediction based on sampled udp sockets"
         );
 
@@ -1895,6 +1907,7 @@ impl PunchSymToConeHoleClient {
                 tokio::time::timeout(
                     Duration::from_millis(EASY_SYM_MAPPING_TIMEOUT_MS),
                     self.sample_runtime_port_prediction(
+                        dst_peer_id,
                         runtime_my_nat_info,
                         remote_mapped_addr,
                         Some(prediction_sockets),

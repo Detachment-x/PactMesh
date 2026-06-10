@@ -162,6 +162,13 @@ message SelectPunchListenerResponse {
   common.SocketAddr listener_mapped_addr = 1;
 }
 
+message WarmPunchListenerRequest {
+  common.SocketAddr listener_mapped_addr = 1;
+  repeated common.SocketAddr dest_addrs = 2;
+  uint32 port_window = 3;
+  uint32 packet_count = 4;
+}
+
 message SendPunchPacketConeRequest {
   common.SocketAddr listener_mapped_addr = 1;
   common.SocketAddr dest_addr = 2;
@@ -234,6 +241,7 @@ message SendPunchPacketBothEasySymResponse {
 service UdpHolePunchRpc {
   rpc SelectPunchListener(SelectPunchListenerRequest)
       returns (SelectPunchListenerResponse);
+  rpc WarmPunchListener(WarmPunchListenerRequest) returns (common.Void);
 
   // send packet to one remote_addr, used by nat1-3 to nat1-3
   rpc SendPunchPacketCone(SendPunchPacketConeRequest) returns (common.Void);
