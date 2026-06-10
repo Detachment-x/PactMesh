@@ -35,6 +35,8 @@ pub(crate) const HOLE_PUNCH_PACKET_BODY_LEN: u16 = 16;
 const MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS: usize = 4;
 const UDP_SOCKET_ARRAY_RECV_BUF_SIZE: usize = u16::MAX as usize;
 const WINDOWS_WSAEMSGSIZE: i32 = 10040;
+const PUBLIC_LISTENER_ACTIVE_RETENTION: Duration = Duration::from_secs(120);
+const PUBLIC_LISTENER_SELECTED_RETENTION: Duration = Duration::from_secs(180);
 const RECENT_PUNCH_ADDR_RETENTION: Duration = Duration::from_secs(30);
 const MAX_RECENT_PUNCH_ADDRS: usize = 256;
 
@@ -634,10 +636,12 @@ impl PunchHoleServerCommon {
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 {
-                    // remove listener that is not active for 40 seconds but keep listeners that are selected less than 30 seconds
+                    // Keep recently selected listeners long enough for multi-stage symmetric punch rounds.
                     l.lock().await.retain(|listener| {
-                        listener.last_active_time.load().elapsed().as_secs() < 40
-                            || listener.last_select_time.load().elapsed().as_secs() < 30
+                        listener.last_active_time.load().elapsed()
+                            < PUBLIC_LISTENER_ACTIVE_RETENTION
+                            || listener.last_select_time.load().elapsed()
+                                < PUBLIC_LISTENER_SELECTED_RETENTION
                     });
                 }
             }
@@ -663,6 +667,40 @@ impl PunchHoleServerCommon {
             .find(|listener| listener.mapped_addr == *addr && listener.running.load())?;
 
         Some(listener.get_socket().await)
+    }
+
+    pub(crate) async fn find_listener_or_select_replacement(
+        &self,
+        addr: &SocketAddr,
+        prefer_port_mapping: bool,
+    ) -> Option<Arc<UdpSocket>> {
+        if let Some(listener) = self.find_listener(addr).await {
+            return Some(listener);
+        }
+
+        tracing::warn!(
+            ?addr,
+            ?prefer_port_mapping,
+            "selected udp hole punching listener is no longer available"
+        );
+
+        let Some((listener, replacement_addr)) =
+            self.select_listener(false, prefer_port_mapping).await
+        else {
+            tracing::warn!(
+                ?addr,
+                ?prefer_port_mapping,
+                "failed to select replacement udp hole punching listener"
+            );
+            return None;
+        };
+
+        tracing::warn!(
+            ?addr,
+            ?replacement_addr,
+            "using replacement udp hole punching listener"
+        );
+        Some(listener)
     }
 
     pub(crate) async fn my_udp_nat_type(&self) -> i32 {
@@ -920,20 +958,36 @@ pub(crate) async fn try_connect_with_socket(
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
-    use tokio::net::UdpSocket;
+    use crossbeam::atomic::AtomicCell;
+    use tokio::{net::UdpSocket, task::JoinSet};
 
     use crate::{
         common::netns::NetNS,
+        peers::tests::create_mock_peer_manager,
         tunnel::{packet_def::UDP_TUNNEL_HEADER_SIZE, udp::new_hole_punch_packet},
     };
 
     use super::{
         HOLE_PUNCH_PACKET_BODY_LEN, MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS,
-        UDP_SOCKET_ARRAY_RECV_BUF_SIZE, UdpSocketArray, is_windows_udp_message_too_large_error,
-        should_create_public_listener, should_retry_public_listener_selection,
+        UDP_SOCKET_ARRAY_RECV_BUF_SIZE, UdpHolePunchListener, UdpSocketArray,
+        is_windows_udp_message_too_large_error, should_create_public_listener,
+        should_retry_public_listener_selection,
     };
+
+    #[derive(Debug)]
+    struct StaticTunnelConnCounter;
+
+    impl crate::tunnel::TunnelConnCounter for StaticTunnelConnCounter {
+        fn get(&self) -> Option<u32> {
+            Some(0)
+        }
+    }
 
     #[test]
     fn udp_socket_array_recv_buffer_can_hold_full_datagram() {
@@ -1024,6 +1078,37 @@ mod tests {
         .expect("udp array should respond to stun");
 
         assert_eq!(mapped_addr, client_addr);
+    }
+
+    #[tokio::test]
+    async fn listener_lookup_falls_back_to_replacement_listener() {
+        let peer_mgr = create_mock_peer_manager().await;
+        let common = super::PunchHoleServerCommon::new(peer_mgr);
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let mapped_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 45_001));
+        let stale_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 45_002));
+
+        common
+            .add_listener(UdpHolePunchListener {
+                socket: socket.clone(),
+                tasks: JoinSet::new(),
+                running: Arc::new(AtomicCell::new(true)),
+                mapped_addr,
+                has_port_mapping_lease: true,
+                _port_mapping_lease: None,
+                conn_counter: Arc::new(Box::new(StaticTunnelConnCounter)),
+                listen_time: Instant::now(),
+                last_select_time: AtomicCell::new(Instant::now()),
+                last_active_time: Arc::new(AtomicCell::new(Instant::now())),
+            })
+            .await;
+
+        let selected = common
+            .find_listener_or_select_replacement(&stale_addr, true)
+            .await
+            .expect("replacement listener should be selected");
+
+        assert!(Arc::ptr_eq(&selected, &socket));
     }
 
     #[test]

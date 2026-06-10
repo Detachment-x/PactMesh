@@ -613,11 +613,11 @@ enum LabSubCommand {
         a_listen: u16,
         #[arg(long, default_value = "11020", help = "B listener port")]
         b_listen: u16,
-        #[arg(long, default_value = "11030", help = "C listener port")]
+        #[arg(long, default_value = "11020", help = "C listener port")]
         c_listen: u16,
         #[arg(
             long,
-            default_value = "120",
+            default_value = "600",
             help = "seconds to wait before collecting results"
         )]
         wait_secs: u64,
@@ -745,20 +745,20 @@ enum LabSubCommand {
         a_listen: u16,
         #[arg(long, default_value = "11020", help = "B listener port")]
         b_listen: u16,
-        #[arg(long, default_value = "11030", help = "C listener port")]
+        #[arg(long, default_value = "11020", help = "C listener port")]
         c_listen: u16,
         #[arg(long, default_value_t = 180, help = "join approval timeout in seconds")]
         join_wait_secs: u64,
         #[arg(
             long,
-            default_value_t = 2,
+            default_value_t = 10,
             help = "join approval poll interval in seconds"
         )]
         poll_secs: u64,
         #[arg(
             long,
-            default_value_t = 120,
-            help = "seconds to wait for peers/config propagation"
+            default_value_t = 600,
+            help = "seconds to wait for peers/config propagation or direct route"
         )]
         wait_secs: u64,
         #[arg(long, default_value = "false", help = "skip binary upload/copy")]
@@ -4243,6 +4243,14 @@ struct RemoteNodeReport {
     logs: String,
 }
 
+fn windows_c_daemon_ssh_log(local_log_dir: &str) -> String {
+    format!("{local_log_dir}/win-c-daemon-ssh.log")
+}
+
+fn windows_c_daemon_ssh_pid(local_log_dir: &str) -> String {
+    format!("{local_log_dir}/win-c-daemon-ssh.pid")
+}
+
 fn remote_run_deploy(options: &LabRemoteRunOptions) -> Result<(), Error> {
     println!("remote-run: deploying binaries");
     let local_pactmesh = options.linux_bin_dir.join("pactmesh");
@@ -4379,6 +4387,11 @@ fn remote_run_stop(options: &LabRemoteRunOptions) -> Result<(), Error> {
         &options.c_host,
         "Get-Process pactmesh-core -ErrorAction SilentlyContinue | Stop-Process -Force",
     );
+    let c_daemon_pid = windows_c_daemon_ssh_pid(&parent_path_unix(&options.b_log));
+    let _ = run_local_sh(&format!(
+        "if [ -f {pid} ]; then kill $(cat {pid}) 2>/dev/null || true; rm -f {pid}; fi",
+        pid = sh_quote(&c_daemon_pid),
+    ));
     std::thread::sleep(Duration::from_secs(2));
     Ok(())
 }
@@ -4770,7 +4783,7 @@ fn remote_fresh_start_joiners(
          rm -f {log}\n\
          export XDG_CONFIG_HOME={xdg}\n\
          cd {bin}\n\
-         setsid -f ./pactmesh-core --network-name {net} --network-local-id {net} --rpc-portal 127.0.0.1:{rpc} --listeners tcp://0.0.0.0:{listen} --listeners udp://0.0.0.0:{listen} --peers {seed} --no-tun true --disable-ipv6 true --instance-name node-b --console-log-level debug --daemon > {log} 2>&1\n",
+         setsid -f ./pactmesh-core --network-name {net} --network-local-id {net} --rpc-portal 127.0.0.1:{rpc} --listeners tcp://0.0.0.0:{listen} --listeners udp://0.0.0.0:{listen} --peers {seed} --no-tun true --disable-ipv6 true --instance-name node-b --console-log-level debug --need-p2p true --daemon > {log} 2>&1\n",
         log = sh_quote(&options.b_log),
         xdg = sh_quote(&options.b_xdg),
         bin = sh_quote(&options.b_bin_dir),
@@ -4782,29 +4795,17 @@ fn remote_fresh_start_joiners(
     run_local_sh(&b_script)?;
     wait_for_local_rpc(&options.b_bin_dir, options.b_rpc, 20)?;
 
-    let c_script = format!(
-        "$ErrorActionPreference='Continue'\nNew-Item -ItemType Directory -Force {log_dir} | Out-Null\nRemove-Item -Force {log} -ErrorAction SilentlyContinue\n$env:XDG_CONFIG_HOME={xdg}\nSet-Location {bin}\n& .\\pactmesh-core.exe --network-name {net} --network-local-id {net} --rpc-portal 127.0.0.1:{rpc} --listeners tcp://0.0.0.0:{listen} --listeners udp://0.0.0.0:{listen} --peers {seed} --no-tun true --disable-ipv6 true --instance-name win-c --console-log-level debug --daemon *> {log}\n$LASTEXITCODE | Add-Content -Path {log}\n",
-        log_dir = ps_quote(&parent_path_windows(&options.c_log)),
-        log = ps_quote(&options.c_log),
-        xdg = ps_quote(&options.c_xdg),
-        bin = ps_quote(&options.c_bin_dir),
-        net = ps_quote(&options.network_local_id),
-        rpc = options.c_rpc,
-        listen = options.c_listen,
-        seed = ps_quote(&options.seed),
-    );
-    let c_daemon_ssh_log = format!("{}/win-c-daemon-ssh.log", parent_path_unix(&options.b_log));
-    let c_daemon_ssh_pid = format!("{}/win-c-daemon-ssh.pid", parent_path_unix(&options.b_log));
-    let command = powershell_encoded_command(&c_script);
-    let local_script = format!(
-        "mkdir -p {log_dir}\nrm -f {ssh_log} {ssh_pid}\nnohup ssh -o BatchMode=yes -o ConnectTimeout=8 {host} {command} > {ssh_log} 2>&1 < /dev/null &\necho $! > {ssh_pid}\n",
-        log_dir = sh_quote(&parent_path_unix(&options.b_log)),
-        ssh_log = sh_quote(&c_daemon_ssh_log),
-        ssh_pid = sh_quote(&c_daemon_ssh_pid),
-        host = sh_quote(&options.c_host),
-        command = sh_quote(&command),
-    );
-    run_local_sh(&local_script)?;
+    start_windows_c_daemon(
+        &options.c_host,
+        &options.c_bin_dir,
+        &options.c_xdg,
+        &options.c_log,
+        &parent_path_unix(&options.b_log),
+        &options.network_local_id,
+        options.c_rpc,
+        options.c_listen,
+        &options.seed,
+    )?;
     wait_for_windows_rpc(&options.c_host, &options.c_bin_dir, options.c_rpc, 30)?;
 
     let _ = root;
@@ -5054,7 +5055,7 @@ exec ./pactmesh-core --network-name {net} --trust-domain-dir {trust} --network-l
         r#"#!/bin/sh
 cd {b_bin}
 export XDG_CONFIG_HOME={b_xdg}
-exec ./pactmesh-core --network-name {net} --network-local-id {net} --rpc-portal 127.0.0.1:{rpc} --listeners tcp://0.0.0.0:{listen} --listeners udp://0.0.0.0:{listen} --peers {seed} --no-tun true --disable-ipv6 true --instance-name node-b --console-log-level debug --daemon
+exec ./pactmesh-core --network-name {net} --network-local-id {net} --rpc-portal 127.0.0.1:{rpc} --listeners tcp://0.0.0.0:{listen} --listeners udp://0.0.0.0:{listen} --peers {seed} --no-tun true --disable-ipv6 true --instance-name node-b --console-log-level debug --need-p2p true --daemon
 "#,
         b_bin = sh_quote(&options.b_bin_dir),
         b_xdg = sh_quote(&options.b_xdg),
@@ -5073,19 +5074,18 @@ exec ./pactmesh-core --network-name {net} --network-local-id {net} --rpc-portal 
     );
     run_status("start B daemon", "sh", &["-c".into(), b_cmd])?;
 
-    let c_log_parent = parent_path_windows(&options.c_log);
-    let c_script = format!(
-        "$ErrorActionPreference='Stop'; New-Item -ItemType Directory -Force {log_parent} | Out-Null; Remove-Item {log} -Force -ErrorAction SilentlyContinue; Set-Location {bin}; $env:XDG_CONFIG_HOME={xdg}; $args=@('--network-name',{net},'--network-local-id',{net},'--rpc-portal','127.0.0.1:{rpc}','--listeners','tcp://0.0.0.0:{listen}','--listeners','udp://0.0.0.0:{listen}','--peers',{seed},'--no-tun','true','--disable-ipv6','true','--instance-name','win-c','--console-log-level','debug','--daemon'); Start-Process -WindowStyle Hidden -FilePath 'cmd.exe' -ArgumentList @('/c', '.\\pactmesh-core.exe ' + ($args -join ' ') + ' > ' + {log} + ' 2>&1');",
-        log_parent = ps_quote(&c_log_parent),
-        log = ps_quote(&options.c_log),
-        bin = ps_quote(&options.c_bin_dir),
-        xdg = ps_quote(&options.c_xdg),
-        net = ps_quote(&options.network_local_id),
-        rpc = options.c_rpc,
-        listen = options.c_listen,
-        seed = ps_quote(&options.seed),
-    );
-    ssh_capture_powershell(&options.c_host, &c_script)?;
+    start_windows_c_daemon(
+        &options.c_host,
+        &options.c_bin_dir,
+        &options.c_xdg,
+        &options.c_log,
+        &parent_path_unix(&options.b_log),
+        &options.network_local_id,
+        options.c_rpc,
+        options.c_listen,
+        &options.seed,
+    )?;
+    wait_for_windows_rpc(&options.c_host, &options.c_bin_dir, options.c_rpc, 30)?;
     Ok(())
 }
 
@@ -5126,6 +5126,58 @@ fn remote_run_collect_linux(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn start_windows_c_daemon(
+    host: &str,
+    bin_dir: &str,
+    xdg: &str,
+    log: &str,
+    local_log_dir: &str,
+    network: &str,
+    rpc: u16,
+    listen: u16,
+    seed: &str,
+) -> Result<(), Error> {
+    let cmd_line = format!(
+        ".\\pactmesh-core.exe --network-name {net} --network-local-id {net} --rpc-portal 127.0.0.1:{rpc} --listeners tcp://0.0.0.0:{listen} --listeners udp://0.0.0.0:{listen} --peers {seed} --no-tun true --disable-ipv6 true --instance-name win-c --console-log-level debug --need-p2p true --daemon >> {log} 2>&1",
+        net = cmd_quote(network),
+        rpc = rpc,
+        listen = listen,
+        seed = cmd_quote(seed),
+        log = cmd_quote(log),
+    );
+    let script = format!(
+        "$ErrorActionPreference='Stop'\nNew-Item -ItemType Directory -Force {log_dir} | Out-Null\nRemove-Item -Force {log} -ErrorAction SilentlyContinue\n$env:XDG_CONFIG_HOME={xdg}\nSet-Location {bin}\n'win-c daemon started ' + (Get-Date -Format o) | Set-Content -Path {log}\n$cmd = {cmd_line}\ncmd.exe /d /s /c $cmd\n$code=$LASTEXITCODE\n'win-c daemon exited code=' + $code + ' ' + (Get-Date -Format o) | Add-Content -Path {log}\nexit $code\n",
+        log_dir = ps_quote(&parent_path_windows(log)),
+        log = ps_quote(log),
+        xdg = ps_quote(xdg),
+        bin = ps_quote(bin_dir),
+        cmd_line = ps_quote(&cmd_line),
+    );
+    let command = powershell_encoded_command(&script);
+    let ssh_log = windows_c_daemon_ssh_log(local_log_dir);
+    let ssh_pid = windows_c_daemon_ssh_pid(local_log_dir);
+    let local_script = format!(
+        "mkdir -p {log_dir}\nrm -f {ssh_log} {ssh_pid}\nnohup ssh -o BatchMode=yes -o ConnectTimeout=8 {host} {command} > {ssh_log} 2>&1 < /dev/null &\necho $! > {ssh_pid}\n",
+        log_dir = sh_quote(local_log_dir),
+        ssh_log = sh_quote(&ssh_log),
+        ssh_pid = sh_quote(&ssh_pid),
+        host = sh_quote(host),
+        command = sh_quote(&command),
+    );
+    run_local_sh(&local_script)?;
+    Ok(())
+}
+
+fn remote_windows_node_diagnostics(host: &str, log_path: &str) -> String {
+    let script = format!(
+        r#"$log={log}; '--- pactmesh-core processes ---'; $procs=Get-CimInstance Win32_Process -Filter "name = 'pactmesh-core.exe'" -ErrorAction SilentlyContinue; if ($procs) {{ $procs | Select-Object ProcessId,ParentProcessId,CreationDate,CommandLine | Format-List | Out-String }} else {{ 'none' }}; '--- key logs ---'; if (Test-Path $log) {{ Select-String -Path $log -Pattern 'p2p|relay|hole punch|symmetric|direct|failed|error|warn|panic|panicked|CORE::INSTANCE::CONNECTION|PeerConn|daemon exited' | Select-Object -Last 160 | ForEach-Object {{ $_.Line }} }} else {{ 'missing log: ' + $log }}"#,
+        log = ps_quote(log_path),
+    );
+    ssh_capture_powershell(host, &script)
+        .unwrap_or_else(|err| format!("diagnostics collection failed: {err:#}"))
+}
+
 fn remote_run_collect_windows(options: &LabRemoteRunOptions) -> Result<RemoteNodeReport, Error> {
     let peer_script = format!(
         "Set-Location {}; & .\\pactmesh.exe --rpc-portal 127.0.0.1:{} -o json peer list",
@@ -5137,16 +5189,25 @@ fn remote_run_collect_windows(options: &LabRemoteRunOptions) -> Result<RemoteNod
         ps_quote(&options.c_bin_dir),
         options.c_rpc,
     );
-    let logs_script = format!(
-        "$log={}; if (Test-Path $log) {{ Select-String -Path $log -Pattern 'p2p|relay|hole punch|symmetric|direct|failed|error|warn' | Select-Object -Last 120 | ForEach-Object {{ $_.Line }} }}",
-        ps_quote(&options.c_log),
-    );
-    let peer_json = ssh_capture_powershell(&options.c_host, &peer_script)
-        .context("failed to collect C peer json")?;
-    let explain = ssh_capture_powershell(&options.c_host, &explain_script)
-        .context("failed to collect C peer explain")?;
-    let logs = ssh_capture_powershell(&options.c_host, &logs_script)
-        .unwrap_or_else(|err| format!("log collection failed: {err:#}"));
+    let peer_json = ssh_capture_powershell(&options.c_host, &peer_script).with_context(|| {
+        format!(
+            "failed to collect C peer json\n{}",
+            trim_remote_output(
+                &remote_windows_node_diagnostics(&options.c_host, &options.c_log),
+                4000
+            )
+        )
+    })?;
+    let explain = ssh_capture_powershell(&options.c_host, &explain_script).with_context(|| {
+        format!(
+            "failed to collect C peer explain\n{}",
+            trim_remote_output(
+                &remote_windows_node_diagnostics(&options.c_host, &options.c_log),
+                4000
+            )
+        )
+    })?;
+    let logs = remote_windows_node_diagnostics(&options.c_host, &options.c_log);
     Ok(RemoteNodeReport {
         peer_json,
         explain,
@@ -5284,6 +5345,10 @@ fn sh_quote(value: &str) -> String {
 
 fn ps_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn cmd_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\\\""))
 }
 
 fn parent_path_unix(path: &str) -> String {

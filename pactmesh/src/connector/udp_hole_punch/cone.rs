@@ -47,7 +47,7 @@ impl PunchConeHoleServer {
         let listener_addr = std::net::SocketAddr::from(listener_addr);
         let listener = self
             .common
-            .find_listener(&listener_addr)
+            .find_listener_or_select_replacement(&listener_addr, true)
             .await
             .ok_or(anyhow::anyhow!(
                 "send_punch_packet_for_cone failed to find listener"
