@@ -75,6 +75,9 @@ message FlagsInConfig {
   bool need_p2p = 38;
   uint64 instance_recv_bps_limit = 39;
   bool disable_upnp = 40;
+
+  // also bind connector sockets for public destinations to a physical NIC
+  bool bind_device_public = 41;
 }
 
 message RpcDescriptor {

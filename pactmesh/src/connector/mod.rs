@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV
 use pnet::ipnetwork::IpNetwork;
 
 use crate::{
-    common::{error::Error, global_ctx::ArcGlobalCtx, idn, network::IPCollector},
+    common::{error::Error, global_ctx::ArcGlobalCtx, idn, network::{is_usable_interface_ipv4, IPCollector}},
     connector::dns_connector::DnsTunnelConnector,
     proto::common::PeerFeatureFlag,
     tunnel::{
@@ -84,16 +84,27 @@ async fn collect_route_matched_bind_addrs(
     dst_addr: SocketAddr,
 ) -> Vec<SocketAddr> {
     match dst_addr {
-        SocketAddr::V4(dst) => IPCollector::collect_interfaces(global_ctx.net_ns.clone(), true)
-            .await
-            .into_iter()
-            .flat_map(|iface| iface.ips.into_iter())
-            .filter_map(|ip| match ip {
-                IpNetwork::V4(network) if network.contains(*dst.ip()) => Some(network.ip()),
-                _ => None,
-            })
-            .map(|src| SocketAddrV4::new(src, 0).into())
-            .collect::<Vec<_>>(),
+        SocketAddr::V4(dst) => {
+            let is_private = private_ipv4_family(*dst.ip()).is_some();
+            IPCollector::collect_interfaces(global_ctx.net_ns.clone(), true)
+                .await
+                .into_iter()
+                .flat_map(|iface| iface.ips.into_iter())
+                .filter_map(|ip| match ip {
+                    IpNetwork::V4(network) => {
+                        let src = network.ip();
+                        let keep = if is_private {
+                            network.contains(*dst.ip())
+                        } else {
+                            is_usable_interface_ipv4(src)
+                        };
+                        keep.then_some(src)
+                    }
+                    _ => None,
+                })
+                .map(|src| SocketAddrV4::new(src, 0).into())
+                .collect::<Vec<_>>()
+        }
         SocketAddr::V6(dst) => {
             let ips = global_ctx.get_ip_collector().collect_ip_addrs().await;
             ips.interface_ipv6s
@@ -128,12 +139,13 @@ fn should_bind_ipv6_source_for_dst(src: Ipv6Addr, dst: Ipv6Addr) -> bool {
     dst.is_unique_local() && src.is_unique_local()
 }
 
-fn should_bind_device_for_dst(dst_addr: SocketAddr) -> bool {
+fn should_bind_device_for_dst(dst_addr: SocketAddr, bind_public: bool) -> bool {
     match dst_addr.ip() {
-        // Keep explicit source binding only for private LAN or overlay candidates;
-        // public targets should use the OS route table's chosen source address.
-        IpAddr::V4(ip) => private_ipv4_family(ip).is_some(),
-        IpAddr::V6(ip) => ip.is_unique_local(),
+        // Private LAN/overlay always bind; public targets bind only when
+        // bind_device_public is set, to pin the socket onto a physical NIC and
+        // bypass TUN proxies that hijack the default route.
+        IpAddr::V4(ip) => bind_public || private_ipv4_family(ip).is_some(),
+        IpAddr::V6(ip) => bind_public || ip.is_unique_local(),
     }
 }
 
@@ -175,8 +187,10 @@ pub async fn create_connector_by_url(
                 #[cfg(feature = "faketcp")]
                 IpScheme::FakeTcp => tunnel::fake_tcp::FakeTcpTunnelConnector::new(url).boxed(),
             };
-            let bind_device = global_ctx.config.get_flags().bind_device;
-            let should_bind_device = bind_device && should_bind_device_for_dst(dst_addr);
+            let flags = global_ctx.config.get_flags();
+            let bind_device = flags.bind_device;
+            let should_bind_device =
+                bind_device && should_bind_device_for_dst(dst_addr, flags.bind_device_public);
             if should_bind_device {
                 set_bind_addr_for_peer_connector(&mut connector, dst_addr, global_ctx).await;
             } else if bind_device {
@@ -254,29 +268,47 @@ mod tests {
     #[test]
     fn bind_device_is_only_used_for_private_direct_targets() {
         assert!(should_bind_device_for_dst(
-            "192.168.6.128:11030".parse().unwrap()
+            "192.168.6.128:11030".parse().unwrap(),
+            false
         ));
         assert!(should_bind_device_for_dst(
-            "10.0.0.100:11030".parse().unwrap()
+            "10.0.0.100:11030".parse().unwrap(),
+            false
         ));
         assert!(should_bind_device_for_dst(
-            "172.16.4.8:11030".parse().unwrap()
+            "172.16.4.8:11030".parse().unwrap(),
+            false
         ));
         assert!(should_bind_device_for_dst(
-            "[fd7b:cf81:ff54::785]:11030".parse().unwrap()
+            "[fd7b:cf81:ff54::785]:11030".parse().unwrap(),
+            false
         ));
 
         assert!(!should_bind_device_for_dst(
-            "203.0.113.9:11020".parse().unwrap()
+            "203.0.113.9:11020".parse().unwrap(),
+            false
         ));
         assert!(!should_bind_device_for_dst(
-            "203.0.113.16:11010".parse().unwrap()
+            "203.0.113.16:11010".parse().unwrap(),
+            false
         ));
         assert!(!should_bind_device_for_dst(
-            "127.0.0.1:11020".parse().unwrap()
+            "127.0.0.1:11020".parse().unwrap(),
+            false
         ));
         assert!(!should_bind_device_for_dst(
-            "[2001:4860:4860::8888]:443".parse().unwrap()
+            "[2001:4860:4860::8888]:443".parse().unwrap(),
+            false
+        ));
+
+        // With bind_device_public, public targets bind to a physical NIC too.
+        assert!(should_bind_device_for_dst(
+            "203.0.113.9:11020".parse().unwrap(),
+            true
+        ));
+        assert!(should_bind_device_for_dst(
+            "203.0.113.16:11010".parse().unwrap(),
+            true
         ));
     }
 
