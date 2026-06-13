@@ -283,9 +283,25 @@ impl GlobalCtx {
             stun_info_collector.set_stun_servers_v6(StunInfoCollector::get_default_servers_v6());
         }
 
-        let stun_info_collector = Arc::new(stun_info_collector);
-
         let flags = config_fs.get_flags();
+
+        // Pin NAT-detection sockets to the same physical NIC as hole punching when
+        // bind-device-public is enabled; otherwise a default-route TUN proxy
+        // (clash/flclash) hijacks the STUN traffic and NAT type resolves to Unknown,
+        // flipping the punch strategy to relay. Off by default — no behavior change.
+        let stun_info_collector = if flags.bind_device
+            && flags.bind_device_public
+            && !flags.bind_device_name.is_empty()
+        {
+            stun_info_collector.with_bind_dev(
+                crate::tunnel::common::BindDev::Custom(flags.bind_device_name.clone()),
+                Some(net_ns.clone()),
+            )
+        } else {
+            stun_info_collector
+        };
+
+        let stun_info_collector = Arc::new(stun_info_collector);
 
         let feature_flags = Self::derive_feature_flags(&flags, None);
 

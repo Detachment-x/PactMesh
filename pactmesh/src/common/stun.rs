@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -21,6 +21,8 @@ use stun_codec::rfc5389::methods::BINDING;
 use stun_codec::{Message, MessageClass, MessageDecoder, MessageEncoder};
 
 use crate::common::error::Error;
+use crate::common::netns::NetNS;
+use crate::tunnel::common::{BindDev, bind};
 
 use super::dns::resolve_txt_record;
 use super::stun_codec_ext::*;
@@ -733,9 +735,31 @@ impl StunNatTypeDetectResult {
     }
 }
 
+/// Bind a STUN UDP socket, pinning it to the configured physical NIC when a
+/// `bind_device_name` is set. NAT detection otherwise inherits the OS default
+/// route, which a TUN proxy (clash/flclash) hijacks — corrupting the STUN
+/// responses and yielding `Unknown`. Mirrors the hole-punch socket binding so
+/// detection and punching share the same egress interface.
+async fn bind_stun_udp(
+    port: u16,
+    bind_dev: &BindDev,
+    net_ns: &Option<NetNS>,
+) -> Result<UdpSocket, Error> {
+    if matches!(bind_dev, BindDev::Disabled) {
+        return Ok(UdpSocket::bind(format!("0.0.0.0:{}", port)).await?);
+    }
+    Ok(bind::<UdpSocket>()
+        .addr(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)))
+        .dev(bind_dev.clone())
+        .maybe_net_ns(net_ns.clone())
+        .call()?)
+}
+
 pub struct UdpNatTypeDetector {
     stun_server_hosts: Vec<String>,
     max_ip_per_domain: u32,
+    bind_dev: BindDev,
+    net_ns: Option<NetNS>,
 }
 
 impl UdpNatTypeDetector {
@@ -743,7 +767,15 @@ impl UdpNatTypeDetector {
         Self {
             stun_server_hosts,
             max_ip_per_domain,
+            bind_dev: BindDev::Disabled,
+            net_ns: None,
         }
+    }
+
+    fn with_bind(mut self, bind_dev: BindDev, net_ns: Option<NetNS>) -> Self {
+        self.bind_dev = bind_dev;
+        self.net_ns = net_ns;
+        self
     }
 
     async fn get_extra_bind_result(
@@ -751,7 +783,7 @@ impl UdpNatTypeDetector {
         source_port: u16,
         stun_server: SocketAddr,
     ) -> Result<BindRequestResponse, Error> {
-        let udp = Arc::new(UdpSocket::bind(format!("0.0.0.0:{}", source_port)).await?);
+        let udp = Arc::new(bind_stun_udp(source_port, &self.bind_dev, &self.net_ns).await?);
         let client_builder = StunClientBuilder::new(udp.clone());
         client_builder
             .new_stun_client(stun_server)
@@ -763,7 +795,7 @@ impl UdpNatTypeDetector {
         &self,
         source_port: u16,
     ) -> Result<StunNatTypeDetectResult, Error> {
-        let udp = Arc::new(UdpSocket::bind(format!("0.0.0.0:{}", source_port)).await?);
+        let udp = Arc::new(bind_stun_udp(source_port, &self.bind_dev, &self.net_ns).await?);
         self.detect_nat_type_with_socket(udp).await
     }
 
@@ -1081,6 +1113,8 @@ pub struct StunInfoCollector {
     redetect_notify: Arc<tokio::sync::Notify>,
     tasks: std::sync::Mutex<JoinSet<()>>,
     started: AtomicBool,
+    bind_dev: BindDev,
+    net_ns: Option<NetNS>,
 }
 
 #[async_trait::async_trait]
@@ -1142,7 +1176,7 @@ impl StunInfoCollectorTrait for StunInfoCollector {
     }
 
     async fn get_udp_port_mapping(&self, local_port: u16) -> Result<SocketAddr, Error> {
-        let udp = Arc::new(UdpSocket::bind(format!("0.0.0.0:{}", local_port)).await?);
+        let udp = Arc::new(bind_stun_udp(local_port, &self.bind_dev, &self.net_ns).await?);
         self.get_udp_port_mapping_with_socket(udp).await
     }
 
@@ -1254,7 +1288,18 @@ impl StunInfoCollector {
             redetect_notify: Arc::new(tokio::sync::Notify::new()),
             tasks: std::sync::Mutex::new(JoinSet::new()),
             started: AtomicBool::new(false),
+            bind_dev: BindDev::Disabled,
+            net_ns: None,
         }
+    }
+
+    /// Pin NAT-detection sockets to a physical NIC (mirrors hole-punch binding).
+    /// Only call with an active `BindDev::Custom` when the bind-device-public
+    /// flags are on; the default keeps `Disabled` for unchanged behavior.
+    pub fn with_bind_dev(mut self, bind_dev: BindDev, net_ns: Option<NetNS>) -> Self {
+        self.bind_dev = bind_dev;
+        self.net_ns = net_ns;
+        self
     }
 
     pub fn new_with_default_servers() -> Self {
@@ -1346,6 +1391,8 @@ impl StunInfoCollector {
         let udp_nat_test_result = self.udp_nat_test_result.clone();
         let nat_test_time = self.nat_test_result_time.clone();
         let redetect_notify = self.redetect_notify.clone();
+        let bind_dev = self.bind_dev.clone();
+        let net_ns = self.net_ns.clone();
         self.tasks.lock().unwrap().spawn(async move {
             loop {
                 let udp_servers = stun_servers.read().unwrap().clone();
@@ -1356,7 +1403,8 @@ impl StunInfoCollector {
                     .map(|x| x.to_string())
                     .collect();
 
-                let udp_detector = UdpNatTypeDetector::new(udp_servers, 1);
+                let udp_detector = UdpNatTypeDetector::new(udp_servers, 1)
+                    .with_bind(bind_dev.clone(), net_ns.clone());
                 let mut udp_ret = udp_detector.detect_nat_type(0).await;
                 tracing::debug!(?udp_ret, "finish udp nat type detect");
 
