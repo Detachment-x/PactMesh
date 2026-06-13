@@ -5410,12 +5410,17 @@ fn assert_physical_direct_any(
     candidates: &[&str],
     overlay_cidrs: &[(u32, u32)],
 ) -> Result<(), Error> {
+    // Candidates are alternate names for the SAME peer. Once any name resolves
+    // to a peer_id we have found it; its physical verdict is final and must not
+    // be masked by a later name that simply fails to resolve.
     let mut last: Option<Error> = None;
     for candidate in candidates {
-        match assert_physical_direct(node, peer_json, conn_log, candidate, overlay_cidrs) {
-            Ok(()) => return Ok(()),
-            Err(err) => last = Some(err),
+        if peer_id_for(peer_json, candidate).is_some() {
+            return assert_physical_direct(node, peer_json, conn_log, candidate, overlay_cidrs);
         }
+        last = Some(anyhow::anyhow!(
+            "{node}: could not resolve peer_id for '{candidate}'"
+        ));
     }
     Err(last.unwrap_or_else(|| anyhow::anyhow!("{node}: no candidate peer matched")))
 }
