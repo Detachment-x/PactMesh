@@ -271,20 +271,28 @@ impl GlobalCtx {
 
         let stun_info_collector = StunInfoCollector::new_with_default_servers();
 
-        let mut udp_stun_servers = config_fs
-            .get_stun_servers()
-            .unwrap_or_else(StunInfoCollector::get_default_servers);
-        // Every pactmesh root/seed already answers STUN on its UDP listener, and a
-        // configured peer endpoint is a literal public IP immune to fake-ip DNS
-        // hijack. Add them as extra NAT-detection anchors so a node still reaches
-        // >=2 clean STUN vantage points when third-party STUN domains are
-        // black-holed by a default-route TUN proxy (clash/flclash).
+        // Prepend configured peer/root endpoints to the UDP NAT-detection list so
+        // they land in the always-queried head (the detection routine samples only
+        // the first 3 servers plus 1 random tail entry). A pactmesh root answers
+        // STUN on its UDP listener from a literal public IP that is immune to
+        // fake-ip DNS hijack, giving a reliable second vantage point when the
+        // third-party STUN domains resolve into a default-route TUN proxy's
+        // fake-ip range and get dropped as non-public.
+        let mut udp_stun_servers: Vec<String> = Vec::new();
         for peer in config_fs.get_peers() {
             if let (Some(host), Some(port)) = (peer.uri.host_str(), peer.uri.port()) {
                 let hp = format!("{host}:{port}");
                 if !udp_stun_servers.contains(&hp) {
                     udp_stun_servers.push(hp);
                 }
+            }
+        }
+        for server in config_fs
+            .get_stun_servers()
+            .unwrap_or_else(StunInfoCollector::get_default_servers)
+        {
+            if !udp_stun_servers.contains(&server) {
+                udp_stun_servers.push(server);
             }
         }
         stun_info_collector.set_stun_servers(udp_stun_servers);
