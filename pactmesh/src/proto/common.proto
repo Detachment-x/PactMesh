@@ -78,6 +78,9 @@ message FlagsInConfig {
 
   // also bind connector sockets for public destinations to a physical NIC
   bool bind_device_public = 41;
+
+  // pin hole-punch and connector sockets to this physical NIC by name (e.g. "WLAN")
+  string bind_device_name = 42;
 }
 
 message RpcDescriptor {

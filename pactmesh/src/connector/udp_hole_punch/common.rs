@@ -23,6 +23,7 @@ use crate::{
     proto::common::NatType,
     tunnel::{
         Tunnel, TunnelConnCounter, TunnelListener as _,
+        common::{BindDev, bind},
         packet_def::{UDP_TUNNEL_HEADER_SIZE, UDPTunnelHeader, UdpPacketType},
         udp::{
             UdpTunnelConnector, UdpTunnelListener, is_stun_packet, new_hole_punch_packet,
@@ -243,11 +244,41 @@ pub(crate) struct PunchedUdpSocket {
     pub(crate) remote_addr: SocketAddr,
 }
 
+/// Resolve which physical NIC hole-punch sockets should pin their outbound
+/// traffic to. Returns `Custom(name)` only when `bind_device` +
+/// `bind_device_public` are on and a `bind_device_name` is configured; otherwise
+/// the OS route table is used. This lets punch packets bypass a default-route TUN
+/// proxy (clash/flclash) — the connector-only binding never reached these
+/// hole-punch sockets.
+pub(crate) fn punch_bind_dev(flags: &crate::common::config::Flags) -> BindDev {
+    if flags.bind_device && flags.bind_device_public && !flags.bind_device_name.is_empty() {
+        BindDev::Custom(flags.bind_device_name.clone())
+    } else {
+        BindDev::Disabled
+    }
+}
+
+/// Bind a hole-punch UDP socket on `0.0.0.0:port`, pinning outbound traffic to
+/// the configured physical NIC when enabled (Windows `IP_UNICAST_IF` / Linux
+/// `SO_BINDTODEVICE`, via the shared `bind` builder which also enters `net_ns`).
+pub(crate) fn bind_punch_udp_socket(
+    global_ctx: &ArcGlobalCtx,
+    port: u16,
+) -> Result<UdpSocket, anyhow::Error> {
+    let dev = punch_bind_dev(&global_ctx.config.get_flags());
+    Ok(bind::<UdpSocket>()
+        .addr(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)))
+        .dev(dev)
+        .net_ns(global_ctx.net_ns.clone())
+        .call()?)
+}
+
 // used for symmetric hole punching, binding to multiple ports to increase the chance of success
 pub(crate) struct UdpSocketArray {
     sockets: Arc<DashMap<SocketAddr, Arc<UdpSocket>>>,
     max_socket_count: usize,
     net_ns: NetNS,
+    global_ctx: Option<ArcGlobalCtx>,
     tasks: Arc<std::sync::Mutex<JoinSet<()>>>,
 
     intreast_tids: Arc<DashSet<u32>>,
@@ -256,7 +287,7 @@ pub(crate) struct UdpSocketArray {
 }
 
 impl UdpSocketArray {
-    pub fn new(max_socket_count: usize, net_ns: NetNS) -> Self {
+    pub fn new(max_socket_count: usize, net_ns: NetNS, global_ctx: Option<ArcGlobalCtx>) -> Self {
         let tasks = Arc::new(std::sync::Mutex::new(JoinSet::new()));
         join_joinset_background(tasks.clone(), "UdpSocketArray".to_owned());
 
@@ -264,6 +295,7 @@ impl UdpSocketArray {
             sockets: Arc::new(DashMap::new()),
             max_socket_count,
             net_ns,
+            global_ctx,
             tasks,
 
             intreast_tids: Arc::new(DashSet::new()),
@@ -277,9 +309,14 @@ impl UdpSocketArray {
     }
 
     pub async fn bind_new_socket(&self) -> Result<Arc<UdpSocket>, anyhow::Error> {
-        let _g = self.net_ns.guard();
-        let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
-        Ok(socket)
+        let socket = match &self.global_ctx {
+            Some(global_ctx) => bind_punch_udp_socket(global_ctx, 0)?,
+            None => {
+                let _g = self.net_ns.guard();
+                UdpSocket::bind("0.0.0.0:0").await?
+            }
+        };
+        Ok(Arc::new(socket))
     }
 
     pub async fn bind_sockets(&self) -> Result<Vec<Arc<UdpSocket>>, anyhow::Error> {
@@ -536,10 +573,10 @@ impl UdpHolePunchListener {
         with_mapped_addr: bool,
         port: Option<u16>,
     ) -> Result<Self, Error> {
-        let socket = {
-            let _g = peer_mgr.get_global_ctx().net_ns.guard();
-            Arc::new(UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port.unwrap_or(0))).await?)
-        };
+        let socket = Arc::new(bind_punch_udp_socket(
+            &peer_mgr.get_global_ctx(),
+            port.unwrap_or(0),
+        )?);
         let local_port = socket.local_addr()?.port();
         let listen_url: url::Url = format!("udp://0.0.0.0:{local_port}").parse().unwrap();
 
@@ -1035,7 +1072,7 @@ async fn check_udp_socket_local_addr(
     global_ctx: ArcGlobalCtx,
     remote_mapped_addr: SocketAddr,
 ) -> Result<(), Error> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    let socket = bind_punch_udp_socket(&global_ctx, 0)?;
     socket.connect(remote_mapped_addr).await?;
     if let Ok(local_addr) = socket.local_addr() {
         // local_addr should not be equal to virtual ipv4 or virtual ipv6
@@ -1099,9 +1136,30 @@ mod tests {
     use super::{
         HOLE_PUNCH_PACKET_BODY_LEN, MAX_PUBLIC_UDP_HOLE_PUNCH_LISTENERS,
         UDP_SOCKET_ARRAY_RECV_BUF_SIZE, UdpHolePunchListener, UdpSocketArray,
-        is_windows_udp_message_too_large_error, should_create_public_listener,
+        is_windows_udp_message_too_large_error, punch_bind_dev, should_create_public_listener,
         should_retry_public_listener_selection,
     };
+
+    #[test]
+    fn punch_bind_dev_respects_flags_gating() {
+        use crate::common::config::gen_default_flags;
+        use crate::tunnel::common::BindDev;
+
+        let mut f = gen_default_flags();
+        // default: bind_device=true, bind_device_public=false, name empty
+        assert!(matches!(punch_bind_dev(&f), BindDev::Disabled));
+
+        f.bind_device_public = true;
+        // still disabled: no device name configured
+        assert!(matches!(punch_bind_dev(&f), BindDev::Disabled));
+
+        f.bind_device_name = "WLAN".to_string();
+        assert!(matches!(punch_bind_dev(&f), BindDev::Custom(ref s) if s == "WLAN"));
+
+        // master switch off -> disabled regardless of the other two
+        f.bind_device = false;
+        assert!(matches!(punch_bind_dev(&f), BindDev::Disabled));
+    }
 
     #[derive(Debug)]
     struct StaticTunnelConnCounter;
@@ -1126,7 +1184,7 @@ mod tests {
 
     #[tokio::test]
     async fn udp_socket_array_ignores_large_non_hole_punch_datagram() {
-        let array = UdpSocketArray::new(1, NetNS::new(None));
+        let array = UdpSocketArray::new(1, NetNS::new(None), None);
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let local_addr = socket.local_addr().unwrap();
         array.add_new_socket(socket).await.unwrap();
@@ -1161,7 +1219,7 @@ mod tests {
 
     #[tokio::test]
     async fn udp_socket_array_records_uninteresting_hole_punch_addr() {
-        let array = UdpSocketArray::new(1, NetNS::new(None));
+        let array = UdpSocketArray::new(1, NetNS::new(None), None);
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let local_addr = socket.local_addr().unwrap();
         array.add_new_socket(socket).await.unwrap();
@@ -1185,7 +1243,7 @@ mod tests {
 
     #[tokio::test]
     async fn udp_socket_array_responds_to_stun_requests() {
-        let array = UdpSocketArray::new(1, NetNS::new(None));
+        let array = UdpSocketArray::new(1, NetNS::new(None), None);
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let server_addr = socket.local_addr().unwrap();
         array.add_new_socket(socket).await.unwrap();

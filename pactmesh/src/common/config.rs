@@ -84,6 +84,7 @@ pub fn gen_default_flags() -> Flags {
         instance_recv_bps_limit: u64::MAX,
         disable_upnp: false,
         bind_device_public: false,
+        bind_device_name: String::new(),
     }
 }
 

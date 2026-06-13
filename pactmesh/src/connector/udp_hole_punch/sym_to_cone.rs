@@ -43,7 +43,7 @@ use crate::{
     tunnel::{Tunnel, udp::new_hole_punch_packet},
 };
 
-use super::common::{PunchHoleServerCommon, UdpNatType, UdpSocketArray};
+use super::common::{PunchHoleServerCommon, UdpNatType, UdpSocketArray, bind_punch_udp_socket};
 
 const UDP_ARRAY_SIZE_FOR_HARD_SYM: usize = 84;
 const PEER_REFLEXIVE_MAPPING_PROBES: usize = 6;
@@ -946,10 +946,7 @@ impl PunchSymToConeHoleClient {
         // recv loop would otherwise steal the STUN responses. Resolving via upnp
         // also pins a gateway port mapping (NAT-PMP/IGD) when available, yielding a
         // truly stable external port — the same lever ZeroTier relies on.
-        let socket = {
-            let _g = global_ctx.net_ns.guard();
-            Arc::new(UdpSocket::bind("0.0.0.0:0").await?)
-        };
+        let socket = Arc::new(bind_punch_udp_socket(&global_ctx, 0)?);
         let local_port = socket.local_addr()?.port();
         let local_listener: url::Url = format!("udp://0.0.0.0:{local_port}").parse().unwrap();
         let (my_mapped, _port_mapping_lease) = match upnp::resolve_udp_public_addr(
@@ -966,7 +963,11 @@ impl PunchSymToConeHoleClient {
             }
         };
 
-        let array = Arc::new(UdpSocketArray::new(1, global_ctx.net_ns.clone()));
+        let array = Arc::new(UdpSocketArray::new(
+            1,
+            global_ctx.net_ns.clone(),
+            Some(global_ctx.clone()),
+        ));
         array.add_new_socket(socket).await?;
 
         let tid: u32 = rand::thread_rng().r#gen();
@@ -1166,6 +1167,7 @@ impl PunchSymToConeHoleClient {
         let udp_array = Arc::new(UdpSocketArray::new(
             UDP_ARRAY_SIZE_FOR_HARD_SYM,
             self.peer_mgr.get_global_ctx().net_ns.clone(),
+            Some(self.peer_mgr.get_global_ctx()),
         ));
         let sockets = udp_array.bind_sockets().await?;
         Ok((udp_array, Some(sockets)))
@@ -1288,14 +1290,11 @@ impl PunchSymToConeHoleClient {
                 .collect::<Vec<_>>()
         } else {
             for _ in 0..PEER_REFLEXIVE_MAPPING_PROBES {
-                let socket = {
-                    let _g = global_ctx.net_ns.guard();
-                    match UdpSocket::bind("0.0.0.0:0").await {
-                        Ok(socket) => Arc::new(socket),
-                        Err(e) => {
-                            tracing::warn!(?e, "failed to bind udp socket for sym prediction");
-                            continue;
-                        }
+                let socket = match bind_punch_udp_socket(&global_ctx, 0) {
+                    Ok(socket) => Arc::new(socket),
+                    Err(e) => {
+                        tracing::warn!(?e, "failed to bind udp socket for sym prediction");
+                        continue;
                     }
                 };
                 owned_temp_sockets.push(socket);
@@ -1857,7 +1856,7 @@ impl PunchSymToConeHoleClient {
         if self.try_direct_connect.load(Ordering::Relaxed)
             && let Ok(tunnel) = try_connect_with_socket(
                 global_ctx.clone(),
-                Arc::new(UdpSocket::bind("0.0.0.0:0").await?),
+                Arc::new(bind_punch_udp_socket(&global_ctx, 0)?),
                 remote_mapped_addr.into(),
             )
             .await

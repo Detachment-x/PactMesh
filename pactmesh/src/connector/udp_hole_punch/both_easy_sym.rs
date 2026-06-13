@@ -478,7 +478,8 @@ impl PunchBothEasySymHoleServer {
             || request.dst_random_scan
             || !request.dst_priority_port_nums.is_empty();
 
-        let udp_array = UdpSocketArray::new(socket_count, global_ctx.net_ns.clone());
+        let udp_array =
+            UdpSocketArray::new(socket_count, global_ctx.net_ns.clone(), Some(global_ctx.clone()));
         let mut base_priority_port_nums = if coordinated {
             cached_udp_priority_port_nums(&global_ctx)
         } else {
@@ -668,6 +669,7 @@ impl PunchBothEasySymHoleClient {
         let udp_array = UdpSocketArray::new(
             UDP_ARRAY_SIZE_FOR_BOTH_EASY_SYM,
             self.peer_mgr.get_global_ctx().net_ns.clone(),
+            Some(self.peer_mgr.get_global_ctx()),
         );
         udp_array.start().await?;
 

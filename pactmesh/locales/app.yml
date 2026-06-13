@@ -196,6 +196,9 @@ core_clap:
   bind_device_public:
     en: "also bind connector sockets for public destinations to a physical NIC. useful when a TUN proxy (e.g. clash/flclash) hijacks the default route and breaks direct p2p. default off."
     zh-CN: "对公网目标的连接器套接字也绑定到物理网卡。当 TUN 代理（如 clash/flclash）劫持默认路由、破坏 p2p 直连时有用。默认关闭。"
+  bind_device_name:
+    en: "name of the physical NIC to pin hole-punch and connector sockets to (e.g. WLAN, eth0). requires bind_device and bind_device_public; lets punch packets bypass a default-route TUN proxy. empty = off."
+    zh-CN: "用于绑定打洞与连接器套接字的物理网卡名称（如 WLAN、eth0）。需配合 bind_device 与 bind_device_public 使用，可让打洞报文绕过劫持默认路由的 TUN 代理。留空 = 关闭。"
   enable_kcp_proxy:
     en: "proxy tcp streams with kcp, improving the latency and throughput on the network with udp packet loss."
     zh-CN: "使用 KCP 代理 TCP 流，提高在 UDP 丢包网络上的延迟和吞吐量。"
