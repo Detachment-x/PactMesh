@@ -1888,10 +1888,15 @@ impl PunchSymToConeHoleClient {
             );
         }
 
+        // ZeroTier parity: always try the pinned-socket punch first, independent of
+        // our natural NAT port spread. try_stable_socket_punch resolves the socket's
+        // public addr via UPnP/NAT-PMP, pinning a gateway lease that fixes the external
+        // port even on symmetric NAT — so gating it on observed_spread (a measure of
+        // *unpinned* mapping stability) wrongly suppresses the exact path that defeats
+        // symmetric NAT. The call self-aborts cheaply when no stable mapping is
+        // obtainable, after which we fall through to the prediction spray below.
         let punch_predictably = self.punch_predicablely.load(Ordering::Relaxed);
-        let attempted_global_stable_punch =
-            punch_predictably && observed_spread <= STABLE_PUNCH_SPREAD_MAX;
-        if attempted_global_stable_punch
+        if punch_predictably
             && let Some(tunnel) = self
                 .try_stable_socket_punch(dst_peer_id, remote_mapped_addr, &public_ips)
                 .await?
