@@ -775,6 +775,18 @@ enum LabSubCommand {
             help = "fail if B and C do not report a direct/p2p route"
         )]
         require_bc_direct: bool,
+        #[arg(
+            long,
+            default_value = "",
+            help = "pin C punch/connector sockets to this physical NIC (adds --bind-device/--bind-device-public/--bind-device-name); empty keeps default behavior"
+        )]
+        c_bind_device_name: String,
+        #[arg(
+            long,
+            default_value = "10.18.0.0/16",
+            help = "comma-separated overlay CIDRs; with --require-bc-direct, also require a direct conn whose remote_addr is outside these (guards against overlay fake-direct). Empty disables the check"
+        )]
+        overlay_cidr: String,
     },
     #[command(about = "disable a member interactively")]
     Disable {
@@ -3540,6 +3552,8 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             no_deploy,
             keep_running,
             require_bc_direct,
+            c_bind_device_name,
+            overlay_cidr,
         } => handle_lab_remote_fresh_run(LabRemoteFreshRunOptions {
             a_host,
             c_host,
@@ -3570,6 +3584,8 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             no_deploy,
             keep_running,
             require_bc_direct,
+            c_bind_device_name,
+            overlay_cidr,
         }),
         LabSubCommand::Disable {
             trust_domain_id,
@@ -4124,6 +4140,8 @@ struct LabRemoteFreshRunOptions {
     no_deploy: bool,
     keep_running: bool,
     require_bc_direct: bool,
+    c_bind_device_name: String,
+    overlay_cidr: String,
 }
 
 #[derive(Debug)]
@@ -4805,6 +4823,7 @@ fn remote_fresh_start_joiners(
         options.c_rpc,
         options.c_listen,
         &options.seed,
+        options.c_bind_device_name.trim(),
     )?;
     wait_for_windows_rpc(&options.c_host, &options.c_bin_dir, options.c_rpc, 30)?;
 
@@ -4827,6 +4846,7 @@ fn remote_fresh_wait_for_peers(
             options.wait_secs
         );
     }
+    let overlay_cidrs = parse_overlay_cidrs(&options.overlay_cidr);
     let deadline = std::time::Instant::now() + Duration::from_secs(options.wait_secs);
     let mut last_direct_error: Option<String> = None;
     loop {
@@ -4846,21 +4866,46 @@ fn remote_fresh_wait_for_peers(
         if b_sees_c && c_sees_b {
             if options.require_bc_direct {
                 if b_direct.is_ok() && c_direct.is_ok() {
-                    println!("\n== B ==\n{}", trim_remote_output(&last_b, 4000));
-                    println!("\n== C ==\n{}", trim_remote_output(&last_c, 4000));
-                    return Ok(());
+                    let physical = if overlay_cidrs.is_empty() {
+                        Ok(())
+                    } else {
+                        verify_bc_physical_direct(
+                            options,
+                            &b.peer_json,
+                            &c.peer_json,
+                            &overlay_cidrs,
+                        )
+                    };
+                    match physical {
+                        Ok(()) => {
+                            println!("\n== B ==\n{}", trim_remote_output(&last_b, 4000));
+                            println!("\n== C ==\n{}", trim_remote_output(&last_c, 4000));
+                            if !overlay_cidrs.is_empty() {
+                                println!(
+                                    "remote-fresh-run: verified B/C physical direct (remote_addr outside overlay {})",
+                                    options.overlay_cidr
+                                );
+                            }
+                            return Ok(());
+                        }
+                        Err(err) => {
+                            last_direct_error =
+                                Some(format!("B/C p2p ok but physical-direct unmet: {err:#}"));
+                        }
+                    }
+                } else {
+                    last_direct_error = Some(format!(
+                        "B direct: {}; C direct: {}",
+                        b_direct
+                            .as_ref()
+                            .map(|_| "ok".to_owned())
+                            .unwrap_or_else(|err| err.to_string()),
+                        c_direct
+                            .as_ref()
+                            .map(|_| "ok".to_owned())
+                            .unwrap_or_else(|err| err.to_string())
+                    ));
                 }
-                last_direct_error = Some(format!(
-                    "B direct: {}; C direct: {}",
-                    b_direct
-                        .as_ref()
-                        .map(|_| "ok".to_owned())
-                        .unwrap_or_else(|err| err.to_string()),
-                    c_direct
-                        .as_ref()
-                        .map(|_| "ok".to_owned())
-                        .unwrap_or_else(|err| err.to_string())
-                ));
             } else if b_direct.is_err() || c_direct.is_err() {
                 println!("\n== B ==\n{}", trim_remote_output(&last_b, 4000));
                 println!("\n== C ==\n{}", trim_remote_output(&last_c, 4000));
@@ -5084,6 +5129,7 @@ exec ./pactmesh-core --network-name {net} --network-local-id {net} --rpc-portal 
         options.c_rpc,
         options.c_listen,
         &options.seed,
+        "",
     )?;
     wait_for_windows_rpc(&options.c_host, &options.c_bin_dir, options.c_rpc, 30)?;
     Ok(())
@@ -5137,9 +5183,18 @@ fn start_windows_c_daemon(
     rpc: u16,
     listen: u16,
     seed: &str,
+    bind_device_name: &str,
 ) -> Result<(), Error> {
+    let bind_args = if bind_device_name.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " --bind-device true --bind-device-public true --bind-device-name {}",
+            cmd_quote(bind_device_name)
+        )
+    };
     let cmd_line = format!(
-        ".\\pactmesh-core.exe --network-name {net} --network-local-id {net} --rpc-portal 127.0.0.1:{rpc} --listeners tcp://0.0.0.0:{listen} --listeners udp://0.0.0.0:{listen} --peers {seed} --no-tun true --disable-ipv6 true --instance-name win-c --console-log-level debug --need-p2p true --daemon >> {log} 2>&1",
+        ".\\pactmesh-core.exe --network-name {net} --network-local-id {net} --rpc-portal 127.0.0.1:{rpc} --listeners tcp://0.0.0.0:{listen} --listeners udp://0.0.0.0:{listen} --peers {seed} --no-tun true --disable-ipv6 true --instance-name win-c --console-log-level debug --need-p2p true{bind_args} --daemon >> {log} 2>&1",
         net = cmd_quote(network),
         rpc = rpc,
         listen = listen,
@@ -5251,6 +5306,147 @@ fn remote_run_assert_direct_quiet(
         return Ok(());
     }
     anyhow::bail!("{node} did not find expected peer substring '{expect_peer}'")
+}
+
+/// Parse a comma-separated list of IPv4 CIDRs into (network, mask) u32 pairs.
+fn parse_overlay_cidrs(spec: &str) -> Vec<(u32, u32)> {
+    spec.split(',')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return None;
+            }
+            let (ip, prefix) = entry.split_once('/')?;
+            let base: std::net::Ipv4Addr = ip.trim().parse().ok()?;
+            let prefix: u32 = prefix.trim().parse().ok()?;
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix.min(32))
+            };
+            Some((u32::from(base) & mask, mask))
+        })
+        .collect()
+}
+
+fn ipv4_in_overlay(ip: std::net::Ipv4Addr, cidrs: &[(u32, u32)]) -> bool {
+    let value = u32::from(ip);
+    cidrs.iter().any(|(net, mask)| (value & mask) == *net)
+}
+
+/// Resolve the numeric peer_id from `peer list -o json` for a hostname substring.
+fn peer_id_for(peer_json: &str, expect_peer: &str) -> Option<String> {
+    let peers: serde_json::Value = serde_json::from_str(peer_json).ok()?;
+    for row in peers.as_array()? {
+        if row
+            .to_string()
+            .to_ascii_lowercase()
+            .contains(&expect_peer.to_ascii_lowercase())
+            && let Some(id) = row.get("id").and_then(|v| v.as_str())
+        {
+            return Some(id.to_owned());
+        }
+    }
+    None
+}
+
+/// Extract the numeric `dst_peer_id` from a `new peer connection added` log line.
+fn line_dst_peer_id(line: &str) -> Option<&str> {
+    let start = line.find("dst_peer_id: ")? + "dst_peer_id: ".len();
+    let rest = &line[start..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    (end > 0).then(|| &rest[..end])
+}
+
+/// Extract the remote_addr IPv4 from a conn-added log line (ignores local_addr).
+fn line_remote_ipv4(line: &str) -> Option<std::net::Ipv4Addr> {
+    let key = "remote_addr: Some(Url { url: \"";
+    let start = line.find(key)? + key.len();
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    let host = rest[..end].split("://").nth(1)?;
+    let host = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+    host.parse().ok()
+}
+
+/// Assert the node has at least one direct conn to `expect_peer` whose remote_addr
+/// is a physical (non-overlay, non-loopback) address.
+fn assert_physical_direct(
+    node: &str,
+    peer_json: &str,
+    conn_log: &str,
+    expect_peer: &str,
+    overlay_cidrs: &[(u32, u32)],
+) -> Result<(), Error> {
+    let id = peer_id_for(peer_json, expect_peer)
+        .ok_or_else(|| anyhow::anyhow!("{node}: could not resolve peer_id for '{expect_peer}'"))?;
+    let mut saw_direct = false;
+    for line in conn_log.lines() {
+        if line_dst_peer_id(line) != Some(id.as_str()) {
+            continue;
+        }
+        let Some(ip) = line_remote_ipv4(line) else {
+            continue;
+        };
+        saw_direct = true;
+        if !ip.is_loopback() && !ip.is_unspecified() && !ipv4_in_overlay(ip, overlay_cidrs) {
+            return Ok(());
+        }
+    }
+    if saw_direct {
+        anyhow::bail!(
+            "{node}: only overlay/loopback direct conns to '{expect_peer}' (peer_id {id}); no physical-NIC path"
+        );
+    }
+    anyhow::bail!("{node}: no peer-connection record to '{expect_peer}' (peer_id {id})")
+}
+
+fn assert_physical_direct_any(
+    node: &str,
+    peer_json: &str,
+    conn_log: &str,
+    candidates: &[&str],
+    overlay_cidrs: &[(u32, u32)],
+) -> Result<(), Error> {
+    let mut last: Option<Error> = None;
+    for candidate in candidates {
+        match assert_physical_direct(node, peer_json, conn_log, candidate, overlay_cidrs) {
+            Ok(()) => return Ok(()),
+            Err(err) => last = Some(err),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("{node}: no candidate peer matched")))
+}
+
+fn collect_conn_events_local(log: &str) -> Result<String, Error> {
+    run_local_sh(&format!(
+        "grep -a 'new peer connection added' {} 2>/dev/null | tail -n 200 || true",
+        sh_quote(log)
+    ))
+}
+
+fn collect_conn_events_windows(host: &str, log: &str) -> Result<String, Error> {
+    let script = format!(
+        "if (Test-Path {log}) {{ Select-String -Path {log} -Pattern 'new peer connection added' -SimpleMatch | Select-Object -Last 200 | ForEach-Object {{ $_.Line }} }}",
+        log = ps_quote(log)
+    );
+    ssh_capture_powershell(host, &script)
+}
+
+/// Both B and C must carry a physical (non-overlay) direct conn to the other.
+fn verify_bc_physical_direct(
+    options: &LabRemoteFreshRunOptions,
+    b_peer_json: &str,
+    c_peer_json: &str,
+    overlay_cidrs: &[(u32, u32)],
+) -> Result<(), Error> {
+    let b_events = collect_conn_events_local(&options.b_log)?;
+    let c_events = collect_conn_events_windows(&options.c_host, &options.c_log)?;
+    assert_physical_direct_any("B", b_peer_json, &b_events, &["LAPTOP", "win-c"], overlay_cidrs)?;
+    assert_physical_direct_any("C", c_peer_json, &c_events, &["user", "node-b"], overlay_cidrs)?;
+    Ok(())
 }
 
 fn ssh_capture_powershell(host: &str, script: &str) -> Result<String, Error> {
