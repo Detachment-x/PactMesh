@@ -66,7 +66,13 @@ impl PingIntervalController {
             last_send_logic_time: 0,
 
             backoff_idx: 0,
-            max_backoff_idx: 5,
+            // Cap the idle ping interval at 1<<2 = 4s. Carrier-grade NAT ages out
+            // a flow's mapping well under the previous 1<<5 = 32s ceiling, so on an
+            // idle direct tunnel the mapping expired between pings and the path went
+            // one-way dead (>=5 lost pings -> teardown -> relay). A short keepalive
+            // holds the mapping warm, matching ZeroTier. The extra keepalive on
+            // conns to the public root is negligible.
+            max_backoff_idx: 2,
 
             last_throughput,
         }
