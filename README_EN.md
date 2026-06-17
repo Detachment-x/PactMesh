@@ -8,6 +8,8 @@ This repository is based on EasyTier commit `5a1668c` (2026-04-25). EasyTier pro
 
 The user-facing CLI and daemon binaries are now named `pactmesh` and `pactmesh-core`. The local config path still uses `~/.config/privateNetwork` for compatibility with the existing Alpha data layout.
 
+In one line: **the data plane (EasyTier) does everything it can to connect devices directly across hostile NATs, falling back to relays when it cannot; the governance plane (PactMesh) lets your own keys decide who may join, what they may do, and whose relays to borrow — all verified locally, with no central server.**
+
 ## Status
 
 PactMesh is currently Alpha software for private and small-team use. A VPS + NAT device + online join + TUN path has been validated, but this is not yet a polished end-user product, an enterprise IAM product, a hosted control plane, or a multi-tenant SaaS system.
@@ -19,6 +21,119 @@ The core implementation is currently focused on:
 - Member certificates for device admission, revocation, disable/enable, and hostname assignment.
 - Trust-aware EasyTier handshakes and packet ACL enforcement.
 - Bootstrap invite/import flows for moving public trust-domain information between devices.
+
+## Feature Overview
+
+The data plane is inherited from EasyTier; the trust/governance plane is PactMesh's addition. The two are orthogonal: **role ≠ capability, permanent revocation ≠ temporary disable, and the configuration distribution channel does not need to be trusted.** The tables below are the full capability list; the conceptual notes on the trust model and relay borrowing follow in later sections.
+
+### Networking Data Plane
+
+Connects directly across hostile NATs whenever possible, falling back to relays.
+
+**Connections and tunnels**
+
+| Feature | Notes / rationale |
+| --- | --- |
+| Virtual NIC (TUN) | Devices talk over virtual overlay IPs as if on one LAN |
+| No-TUN mode (`no_tun`) | No virtual NIC, only port forwarding / proxy. Lets routers, restricted containers, and no-TUN-permission environments join as forwarders |
+| Multi-protocol transport (`default_protocol`) | One connection over TCP / UDP / WebSocket (ws, wss) / QUIC. On a network that allows only 443, use wss to look like HTTPS |
+| User-space TCP stack (`use_smoltcp`) | Independent of the host stack; for restricted/embedded environments |
+| MTU configuration (`mtu`) | Adapt to the link, avoid fragmentation |
+
+**NAT traversal (hole punching)**
+
+| Feature | Notes / rationale |
+| --- | --- |
+| UDP / TCP / symmetric-NAT hole punching | Three independent toggles (`disable_udp/tcp/sym_hole_punching`) for per-NAT-type isolation when debugging |
+| UPnP automatic port mapping | Opens a port proactively when the router supports it (`disable_upnp` to turn off) |
+| Hole-punch assistance (`can_assist_holepunch`) | A node with a public address brokers between two blocked peers |
+| Bind to a physical NIC | `bind_device` / `bind_device_public` / `bind_device_name` force a chosen NIC; avoids contamination when a proxy TUN has hijacked the default route |
+
+**Relay (fallback)**
+
+| Feature | Notes / rationale |
+| --- | --- |
+| Relay forwarding | Auto-relays through a public node when direct fails, so the link never drops |
+| Relay whitelist (`relay_network_whitelist`) | Restrict which networks may be relayed |
+| Relay all peer RPC (`relay_all_peer_rpc`) | Control signaling forwarding scope |
+| Foreign-relay rate limit (`foreign_relay_bps_limit`) | Separately caps relay traffic you lend out, so foreign forwarding cannot saturate your bandwidth |
+
+**Transport optimization and security**
+
+| Feature | Notes |
+| --- | --- |
+| Encryption (`enable_encryption` / `encryption_algorithm`) | On/off plus algorithm choice (AES-GCM, ChaCha20, etc.) |
+| Data compression (`data_compress_algo`) | e.g. zstd; saves bandwidth on weak links |
+| KCP proxy acceleration (`enable_kcp_proxy`) | TCP over KCP for loss resilience; tune with `disable_kcp_input` / `disable_relay_kcp` |
+| QUIC proxy (`enable_quic_proxy`) | Tune with `disable_quic_input` / `disable_relay_quic` |
+| Foreign-relay KCP/QUIC | `enable_relay_foreign_network_kcp` / `_quic` control whether a lent relay carries the accelerated protocols |
+| Latency-first routing (`latency_first`) | Pick the lowest-latency path when several exist |
+| Receive rate limit (`instance_recv_bps_limit`) | Instance-level bandwidth cap |
+| Multi-threading (`multi_thread` / `multi_thread_count`) | Saturate multiple cores for throughput |
+| Private mode (`private_mode`) | Restrict the node from relaying/exposing freely |
+
+**Network services**
+
+| Feature | Notes / scenario |
+| --- | --- |
+| Exit node (`enable_exit_node`) | Route all traffic out through one device; from abroad, egress through your home node as if you were home |
+| Subnet proxy / route sharing | Expose a device's whole LAN subnet (e.g. a NAS subnet) to members without installing a client on every box |
+| WireGuard portal (VpnPortal) | A standard WireGuard entry point for devices that cannot run PactMesh (old phones, TV boxes) |
+| MagicDNS (`accept_dns` / `tld_dns_zone`) | Use hostnames (e.g. `nas.home`) instead of memorizing IPs |
+
+### Daemon Management (CLI)
+
+| Command | Function |
+| --- | --- |
+| `peer list` / `list-foreign` / `list-global-foreign` | Local / specific-foreign / all cross-domain peers |
+| `route list` / `route dump` | View / export the routing table |
+| `connector add` / `remove` / `list` | Add or remove connection entry URLs |
+| `mapped-listener add` / `remove` / `list` | Manage mapped listener addresses |
+| `stun` | Test the local NAT type (hole-punch debugging) |
+| `vpn-portal` | Show WireGuard portal info |
+| `node info` / `node config` | Self core status and configuration |
+| `proxy` | TCP/KCP proxy status |
+| `acl stats` | ACL rule hit statistics |
+| `port-forward add` / `remove` / `list` | Port forwarding (map a remote service to a local port) |
+| `whitelist set-tcp` / `set-udp` / `clear-tcp` / `clear-udp` / `show` | TCP/UDP port whitelist |
+| `stats show` / `stats prometheus` | Runtime statistics; export Prometheus format for Grafana |
+| `logger get` / `set` | Adjust log level at runtime, no restart |
+| `service install` / `uninstall` / `status` / `start` / `stop` / `restart` | Register as a system service, auto-start on boot |
+| `tui` | Interactive terminal console (ratatui, with Node / Peers / Joins approval) |
+| `gen-autocomplete` | Generate shell completion scripts |
+
+### Trust and Governance (`trust`)
+
+Each user owns a trust domain, signing certificates and configuration with a root key (Ed25519 `SK_root`), with no central authority. See [Trust Model](#trust-model) for the concepts.
+
+| Command | Function / rationale |
+| --- | --- |
+| `create-domain` / `list-domains` | Create a trust domain (generates the root key, sets the management password, stores the root key encrypted as `sk_root.age`) / list local domains |
+| `create-network` | Create a concrete network inside a domain |
+| `bootstrap-self` | Issue the root device its own member certificate |
+| `invite` / `accept-invite` | Issue / accept an invite via URL, file, or QR; configuration is signed, so any distribution channel is safe |
+| `approve` / `reject` / `list-pending` | Online admission approval |
+| `revoke` | Permanently revoke a device, requiring a reason (key compromise / device lost / removed / superseded / unspecified), signed into the certificate for audit |
+| `disable` / `enable` | Temporarily disable / re-enable a device, distinct from permanent `revoke`; re-enabling needs no re-issuance |
+| `upgrade-peer-to-root` | Promote a member device to root; the raw root key travels over the encrypted peer channel, and the target's unlock password is entered only locally. For authority migration / multiple roots |
+| `list-members` / `list-external` | Member / external-referenced device lists |
+| `show-device` / `rename-device` | Inspect / rename a device |
+| `set-hostname` / `unset-hostname` | Assign a hostname, used with MagicDNS for name-based access |
+| `capability set` | Set capability bits (`can_relay_data`, `can_assist_holepunch`); role and capability are separate, so a member can be authorized as a relay |
+| `tag list` / `add` / `remove` | Human grouping labels (e.g. home / work) |
+| `peer-hint list` / `add` / `remove` | Manually provide a node's address hint to aid connection / hole punching |
+| `acl explain` | Explain current ACL traffic rules (who may reach whom) |
+
+### Credentials and Bootstrap Distribution
+
+| Command | Function / scenario |
+| --- | --- |
+| `credential generate` / `revoke` / `list` | Issue / revoke / list temporary credentials; hand a short, auto-expiring join credential to a temporary collaborator |
+| `bootstrap export` / `import` | Export / import a trust-domain bootstrap bundle for offline distribution of public trust-domain info |
+
+### Test and Operations Scaffolding (`lab`)
+
+Primarily for development and regression testing, not an end-user daily feature: `doctor` (environment check), `status` (summarize local files / RPC / peers / logs), `run`, `approve`, `peers explain/root/joiner`, `remote-check`, `remote-run` / `remote-fresh-run` (SSH-driven three-node regression; the latter runs from a fresh trust domain), `commands`, `disable` / `enable`. `wizard` and the old no-TTY fallback are deprecated in favor of `tui`.
 
 ## Trust Model
 
@@ -123,11 +238,10 @@ ssh user@server 'chmod +x /opt/pactmesh/pactmesh-core /opt/pactmesh/pactmesh'
 ## Design Documents
 
 - [Deployment guide](deploy.md) (Chinese: [deploy_CN.md](deploy_CN.md))
-- [Trust and configuration model](trust-and-config-design.md)
-- [ACL schema draft](acl-schema-draft.md)
+- [Temporary credential system plan](pactmesh/docs/credential_peer.md)
+- [PeerConn Secure Mode (out-of-order tunnel friendly)](pactmesh/docs/peer_conn_secure_mode_v3.md)
+- [Relay peer manager design](pactmesh/docs/relay_peer_manager_design.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
-
-`THIRD_PARTY_NOTICES.md` is the audit target for EasyTier provenance, license notices, and dependency-license review.
 
 ## Relationship To EasyTier
 
