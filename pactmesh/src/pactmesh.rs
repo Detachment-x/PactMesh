@@ -534,7 +534,8 @@ enum LabSubCommand {
         network_local_id: String,
         #[arg(
             long,
-            default_value = "tcp://203.0.113.16:11010",
+            env = "PACTMESH_LAB_SEED",
+            default_value = "tcp://127.0.0.1:11010",
             help = "seed URL used by B/C"
         )]
         seed: String,
@@ -666,7 +667,8 @@ enum LabSubCommand {
         root_passphrase: String,
         #[arg(
             long,
-            default_value = "tcp://203.0.113.16:11010",
+            env = "PACTMESH_LAB_SEED",
+            default_value = "tcp://127.0.0.1:11010",
             help = "public seed URL exported into the invite"
         )]
         seed: String,
