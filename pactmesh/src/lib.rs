@@ -12,6 +12,8 @@ mod vpn_portal;
 
 pub mod common;
 pub mod connector;
+pub mod control;
+pub mod controller;
 pub mod core;
 pub mod dns;
 pub mod instance_manager;

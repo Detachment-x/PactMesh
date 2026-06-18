@@ -131,6 +131,21 @@ Each user owns a trust domain, signing certificates and configuration with a roo
 | `credential generate` / `revoke` / `list` | Issue / revoke / list temporary credentials; hand a short, auto-expiring join credential to a temporary collaborator |
 | `bootstrap export` / `import` | Export / import a trust-domain bootstrap bundle for offline distribution of public trust-domain info |
 
+### Local Web Controller (`controller`)
+
+A browser admin console like a ZeroTier controller, embedded in the pure-Rust single binary (no SPA / Node / build step). It runs on the CLI side and connects to the locally running daemon RPC:
+
+```bash
+pactmesh --rpc-portal 127.0.0.1:<rpc> controller --listen 127.0.0.1:15810
+# Prints a local URL carrying a one-shot token; loopback-only access
+```
+
+- **Read-only dashboards**: node / peers / routes / stats / connectors / mapped listeners / port forwards / VPN portal / ACL stats & conn-track / whitelist / credentials (refreshed every 2s).
+- **Config push** (daemon RPC, hot-reload, no root passphrase): connectors / mapped listeners / port forwards / routes / proxy networks / exit nodes / cross-domain relay grants / hostname / IPv4 / whitelist, plus a form-based **ACL editor**.
+- **Member governance** (root-signed, requires unlock): approve / reject joins, revoke / disable / enable, rename / hostname / capability, ACL tags, peer-hints.
+- **Bootstrap & high-risk governance**: create-domain (mints a new management passphrase), create-network, upgrade peer to root, arm local root-upgrade acceptance, export invite. High-risk actions (create-domain / upgrade-root) require a second confirmation in the UI.
+- **Security**: loopback-bind only; every request validates a token (Cookie `SameSite=Strict` / Bearer); the root passphrase is cached in controller memory via "unlock" with `zeroize` and a TTL that auto-clears, never persisted or logged; inline passphrases for create-domain / create-network are used-then-zeroized. Device self-enrollment (`bootstrap-self`) remains a one-time CLI step.
+
 ### Test and Operations Scaffolding (`lab`)
 
 Primarily for development and regression testing, not an end-user daily feature: `doctor` (environment check), `status` (summarize local files / RPC / peers / logs), `run`, `approve`, `peers explain/root/joiner`, `remote-check`, `remote-run` / `remote-fresh-run` (SSH-driven three-node regression; the latter runs from a fresh trust domain), `commands`, `disable` / `enable`. `wizard` and the old no-TTY fallback are deprecated in favor of `tui`.

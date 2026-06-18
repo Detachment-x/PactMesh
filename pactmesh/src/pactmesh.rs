@@ -177,6 +177,8 @@ enum SubCommand {
     Lab(LabArgs),
     #[command(about = "manage privateNetwork trust domains")]
     Trust(TrustArgs),
+    #[command(about = "serve the local web controller (browser admin console)")]
+    Controller(ControllerArgs),
     #[command(about = "interactive ratatui console (Node + Peers v0)")]
     Tui,
     #[command(about = t!("core_clap.generate_completions").to_string())]
@@ -209,6 +211,28 @@ impl From<&InstanceSelectArgs> for InstanceIdentifier {
             },
         }
     }
+}
+
+#[derive(Args, Debug)]
+struct ControllerArgs {
+    #[arg(
+        long,
+        default_value = "127.0.0.1:15810",
+        help = "address for the web controller to listen on (loopback only)"
+    )]
+    listen: SocketAddr,
+    #[arg(
+        long,
+        env = "PACTMESH_CONTROLLER_TOKEN",
+        help = "fixed access token (random per-run if omitted)"
+    )]
+    token: Option<String>,
+    #[arg(
+        long,
+        default_value = "900",
+        help = "root passphrase unlock TTL in seconds (reserved for later milestones)"
+    )]
+    unlock_ttl_secs: u64,
 }
 
 #[derive(Args, Debug)]
@@ -2164,6 +2188,19 @@ impl<'a> CommandHandler<'a> {
 
     async fn run_tui(&self) -> Result<(), Error> {
         pactmesh::tui::run(self.client.clone(), self.instance_selector.clone()).await
+    }
+
+    async fn run_controller(&self, args: &ControllerArgs) -> Result<(), Error> {
+        pactmesh::controller::run(
+            self.client.clone(),
+            self.instance_selector.clone(),
+            pactmesh::controller::ControllerConfig {
+                listen: args.listen,
+                token: args.token.clone(),
+                unlock_ttl_secs: args.unlock_ttl_secs,
+            },
+        )
+        .await
     }
 
     async fn handle_peer_list(&self) -> Result<(), Error> {
@@ -6043,14 +6080,7 @@ fn handle_trust_invite(
 fn parse_member_cert_fingerprint(
     value: &str,
 ) -> Result<pactmesh::trust::MemberCertFingerprint, Error> {
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(value)
-        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(value))
-        .with_context(|| format!("invalid fingerprint '{value}'"))?;
-    let bytes: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("fingerprint must decode to 32 bytes"))?;
-    Ok(pactmesh::trust::MemberCertFingerprint(bytes))
+    pactmesh::control::parse_member_cert_fingerprint(value)
 }
 
 fn revoke_reason_value(reason: RevokeReasonArg) -> RevocationReason {
@@ -6104,35 +6134,32 @@ fn handle_trust_revoke(
         anyhow::bail!("trust_domain_id does not match sk_root.age");
     }
 
-    let mut next_state = original_state.details.clone();
-    let next_version = next_state.version.saturating_add(1);
-    next_state.version = next_version;
-    next_state
-        .payload
-        .revoked_certs
-        .push(pactmesh::trust::RevokedCert {
-            cert_fingerprint: fingerprint,
-            revoked_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .context("system clock before unix epoch")?
-                .as_secs(),
-            reason_code: revoke_reason_value(reason),
-            reason_note: note,
-        });
-    let next_state = next_state.sign(&root);
-
-    let backup_path = network_dir.join(format!(
-        "network_state.v{}.cbor.pem",
-        original_state.details.version
-    ));
-    std::fs::write(&backup_path, original_pem)
-        .with_context(|| format!("failed to write {}", backup_path.display()))?;
-    std::fs::write(&state_path, next_state.to_pem())
-        .with_context(|| format!("failed to write {}", state_path.display()))?;
+    let revoked_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_secs();
+    let next_version = pactmesh::control::commit_signed(
+        &network_dir,
+        &state_path,
+        &original_pem,
+        &original_state,
+        &root,
+        |next, _root| {
+            next.payload.revoked_certs.push(pactmesh::trust::RevokedCert {
+                cert_fingerprint: fingerprint,
+                revoked_at,
+                reason_code: revoke_reason_value(reason),
+                reason_note: note,
+            });
+            Ok(())
+        },
+    )?;
 
     println!(
         "revoked {}: version {} -> {}",
-        fingerprint, original_state.details.version, next_version
+        fingerprint,
+        original_state.details.version,
+        next_version
     );
     Ok(())
 }
@@ -6144,51 +6171,11 @@ fn now_unix_secs() -> u64 {
         .as_secs()
 }
 
-fn read_member_cert_cache(
-    network_dir: &std::path::Path,
-) -> BTreeMap<pactmesh::trust::MemberCertFingerprint, pactmesh::trust::MemberCert> {
-    let mut certs = BTreeMap::new();
-    let Ok(entries) = std::fs::read_dir(network_dir) else {
-        return certs;
-    };
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("pem") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if let Ok(cert) = pactmesh::trust::MemberCert::from_pem(&text) {
-            certs.insert(cert.fingerprint(), cert);
-        }
-    }
-    certs
-}
-
 fn member_status(
     fingerprint: &pactmesh::trust::MemberCertFingerprint,
     state: &pactmesh::trust::SignedNetworkState,
 ) -> &'static str {
-    if state
-        .details
-        .payload
-        .revoked_certs
-        .iter()
-        .any(|revoked| revoked.cert_fingerprint == *fingerprint)
-    {
-        "revoked"
-    } else if state
-        .details
-        .payload
-        .disabled_certs
-        .iter()
-        .any(|disabled| disabled.cert_fingerprint == *fingerprint)
-    {
-        "disabled"
-    } else {
-        "active"
-    }
+    pactmesh::control::member_status(fingerprint, state)
 }
 
 fn include_member_status(include: &MemberIncludeArg, status: &str) -> bool {
@@ -6424,30 +6411,7 @@ fn collect_member_list_rows(
     state: &pactmesh::trust::SignedNetworkState,
     network_local_id: &str,
 ) -> Vec<pactmesh::trust::DeviceView> {
-    let certs = read_member_cert_bodies(network_dir);
-    let now = now_unix_secs();
-    let local_device_id = std::fs::read_to_string(network_dir.join("device_id"))
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    let has_root_key = network_dir
-        .parent()
-        .map(|domain_dir| domain_dir.join("sk_root.age").is_file())
-        .unwrap_or(false);
-    let mut rows = Vec::new();
-    for entry in &state.details.payload.member_cert_index {
-        let cert = certs.get(&entry.fingerprint);
-        rows.push(pactmesh::trust::view_for_member(
-            entry,
-            cert,
-            state,
-            network_local_id,
-            local_device_id.as_deref(),
-            has_root_key,
-            now,
-        ));
-    }
-    rows
+    pactmesh::control::list_member_views(network_dir, state, network_local_id)
 }
 
 fn handle_trust_show_device(
@@ -6605,14 +6569,7 @@ fn write_reissued_member_cert(
     network_dir: &std::path::Path,
     cert: &pactmesh::trust::MemberCert,
 ) -> Result<(), Error> {
-    let cert_dir = network_dir.join("member_certs");
-    std::fs::create_dir_all(&cert_dir)
-        .with_context(|| format!("failed to create {}", cert_dir.display()))?;
-    std::fs::write(
-        cert_dir.join(format!("{}.pem", cert.fingerprint())),
-        cert.to_pem(),
-    )
-    .context("failed to write reissued member cert")
+    pactmesh::control::write_reissued_member_cert(network_dir, cert)
 }
 
 fn handle_trust_capability_set(options: TrustCapabilitySetOptions) -> Result<(), Error> {
@@ -7232,24 +7189,7 @@ fn render_acl_ports(ports: Option<&[PortSpec]>) -> String {
 fn read_member_cert_bodies(
     network_dir: &std::path::Path,
 ) -> BTreeMap<pactmesh::trust::MemberCertFingerprint, pactmesh::trust::MemberCert> {
-    let mut certs = read_member_cert_cache(network_dir);
-    let cert_dir = network_dir.join("member_certs");
-    let Ok(entries) = std::fs::read_dir(cert_dir) else {
-        return certs;
-    };
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("pem") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if let Ok(cert) = pactmesh::trust::MemberCert::from_pem(&text) {
-            certs.insert(cert.fingerprint(), cert);
-        }
-    }
-    certs
+    pactmesh::control::read_member_cert_bodies(network_dir)
 }
 
 fn live_hostname_entries(
@@ -7260,18 +7200,7 @@ fn live_hostname_entries(
     pactmesh::trust::MemberCertFingerprint,
     Option<HostnameLabel>,
 )> {
-    state
-        .details
-        .payload
-        .member_cert_index
-        .iter()
-        .filter(|entry| entry.fingerprint != target)
-        .filter(|entry| member_status(&entry.fingerprint, state) != "revoked")
-        .filter_map(|entry| {
-            let cert = certs.get(&entry.fingerprint)?;
-            Some((entry.fingerprint, cert.details.hostname.clone()))
-        })
-        .collect()
+    pactmesh::control::live_hostname_entries(state, certs, target)
 }
 
 fn replace_member_index_entry(
@@ -7279,21 +7208,11 @@ fn replace_member_index_entry(
     old_fp: pactmesh::trust::MemberCertFingerprint,
     cert: &pactmesh::trust::MemberCert,
 ) {
-    state
-        .details
-        .payload
-        .member_cert_index
-        .retain(|entry| entry.fingerprint != old_fp);
-    state
-        .details
-        .payload
-        .member_cert_index
-        .push(MemberCertIndexEntry {
-            fingerprint: cert.fingerprint(),
-            device_label: cert.details.device_label.clone(),
-            issued_at: cert.details.not_before,
-            expires_at: cert.details.expires_at,
-        });
+    pactmesh::control::replace_member_index_entry(
+        &mut state.details.payload.member_cert_index,
+        old_fp,
+        cert,
+    );
 }
 
 fn handle_trust_hostname_update(
@@ -7423,37 +7342,21 @@ fn write_pre_signed_network_state(
     original_pem: String,
     next_state: &pactmesh::trust::SignedNetworkState,
 ) -> Result<u64, Error> {
-    let backup_path = network_dir.join(format!("network_state.v{}.cbor.pem", previous_version));
-    std::fs::write(&backup_path, original_pem)
-        .with_context(|| format!("failed to write {}", backup_path.display()))?;
-    std::fs::write(
-        network_dir.join("network_state.cbor.pem"),
-        next_state.to_pem(),
+    let state_path = network_dir.join("network_state.cbor.pem");
+    pactmesh::control::write_state_with_backup(
+        network_dir,
+        &state_path,
+        previous_version,
+        &original_pem,
+        next_state,
     )
-    .with_context(|| {
-        format!(
-            "failed to write {}",
-            network_dir.join("network_state.cbor.pem").display()
-        )
-    })?;
-    Ok(next_state.details.version)
 }
 
 fn load_network_state_for_edit(
     trust_domain_id: &str,
     network_local_id: &str,
 ) -> Result<(PathBuf, String, pactmesh::trust::SignedNetworkState), Error> {
-    let domain_dir = pnw_trust_domains_dir()?.join(trust_domain_id);
-    if !domain_dir.is_dir() {
-        anyhow::bail!("trust domain not found: {trust_domain_id}");
-    }
-    let network_dir = domain_dir.join("networks").join(network_local_id);
-    let state_path = network_dir.join("network_state.cbor.pem");
-    let original_pem = std::fs::read_to_string(&state_path)
-        .with_context(|| format!("failed to read {}", state_path.display()))?;
-    let original_state = pactmesh::trust::SignedNetworkState::from_pem(&original_pem)
-        .with_context(|| format!("failed to parse {}", state_path.display()))?;
-    Ok((network_dir, original_pem, original_state))
+    pactmesh::control::read_network_state(trust_domain_id, network_local_id)
 }
 
 fn unlock_domain_root(
@@ -9789,6 +9692,9 @@ async fn main() -> Result<(), Error> {
                     .await?;
             }
         },
+        SubCommand::Controller(controller_args) => {
+            handler.run_controller(&controller_args).await?
+        }
         SubCommand::Tui => handler.run_tui().await?,
 
         SubCommand::GenAutocomplete { shell } => {

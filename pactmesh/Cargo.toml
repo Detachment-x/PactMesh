@@ -191,6 +191,11 @@ qrcode = "0.14"
 
 base64 = "0.22"
 
+# for the local web controller (browser admin console)
+axum = "0.7"
+# zeroize cached root passphrase held in controller memory during an unlock session
+zeroize = "1.8"
+
 mimalloc = { version = "*", optional = true }
 
 # mips

@@ -131,6 +131,21 @@ PactMesh 当前处于 Alpha 阶段，面向私人和小团队使用。公网 VPS
 | `credential generate` / `revoke` / `list` | 签发 / 吊销 / 列出临时凭证；可发短期自动失效的入网凭据给临时协作者 |
 | `bootstrap export` / `import` | 导出 / 导入信任域引导包，离线传播公开信任域信息 |
 
+### 本地 Web 控制台（`controller`）
+
+像 ZeroTier 控制器一样的浏览器管理台，纯 Rust 单二进制内嵌（无 SPA / Node / 构建步骤）。挂在 CLI 侧，连接本机已运行的 daemon RPC：
+
+```bash
+pactmesh --rpc-portal 127.0.0.1:<rpc> controller --listen 127.0.0.1:15810
+# 启动打印带一次性 token 的本地 URL；仅 loopback 可访问
+```
+
+- **只读面板**：节点 / 节点对 / 路由 / 统计 / 连接器 / 映射监听 / 端口转发 / VPN 门户 / ACL 统计与连接跟踪 / 白名单 / 凭据（每 2 秒刷新）。
+- **配置下发**（daemon RPC，热重载，无需 root 口令）：连接器 / 映射监听 / 端口转发 / 路由 / 子网代理 / 出口节点 / 跨域中继授权 / 主机名 / IPv4 / 白名单，以及表单式 **ACL 编辑器**。
+- **成员治理**（root 签名，须先解锁）：审批 / 拒绝入网、吊销 / 禁用 / 启用、改名 / 主机名 / 能力、ACL tags、peer-hints。
+- **引导与高危治理**：建域（生成新管理口令）、建网、升级 peer 为 root、武装本机接受 root 升级、导出 invite。建域 / 升根等高危操作前端强制二次确认。
+- **安全**：仅绑定 loopback；每次请求校验 token（Cookie `SameSite=Strict` / Bearer）；root 口令经"解锁"在控制器内存中 `zeroize` 缓存、TTL 到期自动清除，绝不落盘 / 日志；建域 / 建网的内联口令即用即清。设备自举（`bootstrap-self`）仍是一次性 CLI 步骤。
+
 ### 测试与运维脚手架（`lab`）
 
 主要供开发与回归测试，非最终用户日常功能：`doctor`（环境体检）、`status`（汇总本地文件/RPC/peers/日志）、`run`、`approve`、`peers explain/root/joiner`、`remote-check`、`remote-run` / `remote-fresh-run`（SSH 驱动的三节点回归，后者从全新信任域跑通）、`commands`、`disable` / `enable`。`wizard` 及旧的 no-TTY fallback 已弃用，推荐 `tui`。

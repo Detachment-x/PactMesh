@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PactMesh 控制台</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header>
+    <h1>PactMesh <span class="sub">控制台</span></h1>
+    <span id="status" class="status warn">连接中…</span>
+  </header>
+  <div id="sessionbar">
+    <select id="net-select" title="信任域 / 网络"></select>
+    <input id="pass" type="password" placeholder="root 口令" autocomplete="off">
+    <button id="btn-unlock">解锁</button>
+    <button id="btn-lock">锁定</button>
+    <span id="sess-state" class="status warn">未解锁</span>
+    <span id="flash"></span>
+  </div>
+  <nav id="tabs">
+    <button data-tab="overview" class="active">概览</button>
+    <button data-tab="peers">节点</button>
+    <button data-tab="routes">路由</button>
+    <button data-tab="stats">统计</button>
+    <button data-tab="members">成员</button>
+    <button data-tab="pending">待批</button>
+    <button data-tab="config">配置</button>
+    <button data-tab="acl">ACL</button>
+    <button data-tab="credentials">凭据</button>
+    <button data-tab="trust">治理</button>
+  </nav>
+  <main>
+    <section id="tab-overview" class="tab active"><div class="panel" id="body-overview">加载中…</div></section>
+    <section id="tab-peers" class="tab"><div class="panel" id="body-peers">加载中…</div></section>
+    <section id="tab-routes" class="tab"><div class="panel" id="body-routes">加载中…</div></section>
+    <section id="tab-stats" class="tab"><div class="panel" id="body-stats">加载中…</div></section>
+    <section id="tab-members" class="tab"><div class="panel" id="body-members">选择网络…</div></section>
+    <section id="tab-pending" class="tab"><div class="panel" id="body-pending">选择网络…</div></section>
+    <section id="tab-config" class="tab"><div class="panel" id="body-config">加载中…</div></section>
+    <section id="tab-acl" class="tab"><div class="panel" id="body-acl">加载中…</div></section>
+    <section id="tab-credentials" class="tab"><div class="panel" id="body-credentials">加载中…</div></section>
+    <section id="tab-trust" class="tab"><div class="panel" id="body-trust">加载中…</div></section>
+  </main>
+  <footer>M4 · 治理控制台 · 读面板每 2 秒刷新 · 高危治理（建域/建网/升根）须解锁并二次确认 · 口令即用即清</footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -240,13 +240,14 @@ fn write_signed_state(
     state: &SignedNetworkState,
     original_pem: String,
 ) -> Result<u64> {
-    let previous_version = state.details.version.saturating_sub(1);
-    let backup = network_dir.join(format!("network_state.v{}.cbor.pem", previous_version));
-    std::fs::write(&backup, original_pem)
-        .with_context(|| format!("failed to write {}", backup.display()))?;
-    std::fs::write(network_dir.join("network_state.cbor.pem"), state.to_pem())
-        .with_context(|| "failed to write network_state.cbor.pem")?;
-    Ok(state.details.version)
+    let state_path = network_dir.join("network_state.cbor.pem");
+    crate::control::write_state_with_backup(
+        network_dir,
+        &state_path,
+        state.details.version.saturating_sub(1),
+        &original_pem,
+        state,
+    )
 }
 
 fn sign_next_state(state: &SignedNetworkState, root: &TrustDomainRoot) -> SignedNetworkState {
