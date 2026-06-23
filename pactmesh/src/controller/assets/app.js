@@ -629,7 +629,9 @@ async function loadTrust() {
       <button type="submit">应用</button></form>
     <h3>导出 invite（供他机加入；作用于顶部所选网络）</h3>
     <form class="cfgform" id="t-invite">
-      <input data-f="seeds" placeholder="seed url(逗号分隔)">
+      <label class="chk"><input type="checkbox" data-f="include_peer_hints" checked> 自动包含 peer-hints</label>
+      <label class="chk"><input type="checkbox" data-f="include_local_listeners" checked> 自动包含本机监听地址</label>
+      <input data-f="seeds" placeholder="额外 seed url(可选，逗号分隔)">
       <select data-f="format"><option value="url">url</option><option value="file">file</option></select>
       <button type="submit">导出</button></form>
     <div id="t-invite-result"></div>`;
@@ -730,11 +732,17 @@ async function trustSubmit(form) {
       const net = selectedNet();
       if (!net) { flash("请在顶部选择网络", true); return; }
       const seeds = val("seeds").split(",").map((x) => x.trim()).filter(Boolean);
-      if (!seeds.length) { flash("至少一个 seed", true); return; }
-      const r = await postJson("/api/trust/invite", { trust_domain_id: net.td, network_local_id: net.nid, seeds, format: val("format") });
+      const peerHints = g("include_peer_hints").checked, localL = g("include_local_listeners").checked;
+      if (!seeds.length && !peerHints && !localL) { flash("至少勾选一个来源或手填 seed", true); return; }
+      const r = await postJson("/api/trust/invite", {
+        trust_domain_id: net.td, network_local_id: net.nid, seeds,
+        include_peer_hints: peerHints, include_local_listeners: localL, format: val("format"),
+      });
       if (r.ok) {
+        const d = r.data || {};
+        const note = `${d.seed_count} 个落脚点` + (d.omitted ? `（URL 超长，省略 ${d.omitted} 个低优先级）` : "");
         document.getElementById("t-invite-result").innerHTML =
-          `<textarea class="invite" readonly rows="4">${esc(r.data && r.data.invite)}</textarea>`;
+          `<div class="muted">${note}</div><textarea class="invite" readonly rows="4">${esc(d.invite)}</textarea>`;
         flash("invite 已导出", false);
       } else flash("导出失败：" + errText(r), true);
       break;

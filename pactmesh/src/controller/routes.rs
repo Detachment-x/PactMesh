@@ -35,7 +35,7 @@ use crate::proto::api::instance::{
     ListCredentialsResponse, ListMappedListenerRequest, ListMappedListenerResponse,
     ListPeerRequest, ListPeerResponse, ListPortForwardRequest, ListPortForwardResponse,
     ListRouteRequest, ListRouteResponse, ListTcpProxyEntryRequest, ListTcpProxyEntryResponse,
-    MappedListenerManageRpc, MappedListenerManageRpcClientFactory, PeerManageRpc,
+    MappedListenerManageRpc, MappedListenerManageRpcClientFactory, NodeInfo, PeerManageRpc,
     PeerManageRpcClientFactory, PortForwardManageRpc, PortForwardManageRpcClientFactory,
     RevokeCredentialRequest, ShowNodeInfoRequest, ShowNodeInfoResponse, StatsRpc,
     StatsRpcClientFactory, TcpProxyRpc, TcpProxyRpcClientFactory, VpnPortalRpc,
@@ -1643,7 +1643,12 @@ fn normalize_capabilities(mut caps: Vec<String>) -> Vec<String> {
 struct InviteReq {
     trust_domain_id: String,
     network_local_id: String,
+    #[serde(default)]
     seeds: Vec<String>,
+    #[serde(default)]
+    include_peer_hints: bool,
+    #[serde(default)]
+    include_local_listeners: bool,
     #[serde(default = "default_invite_format")]
     format: String,
 }
@@ -1652,25 +1657,132 @@ fn default_invite_format() -> String {
     "url".to_string()
 }
 
+/// 从本机 `NodeInfo` 推导可达入网落脚点（按优先级：public v4/v6 → 接口 v4/v6）。
+/// 仅取 listeners 的 (scheme∈{tcp,udp}, port)，与可达 host 交叉；剔除 ring/回环/通配。
+fn derive_local_seeds(node_info: &NodeInfo) -> Vec<url::Url> {
+    use std::net::IpAddr;
+
+    let ip_list = node_info.ip_list.clone().unwrap_or_default();
+    let mut hosts: Vec<String> = Vec::new();
+    let mut push_v4 = |s: String| {
+        if let Ok(IpAddr::V4(ip)) = s.parse::<IpAddr>() {
+            if !ip.is_loopback() && !ip.is_unspecified() {
+                hosts.push(ip.to_string());
+            }
+        }
+    };
+    if let Some(ip) = ip_list.public_ipv4.as_ref() {
+        push_v4(ip.to_string());
+    }
+    let mut v6_hosts: Vec<String> = Vec::new();
+    let mut push_v6 = |s: String| {
+        if let Ok(IpAddr::V6(ip)) = s.parse::<IpAddr>() {
+            if !ip.is_loopback() && !ip.is_unspecified() {
+                v6_hosts.push(format!("[{ip}]"));
+            }
+        }
+    };
+    if let Some(ip) = ip_list.public_ipv6.as_ref() {
+        push_v6(ip.to_string());
+    }
+    for ip in &ip_list.interface_ipv4s {
+        push_v4(ip.to_string());
+    }
+    for ip in &ip_list.interface_ipv6s {
+        push_v6(ip.to_string());
+    }
+    // 优先级：public v4 → public v6 → 接口 v4 → 接口 v6。push_v4 收 public 与接口 v4，
+    // 这里把 v6 接在 v4 之后即得最终序（public v6 已先于接口 v6 入 v6_hosts）。
+    hosts.extend(v6_hosts);
+
+    let mut ports: Vec<(String, u16)> = Vec::new();
+    for raw in &node_info.listeners {
+        let Ok(url) = url::Url::parse(raw) else { continue };
+        let scheme = url.scheme();
+        if scheme != "tcp" && scheme != "udp" {
+            continue;
+        }
+        if let Some(port) = url.port() {
+            let pair = (scheme.to_owned(), port);
+            if !ports.contains(&pair) {
+                ports.push(pair);
+            }
+        }
+    }
+
+    let mut seeds = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for host in &hosts {
+        for (scheme, port) in &ports {
+            if let Ok(url) = url::Url::parse(&format!("{scheme}://{host}:{port}")) {
+                if seen.insert(url.as_str().to_owned()) {
+                    seeds.push(url);
+                }
+            }
+        }
+    }
+    seeds
+}
+
 /// 导出入网引导 invite（url|file）。只读，不解锁。
-async fn api_trust_invite(Json(req): Json<InviteReq>) -> Response {
-    let result = (|| {
-        let seeds = req
-            .seeds
-            .iter()
-            .map(|s| {
-                url::Url::parse(s.trim()).map_err(|e| anyhow::anyhow!("invalid seed '{s}': {e}"))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        control::export_invite(
-            &req.trust_domain_id,
-            &req.network_local_id,
-            seeds,
-            &req.format,
-        )
-    })();
-    match result {
-        Ok(out) => json_response(StatusCode::OK, serde_json::json!({ "invite": out })),
+/// 落脚点 = 手填 ∪（可选）未过期 peer-hints ∪（可选）本机监听地址，按优先级去重。
+async fn api_trust_invite(State(s): State<AppState>, Json(req): Json<InviteReq>) -> Response {
+    let manual = req
+        .seeds
+        .iter()
+        .map(|seed| {
+            url::Url::parse(seed.trim()).map_err(|e| anyhow::anyhow!("invalid seed '{seed}': {e}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>();
+    let manual = match manual {
+        Ok(seeds) => seeds,
+        Err(e) => return json_error(StatusCode::BAD_GATEWAY, e),
+    };
+
+    let local = if req.include_local_listeners {
+        match fetch_node_info(&s).await {
+            Ok(node_info) => derive_local_seeds(&node_info),
+            Err(e) => return json_error(StatusCode::BAD_GATEWAY, e),
+        }
+    } else {
+        Vec::new()
+    };
+
+    match control::export_invite(
+        &req.trust_domain_id,
+        &req.network_local_id,
+        manual,
+        local,
+        req.include_peer_hints,
+        &req.format,
+    ) {
+        Ok(out) => json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "invite": out.content,
+                "seed_count": out.seed_count,
+                "omitted": out.omitted,
+            }),
+        ),
         Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
     }
+}
+
+/// 拉取控制器绑定实例的 `NodeInfo`（用于推导本机监听地址）。
+async fn fetch_node_info(s: &AppState) -> anyhow::Result<NodeInfo> {
+    let client = {
+        let mut g = s.client.lock().await;
+        g.scoped_client::<PeerManageRpcClientFactory<BaseController>>(String::new())
+            .await?
+    };
+    let resp = client
+        .show_node_info(
+            BaseController::default(),
+            ShowNodeInfoRequest {
+                instance: Some(s.instance.clone()),
+            },
+        )
+        .await?;
+    resp.node_info
+        .ok_or_else(|| anyhow::anyhow!("daemon returned no node_info"))
 }

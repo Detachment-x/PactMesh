@@ -12,9 +12,10 @@ use anyhow::{Context, Result};
 use crate::common::config_dir::pnw_trust_domains_dir;
 use crate::trust::{
     from_cbor, to_canonical_cbor, validate_for_signing, view_for_member, wrap_armored, AclPolicy,
-    Action, Cidr, DeviceFingerprint, DeviceView, HostnameLabel, MemberCert, MemberCertFingerprint,
-    MemberCertIndexEntry, NetworkBootstrap, NetworkLocalId, NetworkStatePayload, SignedNetworkState,
-    TrustDomainRoot, UnsignedNetworkState, ACL_SCHEMA_VERSION,
+    Action, BootstrapError, Cidr, DeviceFingerprint, DeviceView, HostnameLabel, MemberCert,
+    MemberCertFingerprint, MemberCertIndexEntry, NetworkBootstrap, NetworkLocalId,
+    NetworkStatePayload, SignedNetworkState, TrustDomainRoot, UnsignedNetworkState,
+    ACL_SCHEMA_VERSION,
 };
 use url::Url;
 
@@ -562,16 +563,28 @@ pub fn cert_to_device_fingerprint(fp: MemberCertFingerprint) -> DeviceFingerprin
     DeviceFingerprint(fp.0)
 }
 
-/// 导出入网引导（invite）：`format` = url | file。只读，不解锁。
+/// invite 导出结果：`content`=URL 或 PEM；`seed_count`=最终入网落脚点数；
+/// `omitted`=URL 形态因超长而从尾部（低优先级）丢弃的落脚点数（file/pem 恒为 0）。
+pub struct InviteExport {
+    pub content: String,
+    pub seed_count: usize,
+    pub omitted: usize,
+}
+
+/// 导出入网引导（invite）。只读，不解锁。
+///
+/// 落脚点按优先级合并去重：`manual_seeds`（手填）> 未过期 peer-hints（当
+/// `include_peer_hints`）> `local_seeds`（本机可达地址，调用方已按 public→接口序排好）。
+/// `format` = url | file/pem；URL 超长时从尾部逐个丢弃低优先级落脚点直至可容，
+/// file/pem 全量不截断。
 pub fn export_invite(
     trust_domain_id: &str,
     network_local_id: &str,
-    seeds: Vec<Url>,
+    manual_seeds: Vec<Url>,
+    local_seeds: Vec<Url>,
+    include_peer_hints: bool,
     format: &str,
-) -> Result<String> {
-    if seeds.is_empty() {
-        anyhow::bail!("at least one seed is required");
-    }
+) -> Result<InviteExport> {
     let domain_dir = pnw_trust_domains_dir()?.join(trust_domain_id);
     if !domain_dir.is_dir() {
         anyhow::bail!("trust domain not found: {trust_domain_id}");
@@ -583,17 +596,68 @@ pub fn export_invite(
     if state.details.network_local_id.to_string() != network_local_id {
         anyhow::bail!("network_local_id does not match network_state");
     }
-    let bootstrap = NetworkBootstrap::export_from_domain_dir(
-        &domain_dir,
-        state.details.network_local_id.clone(),
-        seeds,
-        domain_label(&domain_dir),
-        Some(network_local_id.to_string()),
-        None,
-    )?;
+
+    let mut ordered: Vec<Url> = manual_seeds;
+    if include_peer_hints {
+        let now = now_unix_secs();
+        for hint in &state.details.payload.peer_hints {
+            if hint.expires_at.is_some_and(|exp| exp <= now) {
+                continue;
+            }
+            if let Ok(url) = Url::parse(hint.url.trim()) {
+                ordered.push(url);
+            }
+        }
+    }
+    ordered.extend(local_seeds);
+
+    let mut seen = std::collections::HashSet::new();
+    ordered.retain(|url| seen.insert(url.as_str().to_owned()));
+
+    if ordered.is_empty() {
+        anyhow::bail!("no seed available (manual, peer-hints, or local listeners all empty)");
+    }
+
+    let build = |seeds: Vec<Url>| -> Result<NetworkBootstrap, BootstrapError> {
+        NetworkBootstrap::export_from_domain_dir(
+            &domain_dir,
+            state.details.network_local_id.clone(),
+            seeds,
+            domain_label(&domain_dir),
+            Some(network_local_id.to_string()),
+            None,
+        )
+    };
+
     match format {
-        "url" => Ok(bootstrap.to_url()?.to_string()),
-        "file" | "pem" => Ok(bootstrap.to_pem()),
+        "url" => {
+            let mut seeds = ordered;
+            let mut omitted = 0;
+            loop {
+                match build(seeds.clone())?.to_url() {
+                    Ok(url) => {
+                        return Ok(InviteExport {
+                            content: url.to_string(),
+                            seed_count: seeds.len(),
+                            omitted,
+                        });
+                    }
+                    Err(BootstrapError::TooLongForQr(_)) if seeds.len() > 1 => {
+                        seeds.pop();
+                        omitted += 1;
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
+        "file" | "pem" => {
+            let seed_count = ordered.len();
+            Ok(InviteExport {
+                content: build(ordered)?.to_pem(),
+                seed_count,
+                omitted: 0,
+            })
+        }
         other => anyhow::bail!("invalid format '{other}' (url|file)"),
     }
 }

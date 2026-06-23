@@ -67,27 +67,8 @@ impl NetworkBootstrap {
 
         let mut url = Url::parse(&format!("{BOOTSTRAP_URL_SCHEME}://{BOOTSTRAP_URL_HOST}"))
             .expect("hard-coded bootstrap base URL must be valid");
-        {
-            let mut pairs = url.query_pairs_mut();
-            pairs.append_pair("td", &URL_SAFE_NO_PAD.encode(self.trust_domain_id.0));
-            pairs.append_pair("pk", &URL_SAFE_NO_PAD.encode(self.pk_root.as_bytes()));
-            pairs.append_pair("n", self.network_local_id.as_str());
-            if !self.bootstrap_seeds.is_empty() {
-                let seeds = to_canonical_cbor(&UrlSeedList {
-                    items: &self.bootstrap_seeds,
-                });
-                pairs.append_pair("ep", &URL_SAFE_NO_PAD.encode(seeds));
-            }
-            if let Some(label) = self.trust_domain_label.as_ref() {
-                pairs.append_pair("label", label);
-            }
-            if let Some(network_name) = self.network_name.as_ref() {
-                pairs.append_pair("name", network_name);
-            }
-            if let Some(description) = self.description.as_ref() {
-                pairs.append_pair("desc", description);
-            }
-        }
+        url.query_pairs_mut()
+            .append_pair("d", &URL_SAFE_NO_PAD.encode(to_canonical_cbor(self)));
 
         if url.as_str().len() >= MAX_URL_LEN {
             return Err(BootstrapError::TooLongForQr(url.as_str().len()));
@@ -102,6 +83,19 @@ impl NetworkBootstrap {
             ));
         }
 
+        // Opaque form: single `d` param = URL-safe base64 of the canonical CBOR
+        // (hides trust-domain id, root key, network name and seeds from plain view).
+        if let Some((_, value)) = url.query_pairs().find(|(key, _)| key == "d") {
+            let bytes = URL_SAFE_NO_PAD
+                .decode(value.as_ref())
+                .map_err(|err| BootstrapError::InvalidUrl(format!("invalid d: {err}")))?;
+            let bootstrap: Self =
+                from_cbor(&bytes).map_err(|err| BootstrapError::Cbor(err.to_string()))?;
+            bootstrap.verify_self_consistency()?;
+            return Ok(bootstrap);
+        }
+
+        // Legacy form: td/pk/n/ep/label/name/desc plaintext params (back-compat).
         let mut td = None;
         let mut pk = None;
         let mut network_local_id = None;
@@ -196,13 +190,6 @@ pub fn bootstrap_to_qr_svg(bootstrap: &NetworkBootstrap) -> Result<String, Boots
         .dark_color(qrcode::render::svg::Color("#111111"))
         .light_color(qrcode::render::svg::Color("#ffffff"))
         .build())
-}
-
-#[derive(minicbor::Encode)]
-struct UrlSeedList<'a> {
-    #[n(0)]
-    #[cbor(with = "url_slice_cbor")]
-    items: &'a [Url],
 }
 
 #[derive(minicbor::Decode)]
@@ -335,4 +322,48 @@ pub enum BootstrapError {
     Qr(String),
     #[error("pk_root.pem already exists and does not match the imported bootstrap")]
     PkRootAlreadyExistsAndMismatches,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    fn sample(seeds: Vec<&str>) -> NetworkBootstrap {
+        let pk_root = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        NetworkBootstrap {
+            trust_domain_id: TrustDomainId::from_root_pubkey(&pk_root),
+            pk_root,
+            network_local_id: NetworkLocalId::try_from_str("secret-net").unwrap(),
+            bootstrap_seeds: seeds.into_iter().map(|s| Url::parse(s).unwrap()).collect(),
+            trust_domain_label: Some("dom".to_owned()),
+            network_name: Some("secret-net".to_owned()),
+            description: None,
+        }
+    }
+
+    #[test]
+    fn opaque_url_roundtrips_and_hides_name() {
+        let b = sample(vec!["tcp://10.0.0.1:11010", "tcp://[::1]:11010"]);
+        let url = b.to_url().unwrap();
+        // network name / id must not appear in clear text in the URL.
+        assert!(!url.as_str().contains("secret-net"));
+        // only the opaque `d` param is present.
+        assert!(url.query_pairs().all(|(k, _)| k == "d"));
+        assert_eq!(NetworkBootstrap::from_url(&url).unwrap(), b);
+    }
+
+    #[test]
+    fn legacy_url_still_parses() {
+        let b = sample(vec![]);
+        let mut url = Url::parse(&format!("{BOOTSTRAP_URL_SCHEME}://{BOOTSTRAP_URL_HOST}")).unwrap();
+        url.query_pairs_mut()
+            .append_pair("td", &URL_SAFE_NO_PAD.encode(b.trust_domain_id.0))
+            .append_pair("pk", &URL_SAFE_NO_PAD.encode(b.pk_root.as_bytes()))
+            .append_pair("n", b.network_local_id.as_str())
+            .append_pair("name", "secret-net");
+        let parsed = NetworkBootstrap::from_url(&url).unwrap();
+        assert_eq!(parsed.network_local_id, b.network_local_id);
+        assert_eq!(parsed.network_name.as_deref(), Some("secret-net"));
+    }
 }

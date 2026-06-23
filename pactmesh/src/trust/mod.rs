@@ -63,7 +63,7 @@ pub use lan_discovery::{
 };
 pub use lan_recovery::{LanRecoveryError, apply_lan_recovered_network_state};
 pub use member_cert::{Capabilities, MemberCert, UnsignedMemberCert};
-pub use network_bootstrap::NetworkBootstrap;
+pub use network_bootstrap::{BootstrapError, NetworkBootstrap};
 pub use network_state::{
     MemberCertIndexEntry, NetworkStatePayload, PeerHint, SignedNetworkState, UnsignedNetworkState,
 };
