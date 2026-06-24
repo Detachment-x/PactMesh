@@ -150,7 +150,7 @@ function UpgradeRoot() {
   return (
     <div class="adv-op">
       <div class="adv-op-title">升级节点为主控</div>
-      <p class="muted">把当前网络中的某个节点提升为主控（共享 root 私钥）。对方需先在其本机预授权。节点号见「连通」页。</p>
+      <p class="muted">把当前网络中的某个节点提升为主控（共享 root 私钥）。对方需先在其本机预授权。节点号见「设备」页节点详情。</p>
       <label class="form-row">{field('节点号', 'peer id')}
         <input class="field field-sm mono" type="number" value={peerId} placeholder="1234567" onInput={(e) => setPeerId(e.currentTarget.value)} /></label>
       <button class="btn btn-danger" disabled={busy || !valid} onClick={() => setConfirm(true)}>升级为主控</button>

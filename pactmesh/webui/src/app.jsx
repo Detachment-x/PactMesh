@@ -3,7 +3,6 @@ import { useApp } from './store.jsx'
 import { Overview } from './pages/overview.jsx'
 import { Devices } from './pages/devices.jsx'
 import { Pending } from './pages/pending.jsx'
-import { Mesh } from './pages/mesh.jsx'
 import { Diagnostics } from './pages/diagnostics.jsx'
 import { Policy } from './pages/policy.jsx'
 import { Groups } from './pages/groups.jsx'
@@ -19,7 +18,6 @@ const NAV = [
     items: [
       { id: 'devices', label: '设备' },
       { id: 'pending', label: '待批' },
-      { id: 'mesh', label: '连通' },
     ],
   },
   {
@@ -191,8 +189,6 @@ function Page({ id, title, onNavigate }) {
         <Devices />
       ) : id === 'pending' ? (
         <Pending />
-      ) : id === 'mesh' ? (
-        <Mesh />
       ) : id === 'diagnostics' ? (
         <Diagnostics />
       ) : id === 'policy' ? (

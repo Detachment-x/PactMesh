@@ -487,6 +487,17 @@ body {
 .conn-meta { font-size: 12px; margin-top: 6px; }
 .conn-addr { font-size: 11.5px; margin-top: 4px; word-break: break-all; }
 
+/* ---------- D8：设备/连通融合 ---------- */
+.chips-inline { display: inline-flex; gap: 4px; margin-left: 4px; }
+.chips-inline .chip { font-size: 10.5px; padding: 0 6px; }
+.row-temp td { background: rgba(15, 181, 166, .03); }
+.adv-fold { margin-top: 2px; }
+.adv-fold > summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted); list-style: none; user-select: none; }
+.adv-fold > summary::-webkit-details-marker { display: none; }
+.adv-fold > summary::before { content: '▸ '; }
+.adv-fold[open] > summary::before { content: '▾ '; }
+.adv-fold > .form-row { margin-top: 10px; }
+
 /* ---------- D4：诊断 ---------- */
 .card-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .field-inline { height: 30px; width: 180px; font-size: 12.5px; }

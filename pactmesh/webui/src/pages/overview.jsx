@@ -3,6 +3,7 @@ import { getJson } from '../api.js'
 import { usePoll } from '../hooks.js'
 import { useApp } from '../store.jsx'
 import { Skeleton, EmptyState, CopyId, Dot } from '../ui.jsx'
+import { ipList as fmtIpList } from '../format.js'
 import { InviteModal } from '../invite.jsx'
 
 export function Overview({ onNavigate }) {
@@ -67,7 +68,7 @@ export function Overview({ onNavigate }) {
           value={daemonDown ? '—' : onlineCount}
           loading={peers.loading && !daemonDown}
           sub={daemonDown ? 'daemon 未连接' : undefined}
-          onClick={() => onNavigate?.('mesh')}
+          onClick={() => onNavigate?.('devices')}
         />
         <Metric
           label="待批"
@@ -96,6 +97,18 @@ export function Overview({ onNavigate }) {
             <Row k="节点号" v={info.peer_id} mono />
             <Row k="实例 ID" v={<CopyId value={info.inst_id} chars={12} />} />
             <Row k="监听" v={(info.listeners || []).join('  ') || '—'} mono />
+            {(() => {
+              const il = fmtIpList(info.ip_list)
+              if (!il) return null
+              const v4 = il.v4.map((x) => x.ip + (x.pub ? '（公网）' : ''))
+              const v6 = il.v6.map((x) => x.ip + (x.pub ? '（公网）' : ''))
+              return (
+                <>
+                  {v4.length > 0 && <Row k="物理 IPv4" v={v4.join('  ')} mono />}
+                  {v6.length > 0 && <Row k="物理 IPv6" v={v6.join('  ')} mono />}
+                </>
+              )
+            })()}
           </dl>
         ) : (
           <span class="muted">无节点信息</span>

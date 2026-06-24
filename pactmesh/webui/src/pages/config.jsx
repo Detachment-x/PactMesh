@@ -1,6 +1,8 @@
 import { useState } from 'preact/hooks'
 import { api } from '../api.js'
-import { Toggle, useToast } from '../ui.jsx'
+import { usePoll } from '../hooks.js'
+import { Toggle, Dot, useToast } from '../ui.jsx'
+import { dnsZone } from '../format.js'
 
 // 配置下发动作（人话下拉，对齐后端 add|remove|clear）。
 const ACTION_OPTS = [['add', '添加'], ['remove', '移除'], ['clear', '清空']]
@@ -157,13 +159,43 @@ function PatchCard({ form }) {
   )
 }
 
+// MagicDNS 只读：启用状态取自 NetworkConfig.enable_magic_dns；网络域取自 NodeInfo.config（TOML）。
+// 二者均需 daemon 运行；启用/停用不可经控制器热切（InstanceConfigPatch 无 DNS 字段），故仅展示。
+function DnsCard() {
+  const cfg = usePoll(api.config, [], 8000)
+  const node = usePoll(api.node, [], 8000)
+  const down = !!cfg.error || !!node.error
+  const enabled = cfg.data?.enable_magic_dns
+  const zone = dnsZone(node.data?.node_info?.config)
+  const myHost = node.data?.node_info?.hostname
+
+  return (
+    <div class="card cfg-card">
+      <div class="card-title">MagicDNS<span class="badge-role role-cred-soft">只读</span></div>
+      <p class="muted cfg-desc">用主机名访问网络内设备（FQDN = 主机名.网络域）。此处仅展示状态；启用/停用需在启动 daemon 时配置。</p>
+      {down ? (
+        <div class="card-degrade"><Dot kind="err" label="daemon 未连接" /><span class="muted">启动 daemon 后显示 MagicDNS 状态。</span></div>
+      ) : (
+        <dl class="kv">
+          <dt>状态</dt>
+          <dd>{enabled == null ? '—' : <Dot kind={enabled ? 'ok' : 'muted'} label={enabled ? '已启用' : '未启用'} />}</dd>
+          <dt>网络域</dt><dd class="mono">{zone || '—'}</dd>
+          {zone && myHost && (<><dt>本机 FQDN</dt><dd class="mono">{myHost}.{zone}</dd></>)}
+        </dl>
+      )}
+      <p class="muted cfg-desc">启用方法：daemon 启动时设置 <code>accept_dns = true</code> 与 <code>tld_dns_zone</code>（或建实例时开启 MagicDNS）。</p>
+    </div>
+  )
+}
+
 export function Config() {
   return (
     <>
       <div class="card card-degrade cfg-note">
-        <span class="muted">配置经本机 daemon 热重载下发，<strong>需 daemon 运行中</strong>；下发后在「连通 / 诊断」查看生效结果。</span>
+        <span class="muted">配置经本机 daemon 热重载下发，<strong>需 daemon 运行中</strong>；下发后在「设备 / 诊断」查看生效结果。</span>
       </div>
       {FORMS.map((f) => <PatchCard key={f.key} form={f} />)}
+      <DnsCard />
     </>
   )
 }
