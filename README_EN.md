@@ -146,6 +146,8 @@ pactmesh --rpc-portal 127.0.0.1:<rpc> controller --listen 127.0.0.1:15810
 - **Bootstrap & high-risk governance**: create-domain (mints a new management passphrase), create-network, upgrade peer to root, arm local root-upgrade acceptance, export invite. High-risk actions (create-domain / upgrade-root) require a second confirmation in the UI.
 - **Security**: loopback-bind only; every request validates a token (Cookie `SameSite=Strict` / Bearer); the root passphrase is cached in controller memory via "unlock" with `zeroize` and a TTL that auto-clears, never persisted or logged; inline passphrases for create-domain / create-network are used-then-zeroized. Device self-enrollment (`bootstrap-self`) remains a one-time CLI step.
 
+The **Devices** view fuses identity and runtime into one table — the member roster is left-joined to live routes / peers by hostname, so a single row shows online status, overlay IPv4/IPv6, direct/relay path + tunnel type, and latency. The management drawer adds physical IPs (`ip_list`, public / interface v4·v6), per-connection remote addresses, and a read-only MagicDNS FQDN.
+
 ### Test and Operations Scaffolding (`lab`)
 
 Primarily for development and regression testing, not an end-user daily feature: `doctor` (environment check), `status` (summarize local files / RPC / peers / logs), `run`, `approve`, `peers explain/root/joiner`, `remote-check`, `remote-run` / `remote-fresh-run` (SSH-driven three-node regression; the latter runs from a fresh trust domain), `commands`, `disable` / `enable`. `wizard` and the old no-TTY fallback are deprecated in favor of `tui`.

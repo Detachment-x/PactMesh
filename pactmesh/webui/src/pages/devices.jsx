@@ -49,12 +49,13 @@ function connSummary(conns) {
 }
 
 // 把 peers(my_info + conns) 与 routes 归一为「运行时条目」，按 hostname 建索引（唯一 join 键）。
-function runtimeIndex(peers, routes) {
+// 本机运行时优先取 peers.my_info；孤立节点（无对端）时 daemon 返回 my_info=null，回退到 /api/node 的 node_info。
+function runtimeIndex(peers, routes, selfNode) {
   const connByPeer = {}
   for (const p of peers?.peer_infos || []) connByPeer[p.peer_id] = p.conns
   const byHost = {}
   const entries = []
-  const my = peers?.my_info
+  const my = peers?.my_info || selfNode || null
   if (my) {
     const e = {
       peer_id: my.peer_id, hostname: my.hostname || '', isSelf: true,
@@ -94,6 +95,7 @@ export function Devices() {
   )
   const peers = usePoll(api.peers, [], 4000)
   const routes = usePoll(api.routes, [], 4000)
+  const node = usePoll(api.node, [], 4000)
 
   if (!network) {
     return <EmptyState icon="◍" title="尚未选择网络" hint="在顶栏选择一个网络后查看其设备。" />
@@ -101,8 +103,12 @@ export function Devices() {
   if (members.error) return <ErrorState error={members.error} onRetry={members.refresh} />
 
   const list = Array.isArray(members.data) ? members.data : []
-  const runtimeDown = !!peers.error || !!routes.error
-  const rt = runtimeIndex(runtimeDown ? null : peers.data, runtimeDown ? null : routes.data)
+  const runtimeDown = !!peers.error && !!routes.error && !!node.error
+  const rt = runtimeIndex(
+    runtimeDown ? null : peers.data,
+    runtimeDown ? null : routes.data,
+    runtimeDown ? null : node.data?.node_info,
+  )
   const zone = dnsZone(rt.my?.config)
 
   // 名册行：每台成员按 hostname 左连运行时（无主机名/未上线 → rt=null）。
@@ -122,7 +128,7 @@ export function Devices() {
     sel?.kind === 'member' ? memberRows.find((r) => r.dev.device_id === sel.id) :
     sel?.kind === 'temp' ? tempRows.find((r) => r.rt.peer_id === sel.id) : null
 
-  const refreshAll = () => { members.refresh(); peers.refresh(); routes.refresh() }
+  const refreshAll = () => { members.refresh(); peers.refresh(); routes.refresh(); node.refresh() }
 
   return (
     <>
