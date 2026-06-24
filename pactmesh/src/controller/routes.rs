@@ -48,15 +48,11 @@ use crate::trust::{
     TagName, UnsignedMemberCert,
 };
 
-const INDEX_HTML: &str = include_str!("assets/index.html");
-const APP_CSS: &str = include_str!("assets/app.css");
-const APP_JS: &str = include_str!("assets/app.js");
+const INDEX_HTML: &str = include_str!("assets/dist/index.html");
 
 pub(super) fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
-        .route("/static/app.css", get(asset_css))
-        .route("/static/app.js", get(asset_js))
         .route("/api/session", get(api_session))
         .route("/api/unlock", post(api_unlock))
         .route("/api/lock", post(api_lock))
@@ -161,19 +157,6 @@ async fn index(State(s): State<AppState>) -> Response {
         "text/html; charset=utf-8",
         Some(cookie),
         Body::from(INDEX_HTML),
-    )
-}
-
-async fn asset_css() -> Response {
-    build(StatusCode::OK, "text/css; charset=utf-8", None, Body::from(APP_CSS))
-}
-
-async fn asset_js() -> Response {
-    build(
-        StatusCode::OK,
-        "application/javascript; charset=utf-8",
-        None,
-        Body::from(APP_JS),
     )
 }
 
