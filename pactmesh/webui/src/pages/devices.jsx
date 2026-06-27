@@ -340,7 +340,7 @@ function TempDrawer({ rt, zone, onClose }) {
     >
       {zone && rt.hostname && (
         <section class="drawer-sec">
-          <div class="form-row"><label class="field-label">网络域名</label><span class="mono">{rt.hostname}.{zone}</span></div>
+          <div class="form-row"><label class="field-label">网络域名</label><div class="mono">{rt.hostname}.{zone}</div></div>
         </section>
       )}
       <RuntimeSection rt={rt} />
@@ -439,7 +439,7 @@ function DeviceDrawer({ device, members, rt, zone, onClose, onChanged }) {
         {zone && device.hostname && (
           <div class="form-row">
             <label class="field-label">网络域名<small>（MagicDNS）</small></label>
-            <span class="mono">{device.hostname}.{zone}</span>
+            <div class="mono">{device.hostname}.{zone}</div>
           </div>
         )}
       </section>
@@ -452,9 +452,9 @@ function DeviceDrawer({ device, members, rt, zone, onClose, onChanged }) {
         <div class="sec-title">指派 IP<small>（主控固定虚拟 IPv4）</small></div>
         <div class="form-row">
           <label class="field-label">当前</label>
-          <span class="mono">
+          <div class="mono">
             {device.assigned_ipv4 || <span class="muted">未指派 · 设备自分配（DHCP/静态）</span>}
-          </span>
+          </div>
         </div>
         <div class="form-row">
           <label class="field-label">指派为<small>（CIDR）</small></label>
