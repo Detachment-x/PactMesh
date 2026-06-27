@@ -44,8 +44,8 @@ use crate::proto::api::instance::{
 use std::str::FromStr;
 use crate::proto::rpc_types::controller::BaseController;
 use crate::trust::{
-    DeviceFingerprint, DisabledCert, MemberCertFingerprint, PeerHint, RevocationReason, RevokedCert,
-    TagName, UnsignedMemberCert,
+    AssignedIpv4, DeviceFingerprint, DisabledCert, IpAssignment, MemberCertFingerprint, PeerHint,
+    RevocationReason, RevokedCert, TagName, UnsignedMemberCert, encode_device_id,
 };
 
 const INDEX_HTML: &str = include_str!("assets/dist/index.html");
@@ -64,6 +64,7 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/rename", post(api_rename))
         .route("/api/hostname", post(api_hostname))
         .route("/api/capability", post(api_capability))
+        .route("/api/assigned-ipv4", post(api_assigned_ipv4))
         .route("/api/pending", get(api_pending))
         .route("/api/approve", post(api_approve))
         .route("/api/reject", post(api_reject))
@@ -496,6 +497,109 @@ async fn api_capability(State(s): State<AppState>, Json(req): Json<CapabilityReq
         reissue(sess, fp, req.note, revoked_at, new_details)
     })();
     version_response(&req.fingerprint, result)
+}
+
+#[derive(Deserialize)]
+struct AssignedIpv4Req {
+    fingerprint: String,
+    /// CIDR 串（如 `10.0.0.7/24`）；缺省/空 = 清除指派，设备回退 DHCP/静态。
+    #[serde(default)]
+    ipv4: Option<String>,
+}
+
+/// 主控指派/清除设备固定虚拟 IPv4。写入 root 签名的 `network_state.ip_assignments`
+/// （键=稳定 device_id，**不重签证书**），节点运行时验签后自行应用到 TUN。
+async fn api_assigned_ipv4(State(s): State<AppState>, Json(req): Json<AssignedIpv4Req>) -> Response {
+    let (td, nid, pass) = match require_session(&s).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let fp = match control::parse_member_cert_fingerprint(&req.fingerprint) {
+        Ok(fp) => fp,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
+    };
+    let result = (|| {
+        let assign = match req.ipv4.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(cidr) => {
+                let inet = Ipv4Inet::from_str(cidr)
+                    .map_err(|e| anyhow::anyhow!("invalid ipv4 cidr '{cidr}': {e}"))?;
+                let addr = inet.address.map(|a| a.addr).unwrap_or(0);
+                Some(AssignedIpv4 {
+                    addr,
+                    prefix: inet.network_length as u8,
+                })
+            }
+            None => None,
+        };
+        let sess = SigningSession::open(&td, &nid, &pass)?;
+        let cert = active_member_cert(&sess, fp)?;
+        let device_id = encode_device_id(cert.details.device_pk.as_bytes());
+        let current = sess
+            .original_state
+            .details
+            .payload
+            .ip_assignments
+            .iter()
+            .find(|a| a.device_id == device_id)
+            .map(|a| a.ipv4);
+        if current == assign {
+            let v = sess.version();
+            return Ok((v, v));
+        }
+        let prev = sess.version();
+        let version = sess.commit(move |next, _root| {
+            next.payload
+                .ip_assignments
+                .retain(|a| a.device_id != device_id);
+            if let Some(ipv4) = assign {
+                next.payload.ip_assignments.push(IpAssignment {
+                    device_id: device_id.clone(),
+                    ipv4,
+                });
+            }
+            Ok(())
+        })?;
+        Ok::<(u64, u64), anyhow::Error>((prev, version))
+    })();
+    // 指派变更后，把新签名的 network_state 推给本地 daemon（best-effort）：
+    // daemon 池更新 → config-sync 服务对端 → 各节点验签后运行时应用指派 IP。
+    // daemon 不在线则忽略（已落盘，待 daemon 起来经 config-sync 传播）。
+    if let Ok((prev, version)) = &result
+        && version != prev
+        && let Ok((_d, _p, state)) = control::read_network_state(&td, &nid)
+    {
+        push_network_state_to_daemon(&s, crate::trust::to_canonical_cbor(&state)).await;
+    }
+    version_response(&req.fingerprint, result)
+}
+
+/// 把一份已签名的 network_state（CBOR）经 ConfigRpc.PatchConfig 推入本地 daemon 运行时池。
+/// best-effort：失败仅告警，不影响已落盘的治理结果。
+async fn push_network_state_to_daemon(s: &AppState, state_cbor: Vec<u8>) {
+    let res = async {
+        let client = {
+            let mut g = s.client.lock().await;
+            g.scoped_client::<ConfigRpcClientFactory<BaseController>>(String::new())
+                .await?
+        };
+        client
+            .patch_config(
+                BaseController::default(),
+                PatchConfigRequest {
+                    patch: None,
+                    instance: Some(s.instance.clone()),
+                    network_state_cbor: Some(state_cbor),
+                },
+            )
+            .await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    if let Err(e) = res {
+        tracing::warn!(
+            "failed to push network_state to local daemon (governance persisted to disk; will propagate via config-sync): {e}"
+        );
+    }
 }
 
 // ---------- Pending join：列出 / approve / reject ----------

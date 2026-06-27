@@ -875,6 +875,7 @@ pub mod tests {
                     acl: Vec::new(),
                     routes: Vec::new(),
                     peer_hints: Vec::new(),
+                    ip_assignments: Vec::new(),
                 },
             }
             .sign(root)

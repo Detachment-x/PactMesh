@@ -8470,6 +8470,7 @@ fn handle_trust_create_network(
             acl: to_canonical_cbor(&acl),
             routes: Vec::new(),
             peer_hints: Vec::new(),
+            ip_assignments: Vec::new(),
         },
     }
     .sign(&root);

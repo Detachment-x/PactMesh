@@ -84,6 +84,7 @@ fn sample_network_state(
             acl: Vec::new(),
             routes: Vec::new(),
             peer_hints: Vec::new(),
+            ip_assignments: Vec::new(),
         },
     }
     .sign(root)

@@ -71,6 +71,62 @@ pub struct PeerHint {
     pub expires_at: Option<u64>,
 }
 
+/// Root-assigned fixed virtual IPv4 (config, not identity). Carried in
+/// `network_state` and applied by the node at runtime; never written into a
+/// member certificate (see design note: cert = identity, IP = config).
+#[derive(minicbor::Encode, minicbor::Decode, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssignedIpv4 {
+    /// IPv4 address as a big-endian host-order u32 (`u32::from(Ipv4Addr)`).
+    #[n(0)]
+    pub addr: u32,
+    /// Prefix length (0..=32).
+    #[n(1)]
+    pub prefix: u8,
+}
+
+impl AssignedIpv4 {
+    pub fn ipv4_addr(&self) -> std::net::Ipv4Addr {
+        std::net::Ipv4Addr::from(self.addr)
+    }
+}
+
+/// One root-signed IP assignment, keyed by the stable `device_id`
+/// (`encode_device_id(device_pk)`) so it survives cert reissue / rename.
+#[derive(minicbor::Encode, minicbor::Decode, Debug, Clone, PartialEq, Eq)]
+pub struct IpAssignment {
+    #[n(0)]
+    pub device_id: String,
+    #[n(1)]
+    pub ipv4: AssignedIpv4,
+}
+
+mod ip_assignment_vec_cbor {
+    use super::*;
+
+    pub fn encode<Ctx, W: minicbor::encode::Write>(
+        value: &[IpAssignment],
+        encoder: &mut Encoder<W>,
+        ctx: &mut Ctx,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        minicbor::Encode::encode(value, encoder, ctx)
+    }
+
+    pub fn decode<'b, Ctx>(
+        decoder: &mut Decoder<'b>,
+        ctx: &mut Ctx,
+    ) -> Result<Vec<IpAssignment>, minicbor::decode::Error> {
+        minicbor::Decode::decode(decoder, ctx)
+    }
+
+    pub fn nil() -> Option<Vec<IpAssignment>> {
+        Some(Vec::new())
+    }
+
+    pub fn is_nil(value: &[IpAssignment]) -> bool {
+        value.is_empty()
+    }
+}
+
 /// Opaque ACL bytes (filled by T-035 / T-036).
 pub type AclPlaceholder = Vec<u8>;
 
@@ -95,6 +151,9 @@ pub struct NetworkStatePayload {
     #[n(5)]
     #[cbor(with = "peer_hint_vec_cbor", has_nil)]
     pub peer_hints: Vec<PeerHint>,
+    #[n(6)]
+    #[cbor(with = "ip_assignment_vec_cbor", has_nil)]
+    pub ip_assignments: Vec<IpAssignment>,
 }
 
 /// Header + payload before signing.

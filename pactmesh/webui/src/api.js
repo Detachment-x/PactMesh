@@ -62,6 +62,8 @@ export const api = {
   disable: (fingerprint, note) => postJson('/api/disable', { fingerprint, note }),
   enable: (fingerprint) => postJson('/api/enable', { fingerprint }),
   revoke: (fingerprint, reason, note) => postJson('/api/revoke', { fingerprint, reason, note }),
+  // 主控指派固定虚拟 IP（network_state.ip_assignments，不重签证书）；ipv4 省略/空 = 清除回 DHCP
+  assignedIpv4: (fingerprint, ipv4) => postJson('/api/assigned-ipv4', { fingerprint, ipv4: ipv4 || null }),
 
   // 待批（列出/拒绝走 daemon RPC；批准需会话签名）
   pending: (td, nid) => getJson(`/api/pending?${netQS(td, nid)}`),

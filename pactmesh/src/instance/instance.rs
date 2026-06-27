@@ -1276,6 +1276,30 @@ impl Instance {
     }
 
     // Warning, if there is an IP conflict in the network when using DHCP, the IP will be automatically changed.
+    /// 查本机 device_id 是否在 root 签名的 `network_state.ip_assignments` 中被主控指派固定 IP。
+    /// 键用稳定 device_id（重签/改名不变）。无信任域/无指派 → None（回退 DHCP/静态）。
+    async fn my_assigned_ipv4(
+        peer_manager: &Arc<PeerManager>,
+        global_ctx: &ArcGlobalCtx,
+    ) -> Option<Ipv4Inet> {
+        let trust_ctx = global_ctx.get_trust_context().await?;
+        let trust_pool = peer_manager.get_trust_pool()?;
+        let state = trust_pool
+            .read()
+            .await
+            .network_state(&trust_ctx.trust_domain_id, &trust_ctx.network_local_id)
+            .cloned()?;
+        let device_id =
+            crate::trust::encode_device_id(trust_ctx.member_cert.details.device_pk.as_bytes());
+        let assigned = state
+            .details
+            .payload
+            .ip_assignments
+            .iter()
+            .find(|a| a.device_id == device_id)?;
+        Ipv4Inet::new(Ipv4Addr::from(assigned.ipv4.addr), assigned.ipv4.prefix).ok()
+    }
+
     fn check_dhcp_ip_conflict(&self) {
         use rand::Rng;
         let peer_manager_c = Arc::downgrade(&self.peer_manager.clone());
@@ -1301,39 +1325,61 @@ impl Instance {
                     current_dhcp_ip = None;
                 }
 
-                // do not allocate ip if no peer connected
-                let routes = peer_manager_c.list_routes().await;
-                if routes.is_empty() {
+                let assigned = Self::my_assigned_ipv4(&peer_manager_c, &global_ctx_c).await;
+                let dhcp_on = global_ctx_c.config.get_dhcp();
+
+                // 既无主控指派、又非 DHCP 模式 → 不接管 IP（保留静态/无 IP 基线）。
+                // 若此前指派过、现被清除，则撤掉该 IP（回退到无指派态）。
+                if assigned.is_none() && !dhcp_on {
+                    if let Some(last_ip) = current_dhcp_ip.take() {
+                        #[cfg(feature = "tun")]
+                        Self::clear_nic_ctx(nic_ctx.clone(), _peer_packet_receiver.clone()).await;
+                        global_ctx_c.set_ipv4(None);
+                        global_ctx_c
+                            .issue_event(GlobalCtxEvent::DhcpIpv4Conflicted(Some(last_ip)));
+                    }
                     next_sleep_time = 1;
                     continue;
-                } else {
+                }
+
+                // 主控指派的 IP 为权威值：覆盖 DHCP 自选、跳过冲突避让与对端依赖（单机亦可生效）；
+                // 否则走原 DHCP 自选逻辑（需有对端、避让冲突）。
+                let candidate_ipv4_addr = if let Some(ip) = assigned {
                     next_sleep_time = rand::thread_rng().gen_range(5..10);
-                }
-
-                let mut used_ipv4 = HashSet::new();
-                for route in routes {
-                    let Some(peer_ipv4_addr) = route.ipv4_addr else {
+                    Some(ip)
+                } else {
+                    // do not allocate ip if no peer connected
+                    let routes = peer_manager_c.list_routes().await;
+                    if routes.is_empty() {
+                        next_sleep_time = 1;
                         continue;
-                    };
+                    }
+                    next_sleep_time = rand::thread_rng().gen_range(5..10);
 
-                    used_ipv4.insert(peer_ipv4_addr.into());
-                }
+                    let mut used_ipv4 = HashSet::new();
+                    for route in routes {
+                        let Some(peer_ipv4_addr) = route.ipv4_addr else {
+                            continue;
+                        };
+                        used_ipv4.insert(peer_ipv4_addr.into());
+                    }
 
-                let dhcp_inet = used_ipv4.iter().next().unwrap_or(&default_ipv4_addr);
-                // if old ip is already in this subnet and not conflicted, use it
-                if let Some(ip) = current_dhcp_ip
-                    && ip.network() == dhcp_inet.network()
-                    && !used_ipv4.contains(&ip)
-                {
-                    continue;
-                }
+                    let dhcp_inet = used_ipv4.iter().next().unwrap_or(&default_ipv4_addr);
+                    // if old ip is already in this subnet and not conflicted, use it
+                    if let Some(ip) = current_dhcp_ip
+                        && ip.network() == dhcp_inet.network()
+                        && !used_ipv4.contains(&ip)
+                    {
+                        continue;
+                    }
 
-                // find an available ip in the subnet
-                let candidate_ipv4_addr = dhcp_inet.network().iter().find(|ip| {
-                    ip.address() != dhcp_inet.first_address()
-                        && ip.address() != dhcp_inet.last_address()
-                        && !used_ipv4.contains(ip)
-                });
+                    // find an available ip in the subnet
+                    dhcp_inet.network().iter().find(|ip| {
+                        ip.address() != dhcp_inet.first_address()
+                            && ip.address() != dhcp_inet.last_address()
+                            && !used_ipv4.contains(ip)
+                    })
+                };
 
                 if current_dhcp_ip == candidate_ipv4_addr {
                     continue;
@@ -1499,7 +1545,9 @@ impl Instance {
             }
         }
 
-        if self.global_ctx.config.get_dhcp() {
+        // DHCP 模式或信任域节点都启动本循环：前者自选 IP，后者还负责运行时应用主控指派 IP。
+        // 非 DHCP 且无指派时循环自守卫为空操作（见 check_dhcp_ip_conflict 顶部）。
+        if self.global_ctx.config.get_dhcp() || self.global_ctx.config.get_trust_domain().is_some() {
             self.check_dhcp_ip_conflict();
         }
 

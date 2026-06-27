@@ -918,6 +918,7 @@ mod tests {
                 acl: Vec::new(),
                 routes: Vec::new(),
                 peer_hints: hints,
+                ip_assignments: Vec::new(),
             },
         }
         .sign(&root)

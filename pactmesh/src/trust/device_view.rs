@@ -97,6 +97,8 @@ pub struct DeviceView {
     pub status: DeviceStatus,
     pub capabilities: DeviceCapabilityView,
     pub hostname: String,
+    /// 主控经 network_state 指派的固定虚拟 IPv4（CIDR 串）；None = 未指派（设备 DHCP/静态自分配）。
+    pub assigned_ipv4: Option<String>,
     pub tags: Vec<String>,
 }
 
@@ -162,11 +164,13 @@ pub fn view_for_member(
     now: u64,
 ) -> DeviceView {
     let tags = tags_for_member(&entry.fingerprint, state);
+    let device_id = cert
+        .map(|cert| encode_device_id(cert.details.device_pk.as_bytes()))
+        .unwrap_or_else(|| "unknown".to_owned());
+    let assigned_ipv4 = assigned_ipv4_for_device(&device_id, state);
     DeviceView {
         fingerprint: entry.fingerprint.to_string(),
-        device_id: cert
-            .map(|cert| encode_device_id(cert.details.device_pk.as_bytes()))
-            .unwrap_or_else(|| "unknown".to_owned()),
+        device_id: device_id.clone(),
         device_label: entry.device_label.clone(),
         role: role_for_member(cert, local_device_id, has_root_key),
         network_local_id: network_local_id.to_owned(),
@@ -184,8 +188,20 @@ pub fn view_for_member(
             .and_then(|cert| cert.details.hostname.as_ref())
             .map(|hostname| hostname.as_str().to_owned())
             .unwrap_or_default(),
+        assigned_ipv4,
         tags,
     }
+}
+
+/// 从 network_state.ip_assignments 按稳定 device_id 取主控指派 IP（CIDR 串）。
+fn assigned_ipv4_for_device(device_id: &str, state: &SignedNetworkState) -> Option<String> {
+    state
+        .details
+        .payload
+        .ip_assignments
+        .iter()
+        .find(|a| a.device_id == device_id)
+        .map(|a| format!("{}/{}", a.ipv4.ipv4_addr(), a.ipv4.prefix))
 }
 
 fn tags_for_member(fingerprint: &MemberCertFingerprint, state: &SignedNetworkState) -> Vec<String> {

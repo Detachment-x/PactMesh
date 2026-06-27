@@ -25,6 +25,26 @@ const REASONS = [
   { v: 'superseded', t: '证书更替' },
 ]
 
+// 从全体成员已指派 IP 推荐一个空闲地址（easy-mode，/24 末位自增）。
+// 取首个已指派网段为池，无则默认 10.10.0.0/24，从 .2 起找首个未用。
+function suggestIp(members) {
+  const used = new Set()
+  let base = null
+  for (const m of members || []) {
+    if (!m.assigned_ipv4) continue
+    const [ip, prefix] = m.assigned_ipv4.split('/')
+    used.add(ip)
+    if (!base) base = { parts: ip.split('.'), prefix: prefix || '24' }
+  }
+  const [a, b, c] = base ? base.parts : ['10', '10', '0', '0']
+  const prefix = base ? base.prefix : '24'
+  for (let h = 2; h <= 254; h++) {
+    const cand = `${a}.${b}.${c}.${h}`
+    if (!used.has(cand)) return `${cand}/${prefix}`
+  }
+  return ''
+}
+
 function capChips(c) {
   const out = []
   if (c.relay_data) out.push('中继数据')
@@ -218,6 +238,7 @@ export function Devices() {
         <DeviceDrawer
           key={current.dev.device_id}
           device={current.dev}
+          members={list}
           rt={current.rt}
           zone={zone}
           onClose={() => setSel(null)}
@@ -328,7 +349,7 @@ function TempDrawer({ rt, zone, onClose }) {
   )
 }
 
-function DeviceDrawer({ device, rt, zone, onClose, onChanged }) {
+function DeviceDrawer({ device, members, rt, zone, onClose, onChanged }) {
   const { requireUnlock } = useApp()
   const toast = useToast()
   const fp = device.fingerprint
@@ -336,6 +357,7 @@ function DeviceDrawer({ device, rt, zone, onClose, onChanged }) {
 
   const [label, setLabel] = useState(device.device_label || '')
   const [hostname, setHostname] = useState(device.hostname || '')
+  const [assignIp, setAssignIp] = useState(device.assigned_ipv4 || '')
   const [relayData, setRelayData] = useState(!!device.capabilities.relay_data)
   const [relayControl, setRelayControl] = useState(!!device.capabilities.relay_control)
   const [cidrs, setCidrs] = useState(device.capabilities.proxy_subnets || [])
@@ -424,6 +446,42 @@ function DeviceDrawer({ device, rt, zone, onClose, onChanged }) {
 
       {/* 运行时（在线时并入连通信息） */}
       {rt && <RuntimeSection rt={rt} />}
+
+      {/* 主控指派 IP（network_state 指令，不重签证书；节点运行时自动应用） */}
+      <section class="drawer-sec">
+        <div class="sec-title">指派 IP<small>（主控固定虚拟 IPv4）</small></div>
+        <div class="form-row">
+          <label class="field-label">当前</label>
+          <span class="mono">
+            {device.assigned_ipv4 || <span class="muted">未指派 · 设备自分配（DHCP/静态）</span>}
+          </span>
+        </div>
+        <div class="form-row">
+          <label class="field-label">指派为<small>（CIDR）</small></label>
+          <div class="inline-field">
+            <input
+              class="field mono"
+              value={assignIp}
+              placeholder="10.10.0.2/24"
+              onInput={(e) => setAssignIp(e.currentTarget.value)}
+              onKeyDown={(e) => e.key === 'Enter' && e.preventDefault()}
+            />
+            <button class="btn btn-sm" title="从已用地址推荐一个空闲 IP" onClick={() => setAssignIp(suggestIp(members))}>建议</button>
+            <button
+              class="btn btn-primary btn-sm"
+              disabled={busy === 'ip' || !assignIp.trim() || assignIp.trim() === (device.assigned_ipv4 || '')}
+              onClick={() => act('ip', () => api.assignedIpv4(fp, assignIp.trim()), '已指派 IP')}
+            >指派</button>
+          </div>
+        </div>
+        {device.assigned_ipv4 && (
+          <button
+            class="btn btn-sm"
+            disabled={busy === 'ipclear'}
+            onClick={() => act('ipclear', () => api.assignedIpv4(fp, null), '已清除指派，回退自分配', () => setAssignIp(''))}
+          >清除指派（回退 DHCP）</button>
+        )}
+      </section>
 
       {/* 能力 */}
       <section class="drawer-sec">

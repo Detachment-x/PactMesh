@@ -233,6 +233,7 @@ mod tests {
                 acl: b"private-acl".to_vec(),
                 routes: b"private-routes".to_vec(),
                 peer_hints: Vec::new(),
+                ip_assignments: Vec::new(),
             },
         }
         .sign(&root);

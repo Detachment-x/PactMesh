@@ -63,9 +63,11 @@ export function Network({ onNavigate }) {
       <div class="card">
         <div class="card-title">IP 分配</div>
         <p class="muted">
-          当前网络采用<strong>设备自助分配</strong>：每台设备启动时自选虚拟 IPv4（DHCP 模式，地址冲突会自动重选），或在该设备「本机配置 › 虚拟 IP」中设置静态地址。
+          默认<strong>设备自助分配</strong>：每台设备启动时自选虚拟 IPv4（DHCP 模式，地址冲突自动重选），或在该设备「本机配置 › 虚拟 IP」中设置静态地址。
         </p>
-        <p class="muted">主控集中指派 IP（为指定设备锁定固定地址、可视化 IP 池）正在规划中。</p>
+        <p class="muted">
+          <strong>主控指派</strong>：为指定设备锁定固定虚拟 IP，经 root 签名的网络状态实时下发、节点运行时自动应用。到「设备 › 管理 › 指派 IP」逐台指派或清除。
+        </p>
       </div>
 
       {/* 成员 IP 一览 */}
@@ -79,7 +81,7 @@ export function Network({ onNavigate }) {
           <div class="table-wrap">
             <table class="dtable">
               <thead>
-                <tr><th>设备</th><th>主机名</th><th>虚拟 IP</th><th>状态</th></tr>
+                <tr><th>设备</th><th>主机名</th><th>指派 IP</th><th>当前虚拟 IP</th><th>状态</th></tr>
               </thead>
               <tbody>
                 {list.map((d) => {
@@ -88,6 +90,9 @@ export function Network({ onNavigate }) {
                     <tr key={d.device_id}>
                       <td>{d.device_label || '未命名设备'}</td>
                       <td class="mono-cell">{d.hostname || <span class="muted">—</span>}</td>
+                      <td class="mono-cell">
+                        {d.assigned_ipv4 ? <span class="chip chip-ok"><code>{d.assigned_ipv4}</code></span> : <span class="muted">自分配</span>}
+                      </td>
                       <td class="mono-cell">{r ? r.ip : <span class="muted">—</span>}</td>
                       <td>
                         {r ? <Dot kind="ok" label={r.self ? '本机' : '在线'} /> : <Dot kind="muted" label={runtimeDown ? '未知' : '离线'} />}
