@@ -179,6 +179,8 @@ enum SubCommand {
     Trust(TrustArgs),
     #[command(about = "serve the local web controller (browser admin console)")]
     Controller(ControllerArgs),
+    #[command(about = "first-run setup: create domain+network, bootstrap this device, start daemon and web console")]
+    Quickstart(QuickstartArgs),
     #[command(about = "interactive ratatui console (Node + Peers v0)")]
     Tui,
     #[command(about = t!("core_clap.generate_completions").to_string())]
@@ -233,6 +235,127 @@ struct ControllerArgs {
         help = "root passphrase unlock TTL in seconds (reserved for later milestones)"
     )]
     unlock_ttl_secs: u64,
+}
+
+#[derive(Args, Debug)]
+struct QuickstartArgs {
+    #[arg(long, default_value = "home", help = "network id to create")]
+    network_id: String,
+    #[arg(long, default_value = "home", help = "trust-domain label")]
+    domain_label: String,
+    #[arg(long, help = "this device's label (defaults to hostname)")]
+    device_label: Option<String>,
+    #[arg(
+        long,
+        default_value = "accept",
+        help = "network default ACL action (accept|drop)"
+    )]
+    default_action: String,
+    #[arg(
+        long,
+        default_value = "tcp://0.0.0.0:11010",
+        help = "daemon listener url"
+    )]
+    listeners: String,
+    #[arg(
+        long,
+        help = "run daemon without a TUN device (no VPN dataplane; for testing)"
+    )]
+    no_tun: bool,
+    #[arg(
+        long,
+        default_value = "127.0.0.1:15810",
+        help = "web console listen address (loopback only)"
+    )]
+    listen: SocketAddr,
+    #[arg(
+        long,
+        env = "PACTMESH_CONTROLLER_TOKEN",
+        help = "fixed web console access token (random per-run if omitted)"
+    )]
+    token: Option<String>,
+    #[arg(
+        long,
+        default_value = "900",
+        help = "root passphrase unlock TTL in seconds"
+    )]
+    unlock_ttl_secs: u64,
+    #[arg(long, help = "file containing the root management passphrase")]
+    passphrase_file: Option<PathBuf>,
+    #[arg(long, help = "file containing the device key passphrase")]
+    device_passphrase_file: Option<PathBuf>,
+}
+
+fn quickstart_core_path(exe: &std::path::Path) -> Result<PathBuf, Error> {
+    let name = if cfg!(windows) {
+        "pactmesh-core.exe"
+    } else {
+        "pactmesh-core"
+    };
+    let core = exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("failed to locate pactmesh binary directory"))?
+        .join(name);
+    if !core.is_file() {
+        anyhow::bail!(
+            "pactmesh-core not found next to {}: {}",
+            exe.display(),
+            core.display()
+        );
+    }
+    Ok(core)
+}
+
+fn resolve_quickstart_device_passphrase(file: Option<&PathBuf>) -> Result<String, Error> {
+    if let Some(passphrase) = read_optional_device_passphrase(file)? {
+        return Ok(passphrase);
+    }
+    if std::io::stdin().is_terminal() {
+        let first = prompt_line("Device key passphrase: ")?;
+        let second = prompt_line("Confirm device key passphrase: ")?;
+        if first != second {
+            anyhow::bail!("device key passphrase confirmation does not match");
+        }
+        if first.len() < 8 {
+            anyhow::bail!("device key passphrase must be at least 8 characters");
+        }
+        return Ok(first);
+    }
+    anyhow::bail!(
+        "PNW_DEVICE_PASSPHRASE is required unless --device-passphrase-file is provided; interactive prompt is only available on a TTY"
+    )
+}
+
+fn spawn_quickstart_daemon(
+    core: &std::path::Path,
+    log_path: &std::path::Path,
+    args: &[&str],
+    device_passphrase: &str,
+) -> Result<std::process::Child, Error> {
+    let stdout = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open {}", log_path.display()))?;
+    let stderr = stdout.try_clone()?;
+    std::process::Command::new(core)
+        .args(args)
+        .env("PNW_DEVICE_PASSPHRASE", device_passphrase)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(stdout))
+        .stderr(std::process::Stdio::from(stderr))
+        .spawn()
+        .with_context(|| format!("failed to start {}", core.display()))
+}
+
+fn quickstart_json_field(text: &str, field: &str) -> Result<String, Error> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .with_context(|| format!("failed to parse JSON output: {text}"))?;
+    value
+        .get(field)
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("missing JSON string field '{field}' in: {text}"))
 }
 
 #[derive(Args, Debug)]
@@ -2226,6 +2349,133 @@ impl<'a> CommandHandler<'a> {
             },
         )
         .await
+    }
+
+    async fn run_quickstart(
+        &self,
+        rpc_portal: SocketAddr,
+        args: &QuickstartArgs,
+    ) -> Result<(), Error> {
+        use std::io::Write as _;
+        let exe = std::env::current_exe().context("failed to locate the pactmesh executable")?;
+        let core = quickstart_core_path(&exe)?;
+        let device_label = args
+            .device_label
+            .clone()
+            .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().to_string());
+
+        let root_passphrase = read_root_passphrase(args.passphrase_file.as_ref())?;
+        let device_passphrase =
+            resolve_quickstart_device_passphrase(args.device_passphrase_file.as_ref())?;
+
+        let run_step = |step_args: &[&str], capture: bool| -> Result<String, Error> {
+            let mut cmd = std::process::Command::new(&exe);
+            cmd.args(step_args)
+                .env("PNW_ROOT_PASSPHRASE", &root_passphrase)
+                .env("PNW_DEVICE_PASSPHRASE", &device_passphrase);
+            if capture {
+                let out = cmd
+                    .output()
+                    .with_context(|| format!("failed to run pactmesh {}", step_args.join(" ")))?;
+                if !out.status.success() {
+                    std::io::stderr().write_all(&out.stderr).ok();
+                    anyhow::bail!("`pactmesh {}` exited with {}", step_args.join(" "), out.status);
+                }
+                Ok(String::from_utf8(out.stdout)
+                    .context("pactmesh output was not valid UTF-8")?
+                    .trim()
+                    .to_owned())
+            } else {
+                let status = cmd
+                    .status()
+                    .with_context(|| format!("failed to run pactmesh {}", step_args.join(" ")))?;
+                if !status.success() {
+                    anyhow::bail!("`pactmesh {}` exited with {status}", step_args.join(" "));
+                }
+                Ok(String::new())
+            }
+        };
+
+        println!("[1/4] Creating trust domain '{}'...", args.domain_label);
+        let domain_json = run_step(
+            &["trust", "create-domain", "--label", &args.domain_label, "--json"],
+            true,
+        )?;
+        let trust_domain_id = quickstart_json_field(&domain_json, "trust_domain_id")?;
+        println!("      trust domain: {trust_domain_id}");
+
+        println!("[2/4] Creating network '{}'...", args.network_id);
+        run_step(
+            &[
+                "trust",
+                "create-network",
+                &trust_domain_id,
+                &args.network_id,
+                "--default-action",
+                &args.default_action,
+            ],
+            false,
+        )?;
+
+        println!("[3/4] Bootstrapping this device '{device_label}'...");
+        run_step(
+            &[
+                "trust",
+                "bootstrap-self",
+                &trust_domain_id,
+                &args.network_id,
+                "--device-label",
+                &device_label,
+            ],
+            false,
+        )?;
+
+        let domain_dir = pnw_trust_domains_dir()?.join(&trust_domain_id);
+        let domain_dir_str = domain_dir
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("trust-domain path is not UTF-8"))?;
+        let log_path = pnw_config_dir()?.join("pactmesh-core-quickstart.log");
+        let rpc_arg = format!("{}:{}", rpc_portal.ip(), rpc_portal.port());
+        let no_tun = if args.no_tun { "true" } else { "false" };
+        let daemon_args = [
+            "--network-name",
+            &args.network_id,
+            "--trust-domain-dir",
+            domain_dir_str,
+            "--network-local-id",
+            &args.network_id,
+            "--rpc-portal",
+            &rpc_arg,
+            "--listeners",
+            &args.listeners,
+            "--no-tun",
+            no_tun,
+            "--disable-ipv6",
+            "true",
+            "--instance-name",
+            &device_label,
+            "--console-log-level",
+            "info",
+            "--daemon",
+        ];
+        println!(
+            "[4/4] Starting pactmesh-core daemon (log: {})...",
+            log_path.display()
+        );
+        let child = spawn_quickstart_daemon(&core, &log_path, &daemon_args, &device_passphrase)?;
+        println!("      daemon pid {}", child.id());
+
+        // Let the daemon bind its rpc portal before the console starts serving live panels.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        let controller_args = ControllerArgs {
+            listen: args.listen,
+            token: args.token.clone(),
+            unlock_ttl_secs: args.unlock_ttl_secs,
+        };
+        println!();
+        println!("Setup complete. Starting the web console (Ctrl-C to stop; the daemon keeps running).");
+        self.run_controller(&controller_args).await
     }
 
     async fn handle_peer_list(&self) -> Result<(), Error> {
@@ -9990,6 +10240,11 @@ async fn main() -> Result<(), Error> {
         },
         SubCommand::Controller(controller_args) => {
             handler.run_controller(&controller_args).await?
+        }
+        SubCommand::Quickstart(quickstart_args) => {
+            handler
+                .run_quickstart(cli.rpc_portal, &quickstart_args)
+                .await?
         }
         SubCommand::Tui => handler.run_tui().await?,
 

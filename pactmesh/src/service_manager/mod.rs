@@ -250,6 +250,15 @@ impl Service {
         writeln!(unit_content, "Restart=always")?;
         writeln!(unit_content, "RestartSec=1")?;
         writeln!(unit_content, "LimitNOFILE=infinity")?;
+        writeln!(
+            unit_content,
+            "AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW"
+        )?;
+        writeln!(
+            unit_content,
+            "CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW"
+        )?;
+        writeln!(unit_content, "NoNewPrivileges=yes")?;
         writeln!(unit_content)?;
         writeln!(unit_content, "[Install]")?;
         writeln!(unit_content, "WantedBy=multi-user.target")?;
