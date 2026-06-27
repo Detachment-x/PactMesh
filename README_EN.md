@@ -133,12 +133,29 @@ Each user owns a trust domain, signing certificates and configuration with a roo
 
 ### Local Web Controller (`controller`)
 
-A browser admin console like a ZeroTier controller, embedded in the pure-Rust single binary (no SPA / Node / build step). It runs on the CLI side and connects to the locally running daemon RPC:
+A product-grade browser admin console on par with ZeroTier / Tailscale — light, clean, teal connection-themed visuals. The frontend is built with Preact + Vite into a **single file**, then embedded into the pure-Rust binary via `include_str!` — zero Node and zero external deps at runtime, single binary intact. It runs on the CLI side and connects to the locally running daemon RPC:
 
 ```bash
 pactmesh --rpc-portal 127.0.0.1:<rpc> controller --listen 127.0.0.1:15810
 # Prints a local URL carrying a one-shot token; loopback-only access
 ```
+
+**Screenshots**
+
+<table>
+  <tr>
+    <td><img src="pactmesh/docs/screenshots/01-overview.png" width="430" alt="Overview"><br><sub>Overview · health metrics + invite CTA</sub></td>
+    <td><img src="pactmesh/docs/screenshots/03-devices.png" width="430" alt="Devices"><br><sub>Devices · fused identity + runtime table</sub></td>
+  </tr>
+  <tr>
+    <td><img src="pactmesh/docs/screenshots/11-assign-ip.png" width="430" alt="Assign IP"><br><sub>Device drawer · root-assigned fixed virtual IP</sub></td>
+    <td><img src="pactmesh/docs/screenshots/02-network.png" width="430" alt="Network"><br><sub>Network · member IPs / managed routes / DNS</sub></td>
+  </tr>
+  <tr>
+    <td><img src="pactmesh/docs/screenshots/05-policy.png" width="430" alt="Access policy"><br><sub>Access policy · visual ACL editor</sub></td>
+    <td><img src="pactmesh/docs/screenshots/12-invite-modal.png" width="430" alt="Invite"><br><sub>Invite device · QR code + usage</sub></td>
+  </tr>
+</table>
 
 - **Read-only dashboards**: node / peers / routes / stats / connectors / mapped listeners / port forwards / VPN portal / ACL stats & conn-track / whitelist / credentials (refreshed every 2s).
 - **Config push** (daemon RPC, hot-reload, no root passphrase): connectors / mapped listeners / port forwards / routes / proxy networks / exit nodes / cross-domain relay grants / hostname / IPv4 / whitelist, plus a form-based **ACL editor**.
