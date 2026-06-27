@@ -1120,6 +1120,31 @@ enum TrustSubCommand {
         )]
         passphrase_file: Option<PathBuf>,
     },
+    #[command(
+        about = "assign or clear a member's fixed virtual IPv4 (root-signed network_state; no cert reissue)"
+    )]
+    AssignedIpv4 {
+        #[arg(help = "trust-domain id", allow_hyphen_values = true)]
+        trust_domain_id: String,
+        #[arg(help = "network-local id")]
+        network_local_id: String,
+        #[arg(help = "member-cert fingerprint", allow_hyphen_values = true)]
+        fingerprint: String,
+        #[arg(
+            long,
+            help = "CIDR to assign (e.g. 10.0.0.7/24); omit or pass --clear to remove"
+        )]
+        ipv4: Option<String>,
+        #[arg(long, help = "clear the assignment, reverting the device to DHCP/static")]
+        clear: bool,
+        #[arg(long, help = "emit machine-readable JSON")]
+        json: bool,
+        #[arg(
+            long,
+            help = "file containing the root key passphrase (management password)"
+        )]
+        passphrase_file: Option<PathBuf>,
+    },
     ListMembers {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -4280,6 +4305,7 @@ fn handle_lab_remote_fresh_run(options: LabRemoteFreshRunOptions) -> Result<(), 
         remote_fresh_start_joiners(&options, &root)?;
         remote_fresh_wait_for_peers(&options, &root)?;
         remote_fresh_verify_config_sync(&options, &root)?;
+        remote_fresh_verify_assignment(&options, &root)?;
         println!("remote-fresh-run: PASS fresh trust-domain bootstrap and config-sync checks");
         Ok(())
     })();
@@ -4894,14 +4920,29 @@ fn remote_fresh_wait_for_peers(
         let c = remote_fresh_collect_windows(options)?;
         let last_b = b.explain;
         let last_c = c.explain;
+        // B's OS hostname is environment-dependent (host migrations rename it),
+        // so derive it from B's own "Local peer: ... host=<name>" line instead of
+        // hardcoding; C-sees-B then matches whatever hostname B currently reports.
+        let b_hostname = last_b
+            .lines()
+            .find(|l| l.contains("Local peer:"))
+            .and_then(|l| l.split("host=").nth(1))
+            .and_then(|r| r.split_whitespace().next())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         let b_sees_c = b.peer_json.to_ascii_lowercase().contains("laptop")
             || b.peer_json.to_ascii_lowercase().contains("win-c");
-        let c_sees_b = c.peer_json.to_ascii_lowercase().contains("user")
-            || c.peer_json.to_ascii_lowercase().contains("node-b");
+        let c_sees_b = c.peer_json.to_ascii_lowercase().contains("node-b")
+            || (!b_hostname.is_empty()
+                && c.peer_json.to_ascii_lowercase().contains(b_hostname.as_str()));
         let b_direct = remote_run_assert_direct_quiet("B", &b.peer_json, "LAPTOP")
             .or_else(|_| remote_run_assert_direct_quiet("B", &b.peer_json, "win-c"));
-        let c_direct = remote_run_assert_direct_quiet("C", &c.peer_json, "user")
-            .or_else(|_| remote_run_assert_direct_quiet("C", &c.peer_json, "node-b"));
+        let c_direct = (if b_hostname.is_empty() {
+            Err(anyhow::anyhow!("C: B hostname unknown"))
+        } else {
+            remote_run_assert_direct_quiet("C", &c.peer_json, &b_hostname)
+        })
+        .or_else(|_| remote_run_assert_direct_quiet("C", &c.peer_json, "node-b"));
         if b_sees_c && c_sees_b {
             if options.require_bc_direct {
                 if b_direct.is_ok() && c_direct.is_ok() {
@@ -5099,6 +5140,120 @@ fn remote_fresh_verify_config_sync(
     let out = ssh_capture_sh(&options.a_host, &enable)?;
     println!("remote-fresh-run: enable node-b: {}", out.trim());
     remote_fresh_wait_for_c_member_status(options, root, "node-b", "active")
+}
+
+// 取 node-b 当前在 C 同步到的成员行（fingerprint/status）。
+fn remote_fresh_node_b_member(
+    options: &LabRemoteFreshRunOptions,
+    root: &FreshRootSetup,
+) -> Result<serde_json::Value, Error> {
+    remote_fresh_c_members(options, root)?
+        .into_iter()
+        .find(|row| row.get("device_label").and_then(|v| v.as_str()) == Some("node-b"))
+        .ok_or_else(|| anyhow::anyhow!("C member list does not contain node-b"))
+}
+
+// 读本地 node-b daemon 上报的虚拟 IPv4（ShowNodeInfo.ipv4_addr）。空串 = 未指派/未分配。
+fn remote_fresh_node_b_reported_ipv4(options: &LabRemoteFreshRunOptions) -> Result<String, Error> {
+    let cmd = format!(
+        "cd {bin} && ./pactmesh --rpc-portal 127.0.0.1:{rpc} -o json node",
+        bin = sh_quote(&options.b_bin_dir),
+        rpc = options.b_rpc,
+    );
+    let output = local_capture(&cmd)?;
+    let value: serde_json::Value = serde_json::from_str(output.trim())
+        .with_context(|| format!("failed to parse node-b node JSON: {output}"))?;
+    Ok(value
+        .get("ipv4_addr")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_owned())
+}
+
+fn remote_fresh_wait_for_node_b_ipv4(
+    options: &LabRemoteFreshRunOptions,
+    want: &str,
+) -> Result<(), Error> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(options.wait_secs);
+    let mut last = String::new();
+    loop {
+        last = remote_fresh_node_b_reported_ipv4(options).unwrap_or(last);
+        if last == want {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out waiting for node-b reported ipv4 to become {:?}; last={:?}",
+                want,
+                last
+            );
+        }
+        std::thread::sleep(Duration::from_secs(options.poll_secs.max(1)));
+    }
+}
+
+// 主控指派 IP 回归：root 在 A 给 node-b 派固定 IP（root-signed network_state，不重签证书）→
+// config-sync 到 node-b → node-b 运行时应用、上报该 IP，且证书指纹不变（不掉线/不踢）→ 清除回退空。
+fn remote_fresh_verify_assignment(
+    options: &LabRemoteFreshRunOptions,
+    root: &FreshRootSetup,
+) -> Result<(), Error> {
+    println!("remote-fresh-run: verifying root-assigned IP config-sync to node-b");
+    let before = remote_fresh_node_b_member(options, root)?;
+    let b_fp = before
+        .get("fingerprint")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("node-b member row missing fingerprint"))?
+        .to_owned();
+    let assigned_cidr = "10.18.222.5/16";
+
+    let assign = format!(
+        "set -e\nexport XDG_CONFIG_HOME={xdg}\ncd {bin}\n./pactmesh --rpc-portal 127.0.0.1:{rpc} trust assigned-ipv4 {td} {net} {fp} --ipv4 {cidr} --passphrase-file {pass_file} --json\n",
+        xdg = sh_quote(&options.a_xdg),
+        bin = sh_quote(&options.a_bin_dir),
+        rpc = options.a_rpc,
+        td = sh_quote(&root.trust_domain_id),
+        net = sh_quote(&options.network_local_id),
+        fp = sh_quote(&b_fp),
+        cidr = sh_quote(assigned_cidr),
+        pass_file = sh_quote(&root.root_passphrase_file),
+    );
+    let out = ssh_capture_sh(&options.a_host, &assign)?;
+    println!("remote-fresh-run: assign node-b {assigned_cidr}: {}", out.trim());
+
+    remote_fresh_wait_for_node_b_ipv4(options, assigned_cidr)?;
+    println!("remote-fresh-run: node-b reports assigned IP {assigned_cidr}");
+
+    // 不踢断言：指派后 node-b 仍在网、状态 active、证书指纹不变（network_state 路线不重签证书）。
+    let after = remote_fresh_node_b_member(options, root)?;
+    let after_fp = after.get("fingerprint").and_then(|v| v.as_str()).unwrap_or_default();
+    let after_status = after.get("status").and_then(|v| v.as_str()).unwrap_or_default();
+    anyhow::ensure!(
+        after_fp == b_fp,
+        "assignment must not reissue node-b cert: fingerprint changed {b_fp} -> {after_fp}"
+    );
+    anyhow::ensure!(
+        after_status == "active",
+        "node-b must stay active after assignment, got status={after_status}"
+    );
+    println!("remote-fresh-run: node-b stayed active, fingerprint unchanged (not kicked)");
+
+    // 清除指派 → node-b 回退（--no-tun 无 DHCP/静态 → 上报空）。
+    let clear = format!(
+        "set -e\nexport XDG_CONFIG_HOME={xdg}\ncd {bin}\n./pactmesh --rpc-portal 127.0.0.1:{rpc} trust assigned-ipv4 {td} {net} {fp} --clear --passphrase-file {pass_file} --json\n",
+        xdg = sh_quote(&options.a_xdg),
+        bin = sh_quote(&options.a_bin_dir),
+        rpc = options.a_rpc,
+        td = sh_quote(&root.trust_domain_id),
+        net = sh_quote(&options.network_local_id),
+        fp = sh_quote(&b_fp),
+        pass_file = sh_quote(&root.root_passphrase_file),
+    );
+    let out = ssh_capture_sh(&options.a_host, &clear)?;
+    println!("remote-fresh-run: clear node-b assignment: {}", out.trim());
+    remote_fresh_wait_for_node_b_ipv4(options, "")?;
+    println!("remote-fresh-run: node-b reverted to unassigned after clear");
+    Ok(())
 }
 
 fn remote_run_start(options: &LabRemoteRunOptions) -> Result<(), Error> {
@@ -7524,6 +7679,126 @@ async fn handle_trust_enable(
     Ok(())
 }
 
+// 主控指派/清除设备固定虚拟 IPv4：写入 root 签名的 network_state.ip_assignments
+// （键=稳定 device_id，不重签证书），与控制器 /api/assigned-ipv4 同源。ipv4=None 清除。
+async fn handle_trust_assigned_ipv4(
+    handler: Option<&CommandHandler<'_>>,
+    trust_domain_id: String,
+    network_local_id: String,
+    fingerprint: String,
+    ipv4: Option<String>,
+    json: bool,
+    passphrase_file: Option<PathBuf>,
+) -> Result<(), Error> {
+    let (network_dir, original_pem, mut original_state) =
+        load_network_state_for_edit(&trust_domain_id, &network_local_id)?;
+    let fingerprint = parse_member_cert_fingerprint(&fingerprint)?;
+    if !original_state
+        .details
+        .payload
+        .member_cert_index
+        .iter()
+        .any(|entry| entry.fingerprint == fingerprint)
+    {
+        anyhow::bail!("fingerprint not found in member_cert_index");
+    }
+    let cert = pactmesh::control::read_member_cert_bodies(&network_dir)
+        .get(&fingerprint)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("member cert body not found; cannot resolve device id"))?;
+    let device_id = pactmesh::trust::encode_device_id(cert.details.device_pk.as_bytes());
+
+    let assign = match ipv4.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(cidr) => {
+            let inet = Ipv4Inet::from_str(cidr)
+                .with_context(|| format!("invalid ipv4 cidr '{cidr}'"))?;
+            Some(pactmesh::trust::AssignedIpv4 {
+                addr: u32::from(inet.address()),
+                prefix: inet.network_length(),
+            })
+        }
+        None => None,
+    };
+
+    let current = original_state
+        .details
+        .payload
+        .ip_assignments
+        .iter()
+        .find(|a| a.device_id == device_id)
+        .map(|a| a.ipv4);
+    let old_version = original_state.details.version;
+    if current == assign {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "device_id": device_id,
+                    "old_version": old_version,
+                    "new_version": old_version,
+                    "assigned_ipv4": assign.map(|a| format!("{}/{}", a.ipv4_addr(), a.prefix)),
+                    "changed": false,
+                })
+            );
+        } else {
+            println!("assigned-ipv4 unchanged for {device_id}: version {old_version}");
+        }
+        return Ok(());
+    }
+
+    original_state
+        .details
+        .payload
+        .ip_assignments
+        .retain(|a| a.device_id != device_id);
+    if let Some(ipv4) = assign {
+        original_state
+            .details
+            .payload
+            .ip_assignments
+            .push(pactmesh::trust::IpAssignment {
+                device_id: device_id.clone(),
+                ipv4,
+            });
+    }
+
+    let root = unlock_domain_root(&trust_domain_id, passphrase_file)?;
+    let next_state = sign_next_network_state(&original_state, &root);
+    let new_version =
+        write_pre_signed_network_state(&network_dir, old_version, original_pem, &next_state)?;
+    if let Some(handler) = handler
+        && let Err(err) = handler.apply_network_state_to_daemon(&next_state).await
+    {
+        eprintln!(
+            "warning: network_state written to disk but not hot-loaded into running daemon: {err:#}"
+        );
+    }
+
+    let assigned_str = assign.map(|a| format!("{}/{}", a.ipv4_addr(), a.prefix));
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "device_id": device_id,
+                "old_version": old_version,
+                "new_version": new_version,
+                "assigned_ipv4": assigned_str,
+                "changed": true,
+            })
+        );
+    } else {
+        match assigned_str {
+            Some(ip) => println!(
+                "assigned {ip} to {device_id}: version {old_version} -> {new_version}"
+            ),
+            None => println!(
+                "cleared assignment for {device_id}: version {old_version} -> {new_version}"
+            ),
+        }
+    }
+    Ok(())
+}
+
 struct AcceptInviteOptions {
     source: String,
     device_label: Option<String>,
@@ -9434,6 +9709,26 @@ async fn main() -> Result<(), Error> {
                     trust_domain_id,
                     network_local_id,
                     fingerprint,
+                    json,
+                    passphrase_file,
+                )
+                .await?;
+            }
+            TrustSubCommand::AssignedIpv4 {
+                trust_domain_id,
+                network_local_id,
+                fingerprint,
+                ipv4,
+                clear,
+                json,
+                passphrase_file,
+            } => {
+                handle_trust_assigned_ipv4(
+                    Some(&handler),
+                    trust_domain_id,
+                    network_local_id,
+                    fingerprint,
+                    if clear { None } else { ipv4 },
                     json,
                     passphrase_file,
                 )
