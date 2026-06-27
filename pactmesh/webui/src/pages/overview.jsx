@@ -119,8 +119,7 @@ export function Overview({ onNavigate }) {
       {memberCount !== undefined && memberCount <= 1 && (
         <div class="card onb-nudge">
           <div class="card-title">邀请你的第一台设备</div>
-          <p class="muted">这个网络目前只有本机。生成一个邀请链接，让笔记本、手机或服务器扫码 / 运行 <code>accept-invite</code> 加入，再到「待批」批准即可。</p>
-          <button class="btn btn-primary" onClick={() => setInviting(true)}>＋ 邀请设备</button>
+          <p class="muted">这个网络目前只有本机。点击右上方的<strong>「＋ 邀请设备」</strong>生成邀请链接，让笔记本、手机或服务器扫码 / 运行 <code>accept-invite</code> 加入，再到「待批」批准即可。</p>
         </div>
       )}
 

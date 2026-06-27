@@ -188,14 +188,40 @@ function DnsCard() {
   )
 }
 
+// 按用途分区，避免一屏并列十张同质表单。
+const SECTIONS = [
+  { key: 'identity', title: '本机身份', desc: '本机在网络内的标识与虚拟地址。' },
+  { key: 'access', title: '接入与监听', desc: '本机如何接入网络，以及对外暴露的端口。' },
+  { key: 'routing', title: '路由与网段', desc: '经本机可达的网段、出口节点与中继服务。' },
+]
+const SEC_OF = {
+  hostname: 'identity', ipv4: 'identity',
+  connector: 'access', 'mapped-listener': 'access', 'port-forward': 'access', whitelist: 'access',
+  route: 'routing', 'proxy-network': 'routing', 'exit-node': 'routing', 'relay-serving': 'routing',
+}
+
 export function Config() {
   return (
     <>
       <div class="card card-degrade cfg-note">
-        <span class="muted">配置经本机 daemon 热重载下发，<strong>需 daemon 运行中</strong>；下发后在「设备 / 诊断」查看生效结果。</span>
+        <span class="muted">以下配置仅作用于<strong>本机节点</strong>，经本机 daemon 热重载下发（<strong>需 daemon 运行中</strong>）；下发后在「设备 / 诊断」查看生效结果。网络级设置（成员 IP、托管路由概览）见「网络」页。</span>
       </div>
-      {FORMS.map((f) => <PatchCard key={f.key} form={f} />)}
-      <DnsCard />
+      {SECTIONS.map((s) => (
+        <section key={s.key} class="cfg-section">
+          <div class="cfg-section-head">
+            <h2>{s.title}</h2>
+            <span class="muted">{s.desc}</span>
+          </div>
+          {FORMS.filter((f) => SEC_OF[f.key] === s.key).map((f) => <PatchCard key={f.key} form={f} />)}
+        </section>
+      ))}
+      <section class="cfg-section">
+        <div class="cfg-section-head">
+          <h2>名称解析</h2>
+          <span class="muted">用主机名访问网络内设备（MagicDNS，只读）。</span>
+        </div>
+        <DnsCard />
+      </section>
     </>
   )
 }

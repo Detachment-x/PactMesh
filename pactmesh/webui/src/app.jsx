@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'preact/hooks'
 import { useApp } from './store.jsx'
 import { Overview } from './pages/overview.jsx'
+import { Network } from './pages/network.jsx'
 import { Devices } from './pages/devices.jsx'
 import { Pending } from './pages/pending.jsx'
 import { Diagnostics } from './pages/diagnostics.jsx'
@@ -16,6 +17,7 @@ const NAV = [
   {
     group: '网络',
     items: [
+      { id: 'network', label: '网络' },
       { id: 'devices', label: '设备' },
       { id: 'pending', label: '待批' },
     ],
@@ -185,6 +187,8 @@ function Page({ id, title, onNavigate }) {
       </div>
       {id === 'overview' ? (
         <Overview onNavigate={onNavigate} />
+      ) : id === 'network' ? (
+        <Network onNavigate={onNavigate} />
       ) : id === 'devices' ? (
         <Devices />
       ) : id === 'pending' ? (
