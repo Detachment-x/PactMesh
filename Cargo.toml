@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "pactmesh",
-    "easytier-rpc-build",
+    "pactmesh-rpc-build",
 ]
 default-members = ["pactmesh"]
 

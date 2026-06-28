@@ -30,7 +30,7 @@ components.d.ts
 musl_gcc
 
 # log
-easytier-panic.log
+pactmesh-panic.log
 
 # web
 node_modules
@@ -47,3 +47,4 @@ easytier-gui/src-tauri/*.sys
 # privateNetwork local-only docs (symlinks to parent)
 /.design/
 /.agent
+pactmesh.log*

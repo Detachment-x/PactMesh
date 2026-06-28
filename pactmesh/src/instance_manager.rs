@@ -270,7 +270,7 @@ impl NetworkInstanceManager {
             let local_instance_running = self
                 .instance_map
                 .iter()
-                .any(|item| item.value().is_easytier_running());
+                .any(|item| item.value().is_pactmesh_running());
             let daemon_running = Arc::strong_count(&self.guard_counter) > 1;
 
             if !local_instance_running && !daemon_running {
@@ -628,7 +628,7 @@ mod tests {
             manager
                 .instance_map
                 .iter()
-                .map(|item| item.is_easytier_running())
+                .map(|item| item.is_pactmesh_running())
                 .filter(|x| *x)
                 .count(),
             5

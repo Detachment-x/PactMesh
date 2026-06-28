@@ -529,7 +529,7 @@ impl VirtualNic {
             match crate::arch::windows::add_self_to_firewall_allowlist() {
                 Ok(_) => tracing::info!("add_self_to_firewall_allowlist successful!"),
                 Err(error) => {
-                    log::warn!(%error, "Failed to add Easytier to firewall allowlist, Subnet proxy and KCP proxy may not work properly.");
+                    log::warn!(%error, "Failed to add PactMesh to firewall allowlist, Subnet proxy and KCP proxy may not work properly.");
                     log::warn!(
                         "You can add firewall rules manually, or use --use-smoltcp to run with user-space TCP/IP stack."
                     );

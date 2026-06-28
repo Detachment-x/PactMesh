@@ -1,225 +1,77 @@
-# Contributing to EasyTier
+# Contributing to PactMesh
 
 [中文版](CONTRIBUTING_zh.md)
 
-Thank you for your interest in contributing to EasyTier! This document provides guidelines and instructions for contributing to the project.
-
-## Table of Contents
-
-- [Development Environment Setup](#development-environment-setup)
-  - [Prerequisites](#prerequisites)
-  - [Installation Steps](#installation-steps)
-- [Project Structure](#project-structure)
-- [Build Guide](#build-guide)
-  - [Building Core](#building-core)
-  - [Building GUI](#building-gui)
-  - [Building Mobile](#building-mobile)
-- [Development Workflow](#development-workflow)
-- [Testing Guidelines](#testing-guidelines)
-- [Pull Request Guidelines](#pull-request-guidelines)
-- [Additional Resources](#additional-resources)
-
-## Development Environment Setup
-
-### Prerequisites
-
-#### Required Tools
-- Node.js v21 or higher
-- pnpm v9 or higher
-- Rust toolchain (version 1.95)
-- LLVM and Clang
-- Protoc (Protocol Buffers compiler)
-
-#### Platform-Specific Dependencies
-
-**Linux (Ubuntu/Debian)**
-```bash
-# Core build dependencies
-sudo apt-get update && sudo apt-get install -y \
-    musl-tools \
-    llvm \
-    clang \
-    protobuf-compiler
-
-# GUI build dependencies
-sudo apt install -y \
-    libwebkit2gtk-4.1-dev \
-    build-essential \
-    curl \
-    wget \
-    file \
-    libgtk-3-dev \
-    librsvg2-dev \
-    libxdo-dev \
-    libssl-dev \
-    libappindicator3-dev \
-    patchelf
-
-# Testing dependencies
-sudo apt install -y bridge-utils
-```
-
-**For Cross-Compilation**
-- musl-cross toolchain (for MIPS and other architectures)
-- Additional setup may be required (see `.github/workflows/` for details)
-
-**For Android Development**
-- Java 20
-- Android SDK (Build Tools 34.0.0)
-- Android NDK (26.0.10792818)
-
-### Installation Steps
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/EasyTier/EasyTier.git
-   cd EasyTier
-   ```
-
-2. Install dependencies:
-   ```bash
-   # Install Rust toolchain
-   rustup install 1.95
-   rustup default 1.95
-
-   # Install project dependencies
-   pnpm -r install
-   ```
+PactMesh is a self-managed mesh VPN built on EasyTier's data plane (see
+`THIRD_PARTY_NOTICES.md` for upstream attribution). It is a single pure-Rust
+workspace that produces two binaries — `pactmesh` (CLI plus the local web
+console) and `pactmesh-core` (daemon). Contributions are welcome.
 
 ## Project Structure
 
 ```
-easytier/          # Core functionality and libraries
-easytier-web/      # Web dashboard and frontend
-easytier-gui/      # Desktop GUI application
-.github/workflows/ # CI/CD configuration files
+pactmesh/             # Main crate: CLI, daemon, trust layer, web controller
+pactmesh/src/         # Rust sources
+pactmesh/webui/       # Web console frontend (Preact + Vite), built and inlined into the binary
+pactmesh-rpc-build/   # Protobuf RPC service stub generator (build dependency)
+.github/workflows/    # CI/CD configuration
 ```
 
-## Build Guide
+## Prerequisites
 
-### Building Core
+- Rust toolchain 1.95 (pinned in `rust-toolchain.toml`)
+- Protoc (Protocol Buffers compiler)
+- LLVM / Clang
+- Node.js + npm — only needed to rebuild the web console under `pactmesh/webui`.
+  The built bundle is committed, so a normal build does not require Node.
+
+### Linux (Ubuntu/Debian)
 
 ```bash
-# Standard build
-cargo build --release
-
-# Platform-specific builds
-cargo build --release --target x86_64-unknown-linux-musl     # Linux x86_64
-cargo build --release --target aarch64-unknown-linux-musl    # Linux ARM64
-cargo build --release --target x86_64-apple-darwin           # macOS x86_64
-cargo build --release --target aarch64-apple-darwin          # macOS M1/M2
-cargo build --release --target x86_64-pc-windows-msvc        # Windows x86_64
+sudo apt-get update && sudo apt-get install -y \
+    llvm clang pkg-config protobuf-compiler libssl-dev
 ```
 
-Build artifacts: `target/[target-triple]/release/`
+### Windows
 
-### Building GUI
+Install the MSVC build tools and `protoc` (for example `winget install protobuf`).
+
+## Building
 
 ```bash
-# 1. Build frontend
-pnpm -r build
-
-# 2. Build GUI application
-cd easytier-gui
-
-# Linux
-pnpm tauri build --target x86_64-unknown-linux-gnu
-
-# macOS
-pnpm tauri build --target x86_64-apple-darwin      # Intel
-pnpm tauri build --target aarch64-apple-darwin     # Apple Silicon
-
-# Windows
-pnpm tauri build --target x86_64-pc-windows-msvc   # x64
+cargo build --release -p pactmesh --bin pactmesh --bin pactmesh-core
 ```
 
-Build artifacts: `easytier-gui/src-tauri/target/release/bundle/`
+Artifacts: `target/release/pactmesh[.exe]` and `target/release/pactmesh-core[.exe]`.
+Supported platforms: Windows x86_64 and Linux x86_64.
 
-### Building Mobile
+### Rebuilding the web console (optional)
 
 ```bash
-# 1. Install Android targets
-rustup target add aarch64-linux-android
-rustup target add armv7-linux-androideabi
-rustup target add i686-linux-android
-rustup target add x86_64-linux-android
-
-# 2. Build Android application
-cd easytier-gui
-pnpm tauri android build
+cd pactmesh/webui
+npm install
+npm run build   # emits the inlined bundle served by the daemon's controller
 ```
 
-Build artifacts: `easytier-gui/src-tauri/gen/android/app/build/outputs/apk/universal/release/`
-
-### Build Notes
-
-1. Cross-compilation for ARM/MIPS requires additional setup
-2. Windows builds need correct DLL files
-3. Check `.github/workflows/` for detailed build configurations
-
-## Development Workflow
-
-1. Create a feature branch from `develop`:
-   ```bash
-   git checkout develop
-   git checkout -b feature/your-feature-name
-   ```
-
-2. Make your changes following our coding standards
-
-3. Write or update tests as needed
-
-4. Use conventional commit messages:
-   ```
-   feat: add new feature
-   fix: resolve bug
-   docs: update documentation
-   test: add tests
-   chore: update dependencies
-   ```
-
-5. Submit a pull request to `develop`
-
-## Testing Guidelines
-
-### Running Tests
+## Testing
 
 ```bash
-# Configure system (Linux)
-sudo modprobe br_netfilter
-sudo sysctl net.bridge.bridge-nf-call-iptables=0
-sudo sysctl net.bridge.bridge-nf-call-ip6tables=0
-
-# Run tests
-cargo test --no-default-features --features=full --verbose
+cargo test
 ```
 
-### Test Requirements
+## Pull Requests
 
-- Write tests for new features
-- Maintain existing test coverage
-- Tests should be isolated and repeatable
-- Include both unit and integration tests
+- Keep changes focused and atomic.
+- Use conventional commit messages (`feat:`, `fix:`, `docs:`, `test:`, `chore:`).
+- Ensure `cargo build` and relevant tests pass.
+- Update documentation when behavior changes.
 
-## Pull Request Guidelines
+## License
 
-1. Target the `develop` branch
-2. Ensure all tests pass
-3. Include clear description and purpose
-4. Reference related issues
-5. Keep changes focused and atomic
-6. Update documentation as needed
+PactMesh is distributed under LGPL-3.0-or-later, matching its upstream. By
+contributing you agree that your contributions are licensed under the same
+terms. See `LICENSE` and `THIRD_PARTY_NOTICES.md`.
 
-## Additional Resources
+## Resources
 
-- [Issue Tracker](https://github.com/EasyTier/EasyTier/issues)
-- [Project Documentation](https://github.com/EasyTier/EasyTier/wiki)
-
-## Questions or Need Help?
-
-Feel free to:
-- Open an issue for questions
-- Join our community discussions
-- Reach out to maintainers
-
-Thank you for contributing to EasyTier! 
+- [Issue Tracker](https://github.com/Detachment-x/PactMesh/issues)

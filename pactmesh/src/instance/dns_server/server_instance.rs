@@ -1,10 +1,10 @@
-// single-instance server in one machine, every easytier instance that has ip address and tun device will try to create a server instance.
+// single-instance server in one machine, every pactmesh instance that has ip address and tun device will try to create a server instance.
 
 // magic dns client will connect to this server to update the dns records.
 // magic dns server will add the dns server ip address to the tun device, and forward the dns request to the dns server
 
 // magic dns client will establish a long live tcp connection to the magic dns server, and when the server stops or crashes,
-// all the clients will exit and let the easytier instance to launch a new server instance.
+// all the clients will exit and let the pactmesh instance to launch a new server instance.
 
 use super::{
     MAGIC_DNS_INSTANCE_ADDR,

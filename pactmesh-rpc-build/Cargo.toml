@@ -1,0 +1,20 @@
+[package]
+name = "pactmesh-rpc-build"
+description = "Protobuf RPC service generator for PactMesh"
+version = "0.1.0"
+edition.workspace = true
+homepage = "https://github.com/Detachment-x/PactMesh"
+repository = "https://github.com/Detachment-x/PactMesh"
+authors = ["PactMesh Project"]
+keywords = ["vpn", "p2p", "network", "pactmesh"]
+categories = ["network-programming", "command-line-utilities"]
+license-file = "LICENSE"
+readme = "README.md"
+
+[dependencies]
+heck = "0.5"
+prost-build = "0.13"
+
+[features]
+default = []
+internal-namespace = []

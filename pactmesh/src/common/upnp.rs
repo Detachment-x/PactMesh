@@ -32,7 +32,7 @@ const UPNP_SEARCH_RESPONSE_TIMEOUT: Duration = Duration::from_millis(300);
 const NAT_PMP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
 const UPNP_LEASE_DURATION_SECS: u32 = 300;
 const UPNP_RENEW_INTERVAL: Duration = Duration::from_secs(240);
-const UPNP_DESCRIPTION: &str = "EasyTier udp hole punch";
+const UPNP_DESCRIPTION: &str = "PactMesh udp hole punch";
 const PORT_MAPPING_BACKEND_NAT_PMP: &str = "nat-pmp";
 const PORT_MAPPING_BACKEND_IGD: &str = "igd";
 

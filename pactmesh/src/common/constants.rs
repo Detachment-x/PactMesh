@@ -34,7 +34,7 @@ define_global_var!(HMAC_SECRET_DIGEST, bool, false);
 
 pub const UDP_HOLE_PUNCH_CONNECTOR_SERVICE_ID: u32 = 2;
 
-pub const WIN_SERVICE_WORK_DIR_REG_KEY: &str = "SOFTWARE\\EasyTier\\Service\\WorkDir";
+pub const WIN_SERVICE_WORK_DIR_REG_KEY: &str = "SOFTWARE\\PactMesh\\Service\\WorkDir";
 
 pub const PACTMESH_VERSION: &str = git_version::git_version!(
     args = ["--abbrev=8", "--always", "--dirty=~"],

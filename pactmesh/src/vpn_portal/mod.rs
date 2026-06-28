@@ -1,5 +1,5 @@
-// with vpn portal, user can use other vpn client to connect to easytier servers
-// without installing easytier.
+// with vpn portal, user can use other vpn client to connect to pactmesh servers
+// without installing pactmesh.
 // these vpn client include:
 // 1. wireguard
 // 2. openvpn (TODO)

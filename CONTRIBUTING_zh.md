@@ -1,233 +1,75 @@
-# EasyTier 贡献指南
+# PactMesh 贡献指南
 
-[English Version](CONTRIBUTING.md)
+[English](CONTRIBUTING.md)
 
-感谢您对 EasyTier 项目的关注！本文档提供了参与项目贡献的指南和说明。
-
-## 目录
-
-- [EasyTier 贡献指南](#easytier-贡献指南)
-  - [目录](#目录)
-  - [开发环境配置](#开发环境配置)
-    - [前置要求](#前置要求)
-      - [必需工具](#必需工具)
-      - [平台特定依赖](#平台特定依赖)
-    - [安装步骤](#安装步骤)
-  - [项目结构](#项目结构)
-  - [构建指南](#构建指南)
-    - [构建核心组件](#构建核心组件)
-    - [构建桌面应用](#构建桌面应用)
-    - [构建移动应用](#构建移动应用)
-    - [构建注意事项](#构建注意事项)
-  - [开发工作流](#开发工作流)
-  - [测试指南](#测试指南)
-    - [运行测试](#运行测试)
-    - [测试要求](#测试要求)
-  - [Pull Request 规范](#pull-request-规范)
-  - [其他资源](#其他资源)
-  - [需要帮助？](#需要帮助)
-
-## 开发环境配置
-
-### 前置要求
-
-#### 必需工具
-- Node.js v21 或更高版本
-- pnpm v9 或更高版本
-- Rust 工具链（版本 1.95）
-- LLVM 和 Clang
-- Protoc（Protocol Buffers 编译器）
-
-#### 平台特定依赖
-
-**Linux (Ubuntu/Debian)**
-```bash
-# 核心构建依赖
-sudo apt-get update && sudo apt-get install -y \
-    musl-tools \
-    llvm \
-    clang \
-    protobuf-compiler
-
-# GUI 构建依赖
-sudo apt install -y \
-    libwebkit2gtk-4.1-dev \
-    build-essential \
-    curl \
-    wget \
-    file \
-    libgtk-3-dev \
-    librsvg2-dev \
-    libxdo-dev \
-    libssl-dev \
-    libappindicator3-dev \
-    patchelf
-
-# 测试依赖
-sudo apt install -y bridge-utils
-```
-
-**交叉编译依赖**
-- musl-cross 工具链（用于 MIPS 和其他架构）
-- 可能需要额外配置（详见 `.github/workflows/` 目录）
-
-**Android 开发依赖**
-- Java 20
-- Android SDK（Build Tools 34.0.0）
-- Android NDK（26.0.10792818）
-
-### 安装步骤
-
-1. 克隆仓库：
-   ```bash
-   git clone https://github.com/EasyTier/EasyTier.git
-   cd EasyTier
-   ```
-
-2. 安装依赖：
-   ```bash
-   # 安装 Rust 工具链
-   rustup install 1.95
-   rustup default 1.95
-
-   # 安装项目依赖
-   pnpm -r install
-   ```
+PactMesh 是构建在 EasyTier 数据面之上的自管理 Mesh VPN（上游归属见
+`THIRD_PARTY_NOTICES.md`）。它是单一的纯 Rust 工作区，产出两个二进制——
+`pactmesh`（CLI 及本地 Web 控制台）与 `pactmesh-core`（守护进程）。欢迎贡献。
 
 ## 项目结构
 
 ```
-easytier/          # 核心功能和库
-easytier-web/      # Web 仪表盘和前端
-easytier-gui/      # 桌面 GUI 应用
-.github/workflows/ # CI/CD 配置文件
+pactmesh/             # 主 crate：CLI、守护进程、信任层、Web 控制器
+pactmesh/src/         # Rust 源码
+pactmesh/webui/       # Web 控制台前端（Preact + Vite），构建后内联进二进制
+pactmesh-rpc-build/   # Protobuf RPC 桩代码生成器（构建依赖）
+.github/workflows/    # CI/CD 配置
 ```
 
-## 构建指南
+## 环境要求
 
-### 构建核心组件
+- Rust 工具链 1.95（由 `rust-toolchain.toml` 固定）
+- Protoc（Protocol Buffers 编译器）
+- LLVM / Clang
+- Node.js + npm——仅在重建 `pactmesh/webui` 下的 Web 控制台时需要。
+  构建产物已随仓库提交，常规构建无需 Node。
+
+### Linux（Ubuntu/Debian）
 
 ```bash
-# 标准构建
-cargo build --release
-
-# 特定平台构建
-cargo build --release --target x86_64-unknown-linux-musl     # Linux x86_64
-cargo build --release --target aarch64-unknown-linux-musl    # Linux ARM64
-cargo build --release --target x86_64-apple-darwin           # macOS x86_64
-cargo build --release --target aarch64-apple-darwin          # macOS M1/M2
-cargo build --release --target x86_64-pc-windows-msvc        # Windows x86_64
+sudo apt-get update && sudo apt-get install -y \
+    llvm clang pkg-config protobuf-compiler libssl-dev
 ```
 
-构建产物位置：`target/[target-triple]/release/`
+### Windows
 
-### 构建桌面应用
+安装 MSVC 构建工具与 `protoc`（例如 `winget install protobuf`）。
+
+## 构建
 
 ```bash
-# 1. 构建前端
-pnpm -r build
-
-# 2. 构建 GUI 应用
-cd easytier-gui
-
-# Linux
-pnpm tauri build --target x86_64-unknown-linux-gnu
-
-# macOS
-pnpm tauri build --target x86_64-apple-darwin      # Intel
-pnpm tauri build --target aarch64-apple-darwin     # Apple Silicon
-
-# Windows
-pnpm tauri build --target x86_64-pc-windows-msvc   # x64
+cargo build --release -p pactmesh --bin pactmesh --bin pactmesh-core
 ```
 
-构建产物位置：`easytier-gui/src-tauri/target/release/bundle/`
+产物：`target/release/pactmesh[.exe]` 与 `target/release/pactmesh-core[.exe]`。
+支持平台：Windows x86_64 与 Linux x86_64。
 
-### 构建移动应用
+### 重建 Web 控制台（可选）
 
 ```bash
-# 1. 安装 Android 目标平台
-rustup target add aarch64-linux-android
-rustup target add armv7-linux-androideabi
-rustup target add i686-linux-android
-rustup target add x86_64-linux-android
-
-# 2. 构建 Android 应用
-cd easytier-gui
-pnpm tauri android build
+cd pactmesh/webui
+npm install
+npm run build   # 生成由守护进程控制器内联服务的打包产物
 ```
 
-构建产物位置：`easytier-gui/src-tauri/gen/android/app/build/outputs/apk/universal/release/`
-
-### 构建注意事项
-
-1. ARM/MIPS 的交叉编译需要额外配置
-2. Windows 构建需要正确的 DLL 文件
-3. 详细构建配置请参考 `.github/workflows/` 目录
-
-## 开发工作流
-
-1. 从 `develop` 分支创建特性分支：
-   ```bash
-   git checkout develop
-   git checkout -b feature/your-feature-name
-   ```
-
-2. 按照代码规范进行修改
-
-3. 编写或更新测试
-
-4. 使用规范的提交信息：
-   ```
-   feat: 添加新功能
-   fix: 修复问题
-   docs: 更新文档
-   test: 添加测试
-   chore: 更新依赖
-   ```
-
-5. 提交 Pull Request 到 `develop` 分支
-
-## 测试指南
-
-### 运行测试
+## 测试
 
 ```bash
-# 配置系统（Linux）
-sudo modprobe br_netfilter
-sudo sysctl net.bridge.bridge-nf-call-iptables=0
-sudo sysctl net.bridge.bridge-nf-call-ip6tables=0
-
-# 运行测试
-cargo test --no-default-features --features=full --verbose
+cargo test
 ```
 
-### 测试要求
+## Pull Request
 
-- 为新功能编写测试
-- 维护现有测试覆盖率
-- 测试应该是独立且可重复的
-- 包含单元测试和集成测试
+- 改动保持聚焦、原子化。
+- 使用约定式提交信息（`feat:`、`fix:`、`docs:`、`test:`、`chore:`）。
+- 确保 `cargo build` 与相关测试通过。
+- 行为变更时同步更新文档。
 
-## Pull Request 规范
+## 许可证
 
-1. 目标分支为 `develop`
-2. 确保所有测试通过
-3. 包含清晰的描述和目的
-4. 关联相关的 issues
-5. 保持变更的原子性和聚焦性
-6. 及时更新相关文档
+PactMesh 按 LGPL-3.0-or-later 分发，与上游许可证口径一致。提交贡献即表示你同意
+你的贡献以相同条款授权。详见 `LICENSE` 与 `THIRD_PARTY_NOTICES.md`。
 
-## 其他资源
+## 资源
 
-- [问题追踪](https://github.com/EasyTier/EasyTier/issues)
-- [项目文档](https://github.com/EasyTier/EasyTier/wiki)
-
-## 需要帮助？
-
-欢迎：
-- 提出问题
-- 参与社区讨论
-- 联系维护者
-
-感谢您为 EasyTier 做出贡献！ 
+- [问题追踪](https://github.com/Detachment-x/PactMesh/issues)

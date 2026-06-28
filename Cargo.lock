@@ -1585,14 +1585,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f678cf4a922c215c63e0de95eb1ff08a958a81d47e485cf9da1e27bf6305cfa5"
 
 [[package]]
-name = "easytier-rpc-build"
-version = "0.1.0"
-dependencies = [
- "heck 0.5.0",
- "prost-build",
-]
-
-[[package]]
 name = "ed25519"
 version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3819,7 +3811,7 @@ checksum = "b15813163c1d831bf4a13c3610c05c0d03b39feb07f7e09fa234dac9b15aaf39"
 
 [[package]]
 name = "pactmesh"
-version = "2.6.2"
+version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "age",
@@ -3860,7 +3852,6 @@ dependencies = [
  "derive_builder",
  "derive_more",
  "directories",
- "easytier-rpc-build",
  "ed25519-dalek",
  "encoding",
  "flume",
@@ -3900,6 +3891,7 @@ dependencies = [
  "once_cell",
  "openssl",
  "ordered_hash_map",
+ "pactmesh-rpc-build",
  "parking_lot",
  "paste",
  "percent-encoding",
@@ -3977,6 +3969,14 @@ dependencies = [
  "zeroize",
  "zip",
  "zstd",
+]
+
+[[package]]
+name = "pactmesh-rpc-build"
+version = "0.1.0"
+dependencies = [
+ "heck 0.5.0",
+ "prost-build",
 ]
 
 [[package]]

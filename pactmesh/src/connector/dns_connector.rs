@@ -115,7 +115,7 @@ impl DnsTunnelConnector {
 
         let srv_domains = IpScheme::VARIANTS
             .iter()
-            .map(|s| (s, format!("_easytier._{}.{}", s, domain_name)))
+            .map(|s| (s, format!("_pactmesh._{}.{}", s, domain_name)))
             .collect::<Vec<_>>();
         tracing::info!("build srv_domains: {:?}", srv_domains);
         let responses = Arc::new(DashSet::new());

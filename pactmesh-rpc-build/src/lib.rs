@@ -7,7 +7,7 @@ use std::fmt;
 const NAMESPACE: &str = "crate::proto::rpc_types";
 
 #[cfg(not(feature = "internal-namespace"))]
-const NAMESPACE: &str = "easytier::proto::rpc_types";
+const NAMESPACE: &str = "pactmesh::proto::rpc_types";
 
 /// The service generator to be used with `prost-build` to generate RPC implementations for
 /// `prost-simple-rpc`.

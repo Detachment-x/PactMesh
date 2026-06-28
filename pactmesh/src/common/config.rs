@@ -1405,7 +1405,7 @@ network_secret = "${TEST_SECRET}"
     /// - 这需要测试 get_network_instance_config 拒绝返回只读配置
     ///
     /// 注：这个测试验证权限标记的正确设置，实际的 RPC API 保护已在
-    /// `easytier/src/rpc_service/instance_manage.rs` 中实现
+    /// `pactmesh/src/rpc_service/instance_manage.rs` 中实现
     #[tokio::test]
     async fn test_readonly_config_api_protection() {
         set_env_var("API_TEST_SECRET", "secret-value");

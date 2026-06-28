@@ -171,7 +171,7 @@ impl HttpTunnelConnector {
         let original_url_clone = original_url.to_string();
         let body_clone = body.clone();
         let network_name = self.global_ctx.network.network_name.clone();
-        let user_agent = format!("easytier/{}", VERSION);
+        let user_agent = format!("pactmesh/{}", VERSION);
         let res = tokio::task::spawn_blocking(move || {
             let uri = http_req::uri::Uri::try_from(original_url_clone.as_ref())
                 .with_context(|| format!("parsing url failed. url: {}", original_url_clone))?;

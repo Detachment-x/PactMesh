@@ -40,14 +40,14 @@ pub struct Event {
     event: GlobalCtxEvent,
 }
 
-struct EasyTierData {
+struct PactMeshData {
     events: RwLock<VecDeque<Event>>,
     tun_fd: (mpsc::Sender<TunFd>, Mutex<Option<mpsc::Receiver<TunFd>>>),
     event_subscriber: RwLock<broadcast::Sender<GlobalCtxEvent>>,
     instance_stop_notifier: Arc<tokio::sync::Notify>,
 }
 
-impl Default for EasyTierData {
+impl Default for PactMeshData {
     fn default() -> Self {
         let (tx, _) = broadcast::channel(16);
         let (sender, receiver) = mpsc::channel(16);
@@ -258,17 +258,17 @@ fn read_sk_self_password_if_needed(
         .with_context(|| format!("failed to read sk_self password from env var {env_name}"))
 }
 
-pub struct EasyTierLauncher {
+pub struct PactMeshLauncher {
     instance_alive: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
     thread_handle: Option<std::thread::JoinHandle<()>>,
     api_service: ArcMutApiService,
     running_cfg: String,
     error_msg: Arc<RwLock<Option<String>>>,
-    data: Arc<EasyTierData>,
+    data: Arc<PactMeshData>,
 }
 
-impl EasyTierLauncher {
+impl PactMeshLauncher {
     pub fn new() -> Self {
         let instance_alive = Arc::new(AtomicBool::new(false));
         Self {
@@ -278,11 +278,11 @@ impl EasyTierLauncher {
             error_msg: Arc::new(RwLock::new(None)),
             running_cfg: String::new(),
             stop_flag: Arc::new(AtomicBool::new(false)),
-            data: Arc::new(EasyTierData::default()),
+            data: Arc::new(PactMeshData::default()),
         }
     }
 
-    async fn handle_easytier_event(event: GlobalCtxEvent, data: &EasyTierData) {
+    async fn handle_pactmesh_event(event: GlobalCtxEvent, data: &PactMeshData) {
         let mut events = data.events.write().unwrap();
         let _ = data.event_subscriber.read().unwrap().send(event.clone());
         events.push_front(Event {
@@ -297,7 +297,7 @@ impl EasyTierLauncher {
     #[cfg(mobile)]
     async fn run_routine_for_mobile(
         instance: &Instance,
-        data: &EasyTierData,
+        data: &PactMeshData,
         tasks: &mut JoinSet<()>,
     ) {
         let global_ctx = instance.get_global_ctx();
@@ -323,11 +323,11 @@ impl EasyTierLauncher {
         });
     }
 
-    async fn easytier_routine(
+    async fn pactmesh_routine(
         cfg: TomlConfigLoader,
         stop_signal: Arc<tokio::sync::Notify>,
         api_service: ArcMutApiService,
-        data: Arc<EasyTierData>,
+        data: Arc<PactMeshData>,
     ) -> Result<(), anyhow::Error> {
         let preload_ctx = Arc::new(crate::common::global_ctx::GlobalCtx::new(cfg.clone()));
         let trust_bundle = inject_trust_pool_from_config(&cfg, preload_ctx).await?;
@@ -356,7 +356,7 @@ impl EasyTierLauncher {
             loop {
                 match receiver.recv().await {
                     Ok(event) => {
-                        Self::handle_easytier_event(event.clone(), &data_c).await;
+                        Self::handle_pactmesh_event(event.clone(), &data_c).await;
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         break;
@@ -439,7 +439,7 @@ impl EasyTierLauncher {
             });
 
             let notifier = data.instance_stop_notifier.clone();
-            let ret = rt.block_on(Self::easytier_routine(
+            let ret = rt.block_on(Self::pactmesh_routine(
                 cfg,
                 stop_notifier,
                 api_service,
@@ -479,13 +479,13 @@ impl EasyTierLauncher {
     }
 }
 
-impl Default for EasyTierLauncher {
+impl Default for PactMeshLauncher {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Drop for EasyTierLauncher {
+impl Drop for PactMeshLauncher {
     fn drop(&mut self) {
         self.stop_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -501,7 +501,7 @@ pub type NetworkInstanceRunningInfo = crate::proto::api::manage::NetworkInstance
 
 pub struct NetworkInstance {
     config: TomlConfigLoader,
-    launcher: Option<EasyTierLauncher>,
+    launcher: Option<PactMeshLauncher>,
     config_file_control: ConfigFileControl,
 }
 
@@ -514,7 +514,7 @@ impl NetworkInstance {
         }
     }
 
-    pub fn is_easytier_running(&self) -> bool {
+    pub fn is_pactmesh_running(&self) -> bool {
         self.launcher.is_some() && self.launcher.as_ref().unwrap().running()
     }
 
@@ -619,11 +619,11 @@ impl NetworkInstance {
     }
 
     pub fn start(&mut self) -> Result<EventBusSubscriber, anyhow::Error> {
-        if self.is_easytier_running() {
+        if self.is_pactmesh_running() {
             return Ok(self.subscribe_event().unwrap());
         }
 
-        let launcher = EasyTierLauncher::new();
+        let launcher = PactMeshLauncher::new();
         self.launcher = Some(launcher);
         let ev = self.subscribe_event().unwrap();
 

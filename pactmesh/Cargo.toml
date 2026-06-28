@@ -1,12 +1,12 @@
 [package]
 name = "pactmesh"
-description = "A full meshed p2p VPN, connecting all your devices in one network with one command."
-homepage = "https://github.com/EasyTier/EasyTier"
-repository = "https://github.com/EasyTier/EasyTier"
-version = "2.6.2"
+description = "Self-managed mesh VPN with signed trust domains and configuration; connect your private devices with one command."
+homepage = "https://github.com/Detachment-x/PactMesh"
+repository = "https://github.com/Detachment-x/PactMesh"
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-authors = ["kkrainbow"]
+authors = ["PactMesh Project"]
 keywords = ["vpn", "p2p", "network", "pactmesh"]
 categories = ["network-programming", "command-line-utilities"]
 license-file = "LICENSE"
@@ -333,7 +333,7 @@ globwalk = "0.8.1"
 regex = "1"
 prost-build = "0.13.5"
 prost-wkt-build = "0.6"
-easytier-rpc-build = { path = "../easytier-rpc-build", features = [
+pactmesh-rpc-build = { path = "../pactmesh-rpc-build", features = [
     "internal-namespace",
 ] }
 prost-reflect-build = { version = "0.14.0" }
