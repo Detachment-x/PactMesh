@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows:
+    name: Build Windows x86_64
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust 1.95
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.95
+          target: x86_64-pc-windows-msvc
+          cache: false
+          rustflags: ''
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '25.5'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        run: cargo build --profile ci-artifact --target x86_64-pc-windows-msvc -p pactmesh --features mimalloc --bin pactmesh --bin pactmesh-core
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          stage=pactmesh-windows-x86_64
+          mkdir -p "$stage"
+          cp target/x86_64-pc-windows-msvc/ci-artifact/pactmesh.exe "$stage"/
+          cp target/x86_64-pc-windows-msvc/ci-artifact/pactmesh-core.exe "$stage"/
+          cp pactmesh/third_party/x86_64/*.dll "$stage"/
+          cp pactmesh/third_party/x86_64/*.sys "$stage"/
+          cp script/install.ps1 script/install.cmd "$stage"/
+          cp README.md "$stage"/ || true
+          7z a -tzip pactmesh-windows-x86_64.zip "$stage" >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pactmesh-windows-x86_64
+          path: pactmesh-windows-x86_64.zip
+          if-no-files-found: error
+
+  build-linux:
+    name: Build Linux x86_64
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install protoc
+        run: |
+          PROTOC_VERSION=25.5
+          curl -LsSf -o /tmp/protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip
+          unzip -q /tmp/protoc.zip -d /tmp/protoc25
+          sudo install -m 0755 /tmp/protoc25/bin/protoc /usr/local/bin/protoc
+          sudo cp -r /tmp/protoc25/include/google /usr/local/include/
+          protoc --version
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libclang-dev clang pkg-config
+
+      - name: Setup Rust toolchain (rust-toolchain.toml pins 1.95)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release -p pactmesh --bin pactmesh --bin pactmesh-core
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          stage=pactmesh-linux-x86_64
+          mkdir -p "$stage"
+          cp target/release/pactmesh "$stage"/
+          cp target/release/pactmesh-core "$stage"/
+          cp script/install.sh "$stage"/
+          cp README.md "$stage"/ || true
+          chmod +x "$stage"/pactmesh "$stage"/pactmesh-core "$stage"/install.sh
+          tar -czf pactmesh-linux-x86_64.tar.gz "$stage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pactmesh-linux-x86_64
+          path: pactmesh-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [ build-windows, build-linux ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/pactmesh-windows-x86_64/pactmesh-windows-x86_64.zip
+            dist/pactmesh-linux-x86_64/pactmesh-linux-x86_64.tar.gz
+            script/install.sh
+            script/install.ps1
+          generate_release_notes: true
+          fail_on_unmatched_files: true

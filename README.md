@@ -206,7 +206,34 @@ pactmesh --rpc-portal 127.0.0.1:<rpc> controller --listen 127.0.0.1:15810
 
 这让非对称拓扑变得可行：一个网络条件好的朋友可以借给你几个月的中继容量，借期签进证书内，无共享密钥，也不需要联合运维。
 
+## 一键安装
+
+预编译版本通过 GitHub Releases 发布（打 `v*` tag 触发，覆盖 **Windows x86_64** 与 **Linux x86_64**）。安装脚本会下载二进制、放进 PATH，并在 Linux 上为 `pactmesh-core` 赋 `cap_net_admin,cap_net_raw`（无需 sudo 即可裸跑 daemon）。
+
+```bash
+# Linux x86_64（需 root；--gh-proxy 走国内代理可选）
+curl -fsSL https://github.com/Detachment-x/PactMesh/releases/latest/download/install.sh | sudo bash
+```
+
+```powershell
+# Windows x86_64（管理员 PowerShell）
+irm https://github.com/Detachment-x/PactMesh/releases/latest/download/install.ps1 | iex
+```
+
+装好后用 **一条命令** 完成首次初始化（建信任域 → 建网络 → 自举本机 → 拉起 daemon → 打开本地 Web 控制台）：
+
+```bash
+pactmesh quickstart
+# 终端会打印 http://127.0.0.1:15810/?token=... ，浏览器打开即用
+```
+
+`quickstart` 在 TTY 下交互询问管理密码与设备密钥密码；自动化/非 TTY 用 `--passphrase-file` / `--device-passphrase-file` 或环境变量 `PNW_ROOT_PASSPHRASE` / `PNW_DEVICE_PASSPHRASE`。需要时可调端口与命名：`pactmesh quickstart --network-id home --listen 127.0.0.1:15810`。
+
+> 想从源码构建、或手动分步初始化（理解每一步在做什么），见下面《快速开始》与《构建与测试》。
+
 ## 快速开始
+
+> 下面是 `pactmesh quickstart` 背后的等价手工步骤，便于理解信任模型；日常首次初始化直接用上面的 `pactmesh quickstart` 即可。
 
 具体二进制名称和服务封装取决于你的构建/打包方式。首次初始化建议按下面的向导顺序执行：先创建信任域并设置管理密码，再创建网络，给根设备自己签发成员证书，最后生成给其他设备使用的 invite。
 

@@ -194,7 +194,34 @@ The mechanism layers on top of `TrustDomainMeta`:
 
 This makes asymmetric topologies practical: a friend with a well-connected home server can lend relay capacity to your domain for a few months, expiry signed in, with no shared secrets and no joint operations.
 
+## One-line Install
+
+Prebuilt binaries ship via GitHub Releases (triggered by `v*` tags, covering **Windows x86_64** and **Linux x86_64**). The installer downloads the binaries, puts them on PATH, and on Linux grants `cap_net_admin,cap_net_raw` to `pactmesh-core` so the daemon runs without sudo.
+
+```bash
+# Linux x86_64 (needs root; optional --gh-proxy for restricted regions)
+curl -fsSL https://github.com/Detachment-x/PactMesh/releases/latest/download/install.sh | sudo bash
+```
+
+```powershell
+# Windows x86_64 (Administrator PowerShell)
+irm https://github.com/Detachment-x/PactMesh/releases/latest/download/install.ps1 | iex
+```
+
+Then a **single command** performs first-run setup (create trust domain → create network → bootstrap this device → start the daemon → open the local web console):
+
+```bash
+pactmesh quickstart
+# prints http://127.0.0.1:15810/?token=... — open it in your browser
+```
+
+`quickstart` prompts for the management and device-key passwords on a TTY; for automation/non-TTY use `--passphrase-file` / `--device-passphrase-file` or the `PNW_ROOT_PASSPHRASE` / `PNW_DEVICE_PASSPHRASE` env vars. Ports and names are configurable, e.g. `pactmesh quickstart --network-id home --listen 127.0.0.1:15810`.
+
+> To build from source or run the manual step-by-step setup (to understand each step), see Quick Start and Build & Test below.
+
 ## Quick Start
+
+> The steps below are the manual equivalent of `pactmesh quickstart`, useful for understanding the trust model; for day-to-day first-run setup just use `pactmesh quickstart` above.
 
 The exact binary name and service wrapper depend on how you build or package this fork. For first-run setup, use this order: create a trust domain and set the management password, create a network, bootstrap the root device as a member, then export an invite for other devices.
 
