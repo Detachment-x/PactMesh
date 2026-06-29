@@ -21,6 +21,7 @@ pub mod launcher;
 pub mod peers;
 pub mod proto;
 pub mod rpc_service;
+pub mod secret_seal;
 pub mod service_manager;
 pub mod trust;
 #[cfg(windows)]

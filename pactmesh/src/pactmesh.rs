@@ -185,6 +185,8 @@ enum SubCommand {
     Web,
     #[command(about = "run the Windows system-tray launcher for the web controller")]
     Tray,
+    #[command(about = "unattended supervisor: unseal device passphrase, run daemon + web console (for boot autostart)")]
+    Serve(ServeArgs),
     #[command(about = "interactive ratatui console (Node + Peers v0)")]
     Tui,
     #[command(about = t!("core_clap.generate_completions").to_string())]
@@ -288,6 +290,160 @@ struct QuickstartArgs {
     passphrase_file: Option<PathBuf>,
     #[arg(long, help = "file containing the device key passphrase")]
     device_passphrase_file: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct ServeArgs {
+    #[command(subcommand)]
+    sub_command: Option<ServeSubCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+enum ServeSubCommand {
+    #[command(about = "seal the device passphrase and write serve config for unattended boot")]
+    Seal(ServeSealArgs),
+    #[command(about = "run the supervised daemon + web console (default; the service entry point)")]
+    Run(ServeRunArgs),
+}
+
+#[derive(Args, Debug)]
+struct ServeSealArgs {
+    #[arg(long, help = "trust domain id (auto-detected if exactly one exists)")]
+    trust_domain_id: Option<String>,
+    #[arg(long, help = "network id (auto-detected if the domain has exactly one)")]
+    network_id: Option<String>,
+    #[arg(
+        long,
+        default_value = "tcp://0.0.0.0:11010",
+        help = "daemon listener url"
+    )]
+    listeners: String,
+    #[arg(
+        long,
+        help = "run daemon without a TUN device (no VPN dataplane; for testing)"
+    )]
+    no_tun: bool,
+    #[arg(
+        long,
+        default_value = "127.0.0.1:15810",
+        help = "web console listen address (loopback only)"
+    )]
+    listen: SocketAddr,
+    #[arg(long, help = "file containing the device key passphrase")]
+    device_passphrase_file: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct ServeRunArgs {
+    #[arg(
+        long,
+        default_value = "900",
+        help = "root passphrase unlock TTL in seconds"
+    )]
+    unlock_ttl_secs: u64,
+}
+
+/// Non-secret boot config persisted by `serve seal` and consumed by `serve run`.
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+struct ServeConfig {
+    trust_domain_id: String,
+    network_id: String,
+    listeners: String,
+    no_tun: bool,
+    listen: String,
+}
+
+const SERVE_CONFIG_FILE: &str = "serve.json";
+const SERVE_SEALED_FILE: &str = "serve-device.sealed";
+
+fn serve_seal(args: &ServeSealArgs) -> Result<(), Error> {
+    let domains = pactmesh::control::list_domains()?;
+    if domains.is_empty() {
+        anyhow::bail!("no trust domain found; run `pactmesh quickstart` first");
+    }
+    let trust_domain_id = match &args.trust_domain_id {
+        Some(td) => {
+            if !domains.iter().any(|d| &d.trust_domain_id == td) {
+                anyhow::bail!("trust domain '{td}' not found");
+            }
+            td.clone()
+        }
+        None => {
+            if domains.len() != 1 {
+                let ids: Vec<&str> = domains.iter().map(|d| d.trust_domain_id.as_str()).collect();
+                anyhow::bail!(
+                    "multiple trust domains exist; pass --trust-domain-id (one of: {})",
+                    ids.join(", ")
+                );
+            }
+            domains[0].trust_domain_id.clone()
+        }
+    };
+    let domain = domains
+        .iter()
+        .find(|d| d.trust_domain_id == trust_domain_id)
+        .expect("trust domain just validated to exist");
+    let network_id = match &args.network_id {
+        Some(nid) => {
+            if !domain.networks.iter().any(|n| n == nid) {
+                anyhow::bail!("network '{nid}' not found in trust domain '{trust_domain_id}'");
+            }
+            nid.clone()
+        }
+        None => {
+            if domain.networks.len() != 1 {
+                anyhow::bail!(
+                    "trust domain '{trust_domain_id}' has {} networks; pass --network-id (one of: {})",
+                    domain.networks.len(),
+                    domain.networks.join(", ")
+                );
+            }
+            domain.networks[0].clone()
+        }
+    };
+
+    let device_passphrase =
+        resolve_quickstart_device_passphrase(args.device_passphrase_file.as_ref())?;
+    let sealed = pactmesh::secret_seal::seal(device_passphrase.as_bytes())
+        .context("failed to seal device passphrase")?;
+    // The sealed blob must round-trip on this machine before we trust it at boot.
+    let roundtrip = pactmesh::secret_seal::unseal(&sealed).context("seal self-check failed")?;
+    if roundtrip != device_passphrase.as_bytes() {
+        anyhow::bail!("seal self-check mismatch; refusing to write a bad sealed file");
+    }
+
+    let config_dir = pnw_config_dir()?;
+    let sealed_path = config_dir.join(SERVE_SEALED_FILE);
+    let config_path = config_dir.join(SERVE_CONFIG_FILE);
+    write_private_file(&sealed_path, &sealed)?;
+    let config = ServeConfig {
+        trust_domain_id: trust_domain_id.clone(),
+        network_id: network_id.clone(),
+        listeners: args.listeners.clone(),
+        no_tun: args.no_tun,
+        listen: args.listen.to_string(),
+    };
+    write_private_file(&config_path, serde_json::to_string_pretty(&config)?.as_bytes())?;
+
+    println!("sealed device passphrase -> {}", sealed_path.display());
+    println!("serve config            -> {}", config_path.display());
+    println!("trust domain: {trust_domain_id}");
+    println!("network:      {network_id}");
+    println!();
+    println!("unattended start:        `pactmesh serve run`");
+    println!("register as boot service: `pactmesh service install --serve`");
+    Ok(())
+}
+
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), Error> {
+    std::fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to chmod {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn quickstart_core_path(exe: &std::path::Path) -> Result<PathBuf, Error> {
@@ -1671,6 +1827,12 @@ struct InstallArgs {
     #[arg(long, help = "path to pactmesh-core binary")]
     core_path: Option<PathBuf>,
 
+    #[arg(
+        long,
+        help = "register `pactmesh serve run` (daemon + web console, self-unsealing) instead of bare pactmesh-core"
+    )]
+    serve: bool,
+
     #[arg(long)]
     service_work_dir: Option<PathBuf>,
 
@@ -2502,6 +2664,97 @@ impl<'a> CommandHandler<'a> {
         };
         println!();
         println!("Setup complete. Starting the web console (Ctrl-C to stop; the daemon keeps running).");
+        self.run_controller(&controller_args).await
+    }
+
+    async fn run_serve(&self, rpc_portal: SocketAddr, args: &ServeArgs) -> Result<(), Error> {
+        match args.sub_command.as_ref() {
+            Some(ServeSubCommand::Seal(seal_args)) => serve_seal(seal_args),
+            Some(ServeSubCommand::Run(run_args)) => self.serve_run(rpc_portal, run_args).await,
+            None => {
+                self.serve_run(rpc_portal, &ServeRunArgs { unlock_ttl_secs: 900 })
+                    .await
+            }
+        }
+    }
+
+    async fn serve_run(&self, rpc_portal: SocketAddr, args: &ServeRunArgs) -> Result<(), Error> {
+        let config_dir = pnw_config_dir()?;
+        let config_path = config_dir.join(SERVE_CONFIG_FILE);
+        let sealed_path = config_dir.join(SERVE_SEALED_FILE);
+
+        let config: ServeConfig = serde_json::from_str(
+            &std::fs::read_to_string(&config_path).with_context(|| {
+                format!(
+                    "serve config not found at {} (run `pactmesh serve seal` first)",
+                    config_path.display()
+                )
+            })?,
+        )
+        .context("failed to parse serve config")?;
+
+        let sealed = std::fs::read(&sealed_path).with_context(|| {
+            format!(
+                "sealed device passphrase not found at {} (run `pactmesh serve seal` first)",
+                sealed_path.display()
+            )
+        })?;
+        let device_passphrase = String::from_utf8(
+            pactmesh::secret_seal::unseal(&sealed).context("failed to unseal device passphrase")?,
+        )
+        .context("unsealed device passphrase is not valid UTF-8")?;
+
+        let exe = std::env::current_exe().context("failed to locate the pactmesh executable")?;
+        let core = quickstart_core_path(&exe)?;
+        let instance_name = gethostname::gethostname().to_string_lossy().to_string();
+
+        let domain_dir = pnw_trust_domains_dir()?.join(&config.trust_domain_id);
+        let domain_dir_str = domain_dir
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("trust-domain path is not UTF-8"))?;
+        let log_path = config_dir.join("pactmesh-core-serve.log");
+        let rpc_arg = format!("{}:{}", rpc_portal.ip(), rpc_portal.port());
+        let no_tun = if config.no_tun { "true" } else { "false" };
+        let daemon_args = [
+            "--network-name",
+            &config.network_id,
+            "--trust-domain-dir",
+            domain_dir_str,
+            "--network-local-id",
+            &config.network_id,
+            "--rpc-portal",
+            &rpc_arg,
+            "--listeners",
+            &config.listeners,
+            "--no-tun",
+            no_tun,
+            "--disable-ipv6",
+            "true",
+            "--instance-name",
+            &instance_name,
+            "--console-log-level",
+            "info",
+            "--daemon",
+        ];
+        let listen: SocketAddr = config.listen.parse().with_context(|| {
+            format!("invalid listen address in serve config: {}", config.listen)
+        })?;
+        println!(
+            "starting pactmesh-core daemon (log: {})...",
+            log_path.display()
+        );
+        let child = spawn_quickstart_daemon(&core, &log_path, &daemon_args, &device_passphrase)?;
+        println!("daemon pid {}", child.id());
+
+        // Let the daemon bind its rpc portal before the console starts serving live panels.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        let controller_args = ControllerArgs {
+            listen,
+            token: None,
+            unlock_ttl_secs: args.unlock_ttl_secs,
+        };
+        println!("starting web console on {listen} (Ctrl-C to stop)");
         self.run_controller(&controller_args).await
     }
 
@@ -9599,23 +9852,34 @@ async fn main() -> Result<(), Error> {
             let service = Service::new(service_args.name)?;
             match service_args.sub_command {
                 ServiceSubCommand::Install(install_args) => {
-                    let bin_path = install_args.core_path.unwrap_or_else(|| {
+                    let default_bin = if install_args.serve {
+                        // Supervisor entry: this very pactmesh binary runs `serve run`.
+                        let mut exe = std::env::current_exe().unwrap();
+                        if cfg!(target_os = "windows") {
+                            exe.set_extension("exe");
+                        }
+                        exe
+                    } else {
                         let mut ret = std::env::current_exe()
                             .unwrap()
                             .parent()
                             .unwrap()
                             .join("pactmesh-core");
-
                         if cfg!(target_os = "windows") {
                             ret.set_extension("exe");
                         }
-
                         ret
-                    });
-                    let bin_path = std::fs::canonicalize(bin_path).map_err(|e| {
-                        anyhow::anyhow!("failed to get pactmesh-core application: {}", e)
-                    })?;
-                    let bin_args = install_args.core_args.unwrap_or_default();
+                    };
+                    let bin_path = install_args.core_path.unwrap_or(default_bin);
+                    let bin_path = std::fs::canonicalize(bin_path)
+                        .map_err(|e| anyhow::anyhow!("failed to get service program: {}", e))?;
+                    let bin_args = if install_args.serve {
+                        let mut a = vec![OsString::from("serve"), OsString::from("run")];
+                        a.extend(install_args.core_args.unwrap_or_default());
+                        a
+                    } else {
+                        install_args.core_args.unwrap_or_default()
+                    };
                     let work_dir = install_args.service_work_dir.unwrap_or_else(|| {
                         if cfg!(target_os = "windows") {
                             bin_path.parent().unwrap().to_path_buf()
@@ -10275,6 +10539,7 @@ async fn main() -> Result<(), Error> {
         }
         SubCommand::Web => handler.run_web()?,
         SubCommand::Tray => handler.run_tray()?,
+        SubCommand::Serve(serve_args) => handler.run_serve(cli.rpc_portal, &serve_args).await?,
         SubCommand::Tui => handler.run_tui().await?,
 
         SubCommand::GenAutocomplete { shell } => {
