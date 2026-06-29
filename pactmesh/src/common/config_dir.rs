@@ -4,6 +4,7 @@ use anyhow::Context;
 
 const CONFIG_SUBDIR: &str = "privateNetwork";
 const TRUST_DOMAINS_SUBDIR: &str = "trust-domains";
+const SERVE_INSTANCES_SUBDIR: &str = "serve-instances";
 
 /// 纯函数：按 (XDG_CONFIG_HOME, HOME, ProjectDirs) 优先级解析配置目录。
 /// env 函数注入便于单测，避免污染进程级环境变量。
@@ -33,6 +34,15 @@ pub fn pnw_trust_domains_dir() -> anyhow::Result<PathBuf> {
     pnw_config_dir()
         .context("locating trust domains dir")
         .map(|d| d.join(TRUST_DOMAINS_SUBDIR))
+}
+
+/// 空载 serve daemon 的实例持久化目录：运行时加网的实例 NetworkConfig 落为
+/// `<dir>/<inst_id>.toml`（含 `[trust_domain]` 定位），重启后 daemon 自动加载并经
+/// `sk_self.seal` 重连（「在本机记住」）。「不记住」的实例加网后删除其 toml。
+pub fn pnw_serve_instances_dir() -> anyhow::Result<PathBuf> {
+    pnw_config_dir()
+        .context("locating serve instances dir")
+        .map(|d| d.join(SERVE_INSTANCES_SUBDIR))
 }
 
 #[cfg(test)]

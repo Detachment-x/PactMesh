@@ -601,6 +601,10 @@ body {
 .onb-foot { text-align: center; margin-top: 18px; font-size: 12.5px; }
 .onb-nudge { border-style: dashed; }
 .onb-nudge .btn { margin-top: 10px; }
+.onb-note { max-width: 520px; margin: 0 auto 14px; padding: 10px 14px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--card); font-size: 13px; line-height: 1.6; }
+.warnbar { max-width: 520px; margin: 0 auto 14px; padding: 10px 14px; border: 1px solid var(--err);
+  border-radius: var(--radius-sm); background: #fff3f2; color: var(--err); font-size: 13px; line-height: 1.6; }
 
 /* D7 a11y：键盘焦点环（仅键盘可见） */
 .nav-item:focus-visible, .metric.clickable:focus-visible, .onb-opt:focus-visible,

@@ -245,6 +245,12 @@ pub async fn inject_trust_pool_from_config(
     )))
 }
 
+/// Sealed device-key passphrase file (per network). Written when the user opts
+/// to "remember on this machine"; unsealed in-process by `secret_seal`. Lets a
+/// runtime-attached (and reboot-reconnected) trust network unlock `sk_self`
+/// without any plaintext passphrase on disk or in the daemon environment.
+const SK_SELF_SEAL_FILE: &str = "sk_self.seal";
+
 fn read_sk_self_password_if_needed(
     domain_dir: &std::path::Path,
     network_local_id: &str,
@@ -254,8 +260,23 @@ fn read_sk_self_password_if_needed(
     if !network_dir.join(SK_SELF_AGE_FILE).is_file() {
         return Ok(String::new());
     }
-    std::env::var(env_name)
-        .with_context(|| format!("failed to read sk_self password from env var {env_name}"))
+    // 1) Environment variable (compat: quickstart / legacy `serve run`).
+    if let Ok(password) = std::env::var(env_name) {
+        return Ok(password);
+    }
+    // 2) Sealed per-network file (runtime attach / reboot auto-reconnect).
+    let sealed_path = network_dir.join(SK_SELF_SEAL_FILE);
+    if sealed_path.is_file() {
+        let sealed = std::fs::read(&sealed_path)
+            .with_context(|| format!("failed to read sealed sk_self password {}", sealed_path.display()))?;
+        let plain = crate::secret_seal::unseal(&sealed)
+            .context("failed to unseal sk_self password")?;
+        return String::from_utf8(plain).context("unsealed sk_self password is not valid UTF-8");
+    }
+    anyhow::bail!(
+        "sk_self password unavailable: set env {env_name} or seal it to {}",
+        sealed_path.display()
+    )
 }
 
 pub struct PactMeshLauncher {
@@ -1037,6 +1058,16 @@ impl NetworkConfig {
         }
 
         cfg.set_flags(flags);
+
+        if let Some(td) = self.trust_domain.as_ref() {
+            cfg.set_trust_domain(Some(crate::common::config::TrustDomainConfig {
+                domain_dir: std::path::PathBuf::from(&td.trust_domain_dir),
+                network_local_id: td.network_local_id.clone(),
+                sk_self_password_env: td.sk_self_password_env.clone(),
+                relay_serving: Vec::new(),
+            }));
+        }
+
         Ok(cfg)
     }
 
@@ -1182,6 +1213,14 @@ impl NetworkConfig {
                     .map(|s| s.to_string())
                     .collect();
             }
+        }
+
+        if let Some(td) = config.get_trust_domain() {
+            result.trust_domain = Some(manage::TrustDomainLocator {
+                trust_domain_dir: td.domain_dir.to_string_lossy().into_owned(),
+                network_local_id: td.network_local_id,
+                sk_self_password_env: td.sk_self_password_env,
+            });
         }
 
         Ok(result)

@@ -96,6 +96,18 @@ message NetworkConfig {
   optional bool need_p2p = 59;
   optional uint64 instance_recv_bps_limit = 60;
   optional bool disable_upnp = 61;
+
+  // Trust-domain locator for runtime-attached signed networks. Carries only the
+  // on-disk locator (domain dir / network id / passphrase env name); the device
+  // passphrase itself is NEVER sent here (delivered via the sealed sk_self.seal
+  // file or the daemon environment).
+  optional TrustDomainLocator trust_domain = 62;
+}
+
+message TrustDomainLocator {
+  string trust_domain_dir = 1;
+  string network_local_id = 2;
+  string sk_self_password_env = 3;
 }
 
 message PortForwardConfig {

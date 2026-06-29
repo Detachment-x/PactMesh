@@ -4545,6 +4545,7 @@ dependencies = [
  "resolv-conf",
  "ring",
  "ringbuf",
+ "rpassword",
  "rstest",
  "rust-i18n",
  "rustls",

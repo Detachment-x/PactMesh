@@ -43,9 +43,10 @@ const LABELS = Object.fromEntries(NAV.flatMap((g) => g.items).map((i) => [i.id, 
 
 export function App() {
   const [active, setActive] = useState('overview')
-  const { domains, domainsLoading } = useApp()
-  // 首启引导：域已加载且无任何网络 → 接管内容区，先带用户建好第一个网络。
-  const onboarding = !domainsLoading && domains.length >= 0 && domains.every((d) => !d.networks.length)
+  const { attached, instancesLoading } = useApp()
+  // 「未加网」空状态（以 ListNetworkInstance 为键）：空载常驻 daemon 起着但零实例挂载
+  // → 接管内容区，引导用户建网并运行时加网（不重启 daemon）。
+  const onboarding = !instancesLoading && !attached
 
   const go = (id) => (e) => {
     if (e && e.type === 'keydown') {

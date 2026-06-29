@@ -42,7 +42,12 @@ use crate::proto::api::instance::{
     VpnPortalRpcClientFactory,
 };
 use std::str::FromStr;
+use anyhow::Context as _;
 use crate::proto::rpc_types::controller::BaseController;
+use crate::proto::api::manage::{
+    ListNetworkInstanceRequest, ListNetworkInstanceResponse, NetworkConfig, NetworkingMethod,
+    RunNetworkInstanceRequest, TrustDomainLocator, WebClientService, WebClientServiceClientFactory,
+};
 use crate::trust::{
     AssignedIpv4, DeviceFingerprint, DisabledCert, IpAssignment, MemberCertFingerprint, PeerHint,
     RevocationReason, RevokedCert, TagName, UnsignedMemberCert, encode_device_id,
@@ -68,6 +73,7 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/pending", get(api_pending))
         .route("/api/approve", post(api_approve))
         .route("/api/reject", post(api_reject))
+        .route("/api/instances", get(api_instances))
         .route("/api/node", get(api_node))
         .route("/api/peers", get(api_peers))
         .route("/api/routes", get(api_routes))
@@ -96,6 +102,7 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/config/acl", post(api_cfg_acl))
         .route("/api/trust/create-domain", post(api_trust_create_domain))
         .route("/api/trust/create-network", post(api_trust_create_network))
+        .route("/api/network/run", post(api_network_run))
         .route("/api/trust/upgrade-peer-to-root", post(api_trust_upgrade_root))
         .route("/api/trust/arm-root-upgrade", post(api_trust_arm_root_upgrade))
         .route("/api/trust/tags", get(api_trust_tags))
@@ -834,6 +841,22 @@ fn parse_reason(value: Option<&str>) -> RevocationReason {
 
 // ---------- 只读 RPC 端点 ----------
 
+/// 列出已挂载到 daemon 的网络实例（ListNetworkInstance 透传）。空载 daemon 返回
+/// `{inst_ids:[]}`（200，区别于 daemon 不可达的 502）→ 前端据此键出「未加网」空状态。
+async fn api_instances(
+    State(s): State<AppState>,
+) -> Result<Json<ListNetworkInstanceResponse>, ApiError> {
+    let client = {
+        let mut g = s.client.lock().await;
+        g.scoped_client::<WebClientServiceClientFactory<BaseController>>(String::new())
+            .await?
+    };
+    let resp = client
+        .list_network_instance(BaseController::default(), ListNetworkInstanceRequest {})
+        .await?;
+    Ok(Json(resp))
+}
+
 async fn api_node(State(s): State<AppState>) -> Result<Json<ShowNodeInfoResponse>, ApiError> {
     let client = {
         let mut g = s.client.lock().await;
@@ -1440,6 +1463,148 @@ async fn api_trust_create_network(Json(req): Json<CreateNetworkReq>) -> Response
         passphrase.as_str(),
     ) {
         Ok(out) => json_response(StatusCode::OK, serde_json::json!(out)),
+        Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct NetworkRunReq {
+    /// 既有信任域 id；缺省=新建一个域（用 `domain_label`）。
+    #[serde(default)]
+    trust_domain_id: Option<String>,
+    #[serde(default)]
+    domain_label: Option<String>,
+    network_local_id: String,
+    #[serde(default = "default_acl_action")]
+    default_action: String,
+    #[serde(default)]
+    device_label: Option<String>,
+    /// true=把设备口令封存到本机（开机自动重连）；false=加网后即删封存文件。
+    #[serde(default)]
+    remember: bool,
+    /// 域 root 管理口令（即用即清）。
+    root_passphrase: String,
+    /// 设备私钥口令（即用即清；封存或一次性）。
+    device_passphrase: String,
+    #[serde(default)]
+    listeners: Vec<String>,
+    #[serde(default)]
+    no_tun: bool,
+}
+
+/// 一站式建网+加网：建域(可选)→建网→自举本机→封存口令→对**运行中**空载 daemon
+/// 调 `RunNetworkInstance`（不重启）。口令经 `sk_self.seal` 送达，绝不进 toml/明文。
+async fn api_network_run(State(s): State<AppState>, Json(req): Json<NetworkRunReq>) -> Response {
+    let root_pass = Zeroizing::new(req.root_passphrase.clone());
+    let device_pass = Zeroizing::new(req.device_passphrase.clone());
+    let result = async {
+        // 1) 既有域 or 新建域
+        let trust_domain_id = match req.trust_domain_id.clone() {
+            Some(td) => td,
+            None => {
+                let label = req.domain_label.clone().unwrap_or_else(|| "home".to_string());
+                control::create_domain(&label, root_pass.as_str())?.trust_domain_id
+            }
+        };
+        // 2) 建网（root 签 v1 空状态）
+        control::create_network(
+            &trust_domain_id,
+            &req.network_local_id,
+            &req.default_action,
+            root_pass.as_str(),
+        )?;
+        // 3) 自举本机：自执行 binary（设备身份助手为 binary 私有），口令经 env 即用即清
+        let device_label = req
+            .device_label
+            .clone()
+            .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().to_string());
+        let exe = std::env::current_exe().context("failed to locate the pactmesh executable")?;
+        let status = std::process::Command::new(&exe)
+            .args([
+                "trust",
+                "bootstrap-self",
+                &trust_domain_id,
+                &req.network_local_id,
+                "--device-label",
+                &device_label,
+            ])
+            .env("PNW_ROOT_PASSPHRASE", root_pass.as_str())
+            .env("PNW_DEVICE_PASSPHRASE", device_pass.as_str())
+            .status()
+            .context("failed to run bootstrap-self")?;
+        if !status.success() {
+            anyhow::bail!("bootstrap-self exited with {status}");
+        }
+        // 4) 封存设备口令到 sk_self.seal（运行时加网 + 重启自动重连的口令通道）
+        let domain_dir = crate::common::config_dir::pnw_trust_domains_dir()?.join(&trust_domain_id);
+        let network_dir = domain_dir.join("networks").join(&req.network_local_id);
+        let seal_path = network_dir.join("sk_self.seal");
+        let sealed = crate::secret_seal::seal(device_pass.as_bytes())?;
+        std::fs::write(&seal_path, &sealed)
+            .with_context(|| format!("failed to write {}", seal_path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&seal_path, std::fs::Permissions::from_mode(0o600));
+        }
+        // 5) 对运行中空载 daemon 加网（NetworkConfig 带 trust_domain locator；不重启）
+        let domain_dir_str = domain_dir.to_string_lossy().into_owned();
+        let listeners = if req.listeners.is_empty() {
+            vec!["tcp://0.0.0.0:11010".to_string()]
+        } else {
+            req.listeners.clone()
+        };
+        let nc = NetworkConfig {
+            network_name: Some(req.network_local_id.clone()),
+            networking_method: Some(NetworkingMethod::Standalone as i32),
+            listener_urls: listeners,
+            no_tun: Some(req.no_tun),
+            trust_domain: Some(TrustDomainLocator {
+                trust_domain_dir: domain_dir_str,
+                network_local_id: req.network_local_id.clone(),
+                sk_self_password_env: "PNW_DEVICE_PASSPHRASE".to_string(),
+            }),
+            ..Default::default()
+        };
+        let client = {
+            let mut g = s.client.lock().await;
+            g.scoped_client::<WebClientServiceClientFactory<BaseController>>(String::new())
+                .await?
+        };
+        let resp = client
+            .run_network_instance(
+                BaseController::default(),
+                RunNetworkInstanceRequest {
+                    inst_id: None,
+                    config: Some(nc),
+                    overwrite: true,
+                    source: 0,
+                },
+            )
+            .await?;
+        let inst_id_str = resp.inst_id.map(|u| uuid::Uuid::from(u).to_string());
+        // 6) 「不记住」：实例载入后删封存文件 + 删持久化 toml（口令仅为本次加网用、
+        //    重启不再自动重连；in-memory 实例本会话继续运行直到 daemon 停止）。
+        if !req.remember {
+            tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+            let _ = std::fs::remove_file(&seal_path);
+            if let (Ok(dir), Some(id)) = (
+                crate::common::config_dir::pnw_serve_instances_dir(),
+                inst_id_str.as_ref(),
+            ) {
+                let _ = std::fs::remove_file(dir.join(format!("{id}.toml")));
+            }
+        }
+        Ok::<_, anyhow::Error>(serde_json::json!({
+            "trust_domain_id": trust_domain_id,
+            "network_local_id": req.network_local_id,
+            "inst_id": inst_id_str,
+            "remembered": req.remember,
+        }))
+    }
+    .await;
+    match result {
+        Ok(v) => json_response(StatusCode::OK, v),
         Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
     }
 }

@@ -35,7 +35,7 @@ use url::Url;
 use pactmesh::{
     common::{
         config::TomlConfigLoader,
-        config_dir::{pnw_config_dir, pnw_trust_domains_dir},
+        config_dir::{pnw_config_dir, pnw_serve_instances_dir, pnw_trust_domains_dir},
         constants::PACTMESH_VERSION,
         stun::{StunInfoCollector, StunInfoCollectorTrait},
         trust_context::{SK_SELF_AGE_FILE, SK_SELF_RAW_FILE, write_raw_sk_self},
@@ -294,6 +294,23 @@ struct QuickstartArgs {
 
 #[derive(Args, Debug)]
 struct ServeArgs {
+    #[arg(
+        long,
+        default_value = "127.0.0.1:15810",
+        help = "web console listen address (loopback only)"
+    )]
+    listen: SocketAddr,
+    #[arg(
+        long,
+        default_value = "900",
+        help = "root passphrase unlock TTL in seconds"
+    )]
+    unlock_ttl_secs: u64,
+    #[arg(
+        long,
+        help = "run the daemon without a TUN device (no VPN dataplane; for testing)"
+    )]
+    no_tun: bool,
     #[command(subcommand)]
     sub_command: Option<ServeSubCommand>,
 }
@@ -302,7 +319,7 @@ struct ServeArgs {
 enum ServeSubCommand {
     #[command(about = "seal the device passphrase and write serve config for unattended boot")]
     Seal(ServeSealArgs),
-    #[command(about = "run the supervised daemon + web console (default; the service entry point)")]
+    #[command(about = "run the supervised daemon pinned to a sealed network (legacy; new installs start empty and attach networks at runtime)")]
     Run(ServeRunArgs),
 }
 
@@ -490,7 +507,7 @@ fn spawn_quickstart_daemon(
     core: &std::path::Path,
     log_path: &std::path::Path,
     args: &[&str],
-    device_passphrase: &str,
+    device_passphrase: Option<&str>,
 ) -> Result<std::process::Child, Error> {
     let stdout = std::fs::OpenOptions::new()
         .create(true)
@@ -498,9 +515,12 @@ fn spawn_quickstart_daemon(
         .open(log_path)
         .with_context(|| format!("failed to open {}", log_path.display()))?;
     let stderr = stdout.try_clone()?;
-    std::process::Command::new(core)
-        .args(args)
-        .env("PNW_DEVICE_PASSPHRASE", device_passphrase)
+    let mut command = std::process::Command::new(core);
+    command.args(args);
+    if let Some(passphrase) = device_passphrase {
+        command.env("PNW_DEVICE_PASSPHRASE", passphrase);
+    }
+    command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(stdout))
         .stderr(std::process::Stdio::from(stderr))
@@ -2651,7 +2671,7 @@ impl<'a> CommandHandler<'a> {
             "[4/4] Starting pactmesh-core daemon (log: {})...",
             log_path.display()
         );
-        let child = spawn_quickstart_daemon(&core, &log_path, &daemon_args, &device_passphrase)?;
+        let child = spawn_quickstart_daemon(&core, &log_path, &daemon_args, Some(&device_passphrase))?;
         println!("      daemon pid {}", child.id());
 
         // Let the daemon bind its rpc portal before the console starts serving live panels.
@@ -2671,11 +2691,67 @@ impl<'a> CommandHandler<'a> {
         match args.sub_command.as_ref() {
             Some(ServeSubCommand::Seal(seal_args)) => serve_seal(seal_args),
             Some(ServeSubCommand::Run(run_args)) => self.serve_run(rpc_portal, run_args).await,
-            None => {
-                self.serve_run(rpc_portal, &ServeRunArgs { unlock_ttl_secs: 900 })
-                    .await
-            }
+            None => self.serve_empty(rpc_portal, args).await,
         }
+    }
+
+    /// Boot-time default: bring up an always-on daemon with **no** network and a
+    /// persistent web console. No device passphrase is needed because no trust
+    /// network is attached at startup; networks are created/joined at runtime
+    /// through the console (see `RunNetworkInstance`). This fixes the desktop
+    /// icon flash (the endpoint file now lives as long as the service) and the
+    /// plaintext passphrase prompt at boot.
+    async fn serve_empty(&self, rpc_portal: SocketAddr, args: &ServeArgs) -> Result<(), Error> {
+        let config_dir = pnw_config_dir()?;
+        let exe = std::env::current_exe().context("failed to locate the pactmesh executable")?;
+        let core = quickstart_core_path(&exe)?;
+        let instance_name = gethostname::gethostname().to_string_lossy().to_string();
+        let log_path = config_dir.join("pactmesh-core-serve.log");
+        let rpc_arg = format!("{}:{}", rpc_portal.ip(), rpc_portal.port());
+        let no_tun = if args.no_tun { "true" } else { "false" };
+        // 实例持久化目录：运行时加网的「记住」实例落 toml 于此，重启自动加载并经
+        // sk_self.seal 重连（--empty 只跳过自动建默认网，不抑制加载已持久化实例）。
+        let instances_dir = pnw_serve_instances_dir()?;
+        std::fs::create_dir_all(&instances_dir).with_context(|| {
+            format!("failed to create {}", instances_dir.display())
+        })?;
+        let instances_dir_str = instances_dir
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("serve instances path is not UTF-8"))?;
+        let daemon_args = [
+            "--empty",
+            "--rpc-portal",
+            &rpc_arg,
+            "--no-tun",
+            no_tun,
+            "--config-dir",
+            instances_dir_str,
+            "--instance-name",
+            &instance_name,
+            "--console-log-level",
+            "info",
+            "--daemon",
+        ];
+        println!(
+            "starting empty pactmesh-core daemon (log: {})...",
+            log_path.display()
+        );
+        let child = spawn_quickstart_daemon(&core, &log_path, &daemon_args, None)?;
+        println!("daemon pid {}", child.id());
+
+        // Let the daemon bind its rpc portal before the console starts serving.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        let controller_args = ControllerArgs {
+            listen: args.listen,
+            token: None,
+            unlock_ttl_secs: args.unlock_ttl_secs,
+        };
+        println!(
+            "starting web console on {} (Ctrl-C to stop; no network attached yet)",
+            args.listen
+        );
+        self.run_controller(&controller_args).await
     }
 
     async fn serve_run(&self, rpc_portal: SocketAddr, args: &ServeRunArgs) -> Result<(), Error> {
@@ -2743,7 +2819,7 @@ impl<'a> CommandHandler<'a> {
             "starting pactmesh-core daemon (log: {})...",
             log_path.display()
         );
-        let child = spawn_quickstart_daemon(&core, &log_path, &daemon_args, &device_passphrase)?;
+        let child = spawn_quickstart_daemon(&core, &log_path, &daemon_args, Some(&device_passphrase))?;
         println!("daemon pid {}", child.id());
 
         // Let the daemon bind its rpc portal before the console starts serving live panels.
@@ -9116,9 +9192,7 @@ fn prompt_root_passphrase() -> Result<String, Error> {
 fn prompt_line(prompt: &str) -> Result<String, Error> {
     eprint!("{prompt}");
     std::io::stderr().flush()?;
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    Ok(line)
+    Ok(rpassword::read_password()?)
 }
 
 fn validate_root_passphrase(passphrase: String) -> Result<String, Error> {
@@ -9874,7 +9948,11 @@ async fn main() -> Result<(), Error> {
                     let bin_path = std::fs::canonicalize(bin_path)
                         .map_err(|e| anyhow::anyhow!("failed to get service program: {}", e))?;
                     let bin_args = if install_args.serve {
-                        let mut a = vec![OsString::from("serve"), OsString::from("run")];
+                        // Empty-start supervisor: `pactmesh serve` brings up a
+                        // network-less daemon + persistent console at boot. No
+                        // sealed network/passphrase required (legacy `serve run`
+                        // remains available for pinned-network installs).
+                        let mut a = vec![OsString::from("serve")];
                         a.extend(install_args.core_args.unwrap_or_default());
                         a
                     } else {

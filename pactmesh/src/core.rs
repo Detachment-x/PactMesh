@@ -187,6 +187,13 @@ struct Cli {
     )]
     daemon: bool,
 
+    #[clap(
+        long,
+        env = "PNW_EMPTY_START",
+        help = "start with no network instance (live RPC portal, zero instances) so networks can be attached at runtime"
+    )]
+    empty: bool,
+
     #[clap(long, help = t!("core_clap.disable_env_parsing").to_string())]
     disable_env_parsing: bool,
 }
@@ -1498,7 +1505,9 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
     }
     let config_file_count = config_files.len();
     let mut crate_cli_network = {
-        if config_file_count == 0 {
+        if cli.empty {
+            false
+        } else if config_file_count == 0 {
             true
         } else {
             cli.network_options.network_name.is_some()
