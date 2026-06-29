@@ -60,7 +60,7 @@ jobs:
           if-no-files-found: error
 
   build-linux:
-    name: Build Linux x86_64
+    name: Build Linux x86_64 (musl static)
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
@@ -79,21 +79,27 @@ jobs:
       - name: Install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libclang-dev clang pkg-config
+          sudo apt-get install -y --no-install-recommends libclang-dev clang pkg-config musl-tools
 
       - name: Setup Rust toolchain (rust-toolchain.toml pins 1.95)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
 
-      - name: Build
-        run: cargo build --release -p pactmesh --bin pactmesh --bin pactmesh-core
+      - name: Add musl target for pinned toolchain
+        run: rustup target add x86_64-unknown-linux-musl
+
+      - name: Build (static musl)
+        run: cargo build --release --target x86_64-unknown-linux-musl -p pactmesh --bin pactmesh --bin pactmesh-core
 
       - name: Package
         run: |
           set -euo pipefail
           stage=pactmesh-linux-x86_64
+          bindir=target/x86_64-unknown-linux-musl/release
           mkdir -p "$stage"
-          cp target/release/pactmesh "$stage"/
-          cp target/release/pactmesh-core "$stage"/
+          cp "$bindir"/pactmesh "$stage"/
+          cp "$bindir"/pactmesh-core "$stage"/
           cp script/install.sh "$stage"/
           cp README.md "$stage"/ || true
           chmod +x "$stage"/pactmesh "$stage"/pactmesh-core "$stage"/install.sh
