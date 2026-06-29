@@ -59,6 +59,26 @@ jobs:
           path: pactmesh-windows-x86_64.zip
           if-no-files-found: error
 
+      - name: Build offline installer (Inno Setup)
+        run: |
+          set -euo pipefail
+          choco install innosetup --no-progress -y
+          ver="${GITHUB_REF_NAME#v}"
+          case "$ver" in ''|[!0-9]* ) ver="0.0.0" ;; esac
+          iscc="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          "$iscc" \
+            "//DAppVersion=${ver}" \
+            "//DSourceDir=${GITHUB_WORKSPACE}\\pactmesh-windows-x86_64" \
+            "//DOutDir=${GITHUB_WORKSPACE}" \
+            script/pactmesh.iss
+          ls -la pactmesh-setup-x86_64.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pactmesh-setup-x86_64
+          path: pactmesh-setup-x86_64.exe
+          if-no-files-found: error
+
   build-linux:
     name: Build Linux x86_64 (musl static)
     runs-on: ubuntu-22.04
@@ -129,6 +149,7 @@ jobs:
         with:
           files: |
             dist/pactmesh-windows-x86_64/pactmesh-windows-x86_64.zip
+            dist/pactmesh-setup-x86_64/pactmesh-setup-x86_64.exe
             dist/pactmesh-linux-x86_64/pactmesh-linux-x86_64.tar.gz
             script/install.sh
             script/install.ps1

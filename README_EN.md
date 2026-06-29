@@ -208,6 +208,8 @@ curl -fsSL https://github.com/Detachment-x/PactMesh/releases/latest/download/ins
 irm https://github.com/Detachment-x/PactMesh/releases/latest/download/install.ps1 | iex
 ```
 
+> Windows also ships an **offline installer** `pactmesh-setup-x86_64.exe` (a Release asset — just double-click): it drops the binaries and drivers, adds them to PATH, creates "PactMesh Console" Start-menu/desktop shortcuts, and can optionally register the boot auto-start service (run `pactmesh quickstart` first so the service can self-unseal).
+
 Then a **single command** performs first-run setup (create trust domain → create network → bootstrap this device → start the daemon → open the local web console):
 
 ```bash

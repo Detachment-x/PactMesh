@@ -220,6 +220,8 @@ curl -fsSL https://github.com/Detachment-x/PactMesh/releases/latest/download/ins
 irm https://github.com/Detachment-x/PactMesh/releases/latest/download/install.ps1 | iex
 ```
 
+> Windows 也提供**离线安装器** `pactmesh-setup-x86_64.exe`（Release 资产，双击安装）：自动放置二进制与驱动、加入 PATH、创建「PactMesh 控制台」开始菜单/桌面快捷方式，并可选注册开机自启服务（注册后需先 `pactmesh quickstart` 初始化网络，服务方能自解锁启动）。
+
 装好后用 **一条命令** 完成首次初始化（建信任域 → 建网络 → 自举本机 → 拉起 daemon → 打开本地 Web 控制台）：
 
 ```bash
