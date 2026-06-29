@@ -63,6 +63,10 @@ pub async fn run(
         .with_context(|| format!("failed to bind controller on {}", config.listen))?;
     let local = listener.local_addr().unwrap_or(config.listen);
 
+    // 运行时端点文件（Jupyter 式）：存活期间落 {listen,token} 0600，退出删除，
+    // 供 `pactmesh web` / Windows 托盘读取后免 token 直达浏览器。
+    let _endpoint = EndpointFileGuard::write(local, &token);
+
     println!("pactmesh controller serving at http://{local}");
     println!("open in browser: http://{local}/?token={token}");
 
@@ -70,8 +74,96 @@ pub async fn run(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await
     .context("controller http server terminated")?;
 
+    // serve 优雅退出后返回，`_endpoint` 在此 Drop 删除端点文件。
     Ok(())
+}
+
+/// 等待 Ctrl-C（全平台）或 SIGTERM（unix），用于优雅退出以触发端点文件清理。
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+}
+
+const ENDPOINT_FILE: &str = "controller-endpoint.json";
+
+fn endpoint_file_path() -> Option<std::path::PathBuf> {
+    crate::common::config_dir::pnw_config_dir()
+        .ok()
+        .map(|d| d.join(ENDPOINT_FILE))
+}
+
+/// 控制器存活期间持有的端点文件，Drop 时删除（优雅退出清理）。
+struct EndpointFileGuard(Option<std::path::PathBuf>);
+
+impl EndpointFileGuard {
+    fn write(listen: SocketAddr, token: &str) -> Self {
+        Self(write_endpoint_file(listen, token))
+    }
+}
+
+impl Drop for EndpointFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn write_endpoint_file(listen: SocketAddr, token: &str) -> Option<std::path::PathBuf> {
+    let path = endpoint_file_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    let body = serde_json::json!({ "listen": listen.to_string(), "token": token }).to_string();
+    std::fs::write(&path, &body).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Some(path)
+}
+
+/// 读取运行时端点文件，返回浏览器可直达的 URL（含 token）。
+/// 供 `pactmesh web` 与 Windows 托盘复用。
+pub fn read_endpoint_url() -> Result<String> {
+    let path = endpoint_file_path()
+        .context("could not locate config dir for controller endpoint file")?;
+    let raw = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "controller endpoint file not found at {} (start it first with `pactmesh quickstart` or `pactmesh serve`)",
+            path.display()
+        )
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).context("controller endpoint file is corrupt")?;
+    let listen = value
+        .get("listen")
+        .and_then(|x| x.as_str())
+        .context("controller endpoint file missing 'listen'")?;
+    let token = value
+        .get("token")
+        .and_then(|x| x.as_str())
+        .context("controller endpoint file missing 'token'")?;
+    Ok(format!("http://{listen}/?token={token}"))
 }

@@ -181,6 +181,10 @@ enum SubCommand {
     Controller(ControllerArgs),
     #[command(about = "first-run setup: create domain+network, bootstrap this device, start daemon and web console")]
     Quickstart(QuickstartArgs),
+    #[command(about = "open the running web controller in the default browser")]
+    Web,
+    #[command(about = "run the Windows system-tray launcher for the web controller")]
+    Tray,
     #[command(about = "interactive ratatui console (Node + Peers v0)")]
     Tui,
     #[command(about = t!("core_clap.generate_completions").to_string())]
@@ -2336,6 +2340,29 @@ impl<'a> CommandHandler<'a> {
 
     async fn run_tui(&self) -> Result<(), Error> {
         pactmesh::tui::run(self.client.clone(), self.instance_selector.clone()).await
+    }
+
+    fn run_web(&self) -> Result<(), Error> {
+        use std::io::Write;
+        let url = pactmesh::controller::read_endpoint_url()?;
+        println!("opening pactmesh web controller: {url}");
+        let _ = std::io::stdout().flush();
+        if let Err(e) = open::that(&url) {
+            eprintln!("could not launch a browser automatically ({e}); open this URL manually:");
+            println!("{url}");
+        }
+        Ok(())
+    }
+
+    fn run_tray(&self) -> Result<(), Error> {
+        #[cfg(windows)]
+        {
+            pactmesh::tray::run()
+        }
+        #[cfg(not(windows))]
+        {
+            anyhow::bail!("the system tray is only available on Windows; use `pactmesh web` instead")
+        }
     }
 
     async fn run_controller(&self, args: &ControllerArgs) -> Result<(), Error> {
@@ -10246,6 +10273,8 @@ async fn main() -> Result<(), Error> {
                 .run_quickstart(cli.rpc_portal, &quickstart_args)
                 .await?
         }
+        SubCommand::Web => handler.run_web()?,
+        SubCommand::Tray => handler.run_tray()?,
         SubCommand::Tui => handler.run_tui().await?,
 
         SubCommand::GenAutocomplete { shell } => {
