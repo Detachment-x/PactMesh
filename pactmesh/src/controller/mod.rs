@@ -106,10 +106,34 @@ async fn shutdown_signal() {
 
 const ENDPOINT_FILE: &str = "controller-endpoint.json";
 
-fn endpoint_file_path() -> Option<std::path::PathBuf> {
+/// 机器级端点目录：Windows 下用 `%ProgramData%\PactMesh`，让 LocalSystem 服务写的
+/// 端点文件能被交互用户的 `pactmesh web`/托盘读到（跨账户）。非 Windows 返回 None，
+/// 沿用每用户 config 目录、行为不变。
+#[cfg(windows)]
+fn machine_endpoint_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("ProgramData")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\ProgramData"));
+    Some(base.join("PactMesh").join(ENDPOINT_FILE))
+}
+
+#[cfg(not(windows))]
+fn machine_endpoint_path() -> Option<std::path::PathBuf> {
+    None
+}
+
+fn user_endpoint_path() -> Option<std::path::PathBuf> {
     crate::common::config_dir::pnw_config_dir()
         .ok()
         .map(|d| d.join(ENDPOINT_FILE))
+}
+
+/// 端点文件候选路径：机器级优先（服务↔用户跨账户可见），回退每用户目录。
+fn endpoint_path_candidates() -> Vec<std::path::PathBuf> {
+    [machine_endpoint_path(), user_endpoint_path()]
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// 控制器存活期间持有的端点文件，Drop 时删除（优雅退出清理）。
@@ -130,40 +154,56 @@ impl Drop for EndpointFileGuard {
 }
 
 fn write_endpoint_file(listen: SocketAddr, token: &str) -> Option<std::path::PathBuf> {
-    let path = endpoint_file_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok()?;
-    }
     let body = serde_json::json!({ "listen": listen.to_string(), "token": token }).to_string();
-    std::fs::write(&path, &body).ok()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    // 机器级优先（Windows 服务写处用户可读）；写不动（权限）回退每用户目录。
+    for path in endpoint_path_candidates() {
+        if let Some(parent) = path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                continue;
+            }
+        }
+        if std::fs::write(&path, &body).is_err() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        return Some(path);
     }
-    Some(path)
+    None
 }
 
 /// 读取运行时端点文件，返回浏览器可直达的 URL（含 token）。
-/// 供 `pactmesh web` 与 Windows 托盘复用。
+/// 供 `pactmesh web` 与 Windows 托盘复用：机器级优先、回退每用户。
 pub fn read_endpoint_url() -> Result<String> {
-    let path = endpoint_file_path()
-        .context("could not locate config dir for controller endpoint file")?;
-    let raw = std::fs::read_to_string(&path).with_context(|| {
-        format!(
-            "controller endpoint file not found at {} (start it first with `pactmesh quickstart` or `pactmesh serve`)",
-            path.display()
-        )
-    })?;
-    let value: serde_json::Value =
-        serde_json::from_str(&raw).context("controller endpoint file is corrupt")?;
-    let listen = value
-        .get("listen")
-        .and_then(|x| x.as_str())
-        .context("controller endpoint file missing 'listen'")?;
-    let token = value
-        .get("token")
-        .and_then(|x| x.as_str())
-        .context("controller endpoint file missing 'token'")?;
-    Ok(format!("http://{listen}/?token={token}"))
+    let candidates = endpoint_path_candidates();
+    if candidates.is_empty() {
+        anyhow::bail!("could not locate config dir for controller endpoint file");
+    }
+    for path in &candidates {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).context("controller endpoint file is corrupt")?;
+        let listen = value
+            .get("listen")
+            .and_then(|x| x.as_str())
+            .context("controller endpoint file missing 'listen'")?;
+        let token = value
+            .get("token")
+            .and_then(|x| x.as_str())
+            .context("controller endpoint file missing 'token'")?;
+        return Ok(format!("http://{listen}/?token={token}"));
+    }
+    let shown = candidates
+        .last()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    anyhow::bail!(
+        "controller endpoint file not found (looked under {shown}); start it first with `pactmesh serve` or `pactmesh quickstart`"
+    )
 }

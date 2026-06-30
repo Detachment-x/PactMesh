@@ -48,7 +48,7 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
 Name: "addtopath"; Description: "Add PactMesh to the system PATH"; GroupDescription: "System integration:"
 Name: "desktopicon"; Description: "Create a desktop shortcut to the PactMesh console"; GroupDescription: "Shortcuts:"
 Name: "traystartup"; Description: "Launch the PactMesh tray icon at sign-in"; GroupDescription: "Shortcuts:"; Flags: unchecked
-Name: "installservice"; Description: "Register the background service for boot auto-start (run 'pactmesh quickstart' first)"; GroupDescription: "Service (optional, advanced):"; Flags: unchecked
+Name: "installservice"; Description: "Run PactMesh as an always-on background service (starts now and at every boot)"; GroupDescription: "Service:"
 
 [Files]
 Source: "{#SourceDir}\pactmesh.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -59,7 +59,7 @@ Source: "{#SourceDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadm
 
 [Icons]
 Name: "{group}\PactMesh Console"; Filename: "{app}\{#MyAppExeName}"; Parameters: "web"; Comment: "Open the PactMesh web console in your browser"
-Name: "{group}\PactMesh First-time Setup"; Filename: "{app}\{#MyAppExeName}"; Parameters: "quickstart"; Comment: "Create your network and start the console"
+Name: "{group}\PactMesh First-time Setup (advanced)"; Filename: "{app}\{#MyAppExeName}"; Parameters: "quickstart"; Comment: "Optional: create a network from the command line instead of the web console"
 Name: "{group}\Uninstall PactMesh"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\PactMesh Console"; Filename: "{app}\{#MyAppExeName}"; Parameters: "web"; Tasks: desktopicon
 Name: "{userstartup}\PactMesh Tray"; Filename: "{app}\{#MyAppExeName}"; Parameters: "tray"; Tasks: traystartup
@@ -68,8 +68,9 @@ Name: "{userstartup}\PactMesh Tray"; Filename: "{app}\{#MyAppExeName}"; Paramete
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Tasks: addtopath; Check: NeedsAddPath('{app}')
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Parameters: "service install --serve"; Flags: runhidden waituntilterminated; Tasks: installservice; StatusMsg: "Registering PactMesh service..."
-Filename: "{app}\{#MyAppExeName}"; Parameters: "quickstart"; Description: "Run first-time setup now (creates your network)"; Flags: postinstall skipifsilent nowait unchecked
+Filename: "{app}\{#MyAppExeName}"; Parameters: "service install --serve"; Flags: runhidden waituntilterminated; Tasks: installservice; StatusMsg: "Registering the always-on PactMesh service..."
+Filename: "{app}\{#MyAppExeName}"; Parameters: "service start"; Flags: runhidden waituntilterminated; Tasks: installservice; StatusMsg: "Starting the PactMesh service..."
+Filename: "{app}\{#MyAppExeName}"; Parameters: "web"; Description: "Open the PactMesh console now"; Flags: postinstall skipifsilent nowait
 
 [UninstallRun]
 Filename: "{app}\{#MyAppExeName}"; Parameters: "service stop"; Flags: runhidden; RunOnceId: "PactMeshSvcStop"
