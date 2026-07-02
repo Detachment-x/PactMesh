@@ -1,14 +1,16 @@
-import { useCallback } from 'preact/hooks'
+import { useCallback, useState } from 'preact/hooks'
 import { api } from '../api.js'
 import { usePoll } from '../hooks.js'
 import { useApp } from '../store.jsx'
-import { Skeleton, EmptyState, Dot, CopyId } from '../ui.jsx'
+import { Skeleton, EmptyState, Dot, CopyId, Toggle, InlineEdit, Modal, useToast } from '../ui.jsx'
 import { ipv4, dnsZone } from '../format.js'
 
-// 网络级总览（ztncui 风）：聚合现有只读端点 —— 成员 IP 一览、托管路由、IP 分配模式、
-// DNS 状态、访问控制入口。Phase 1 全只读、后端零改动；Phase 2 在此叠加「主控指派 IP / IP 池」。
+// 网络级设置（ztncui / ZeroTier Central 风）：IP 池自动分配、成员 IP 一览、托管路由（本机通告可编辑）、
+// DNS 只读、访问控制入口（主控）。成员（isRoot=false）降级只读并显示「离开网络」。
 export function Network({ onNavigate }) {
-  const { network } = useApp()
+  const { network, requireUnlock, refreshInstances } = useApp()
+  const toast = useToast()
+  const isRoot = !!network?.isRoot
   const td = network?.td
   const nid = network?.nid
 
@@ -17,9 +19,17 @@ export function Network({ onNavigate }) {
     [td, nid],
     8000,
   )
+  const pool = usePoll(
+    useCallback(() => (td ? api.ipPool(td, nid) : Promise.resolve(null)), [td, nid]),
+    [td, nid],
+    0,
+  )
   const routes = usePoll(api.routes, [], 5000)
   const peers = usePoll(api.peers, [], 5000)
   const node = usePoll(api.node, [], 5000)
+
+  const [leaving, setLeaving] = useState(false)
+  const [newRoute, setNewRoute] = useState('')
 
   if (!network) {
     return <EmptyState icon="◍" title="尚未选择网络" hint="在顶栏选择一个网络后查看其网络设置。" />
@@ -37,19 +47,71 @@ export function Network({ onNavigate }) {
   const onlineCount = Object.keys(byHost).length
   const runtimeDown = !!routes.error && !!peers.error && !!node.error
   const zone = dnsZone(my?.config)
+  const poolData = pool.data || {}
 
-  // 托管路由：各节点对外通告的代理网段（hostname/peer 维度）。
+  // 托管路由：各节点对外通告、经其可达的网段（hostname/peer 维度）；本机行可增删。
   const managed = []
   if (my?.proxy_cidrs?.length) for (const c of my.proxy_cidrs) managed.push({ cidr: c, via: my.hostname || `节点 ${my.peer_id}`, self: true })
   for (const r of routes.data?.routes || []) {
     for (const c of r.proxy_cidrs || []) managed.push({ cidr: c, via: r.hostname || `节点 ${r.peer_id}`, self: false })
   }
 
+  // IP 池设置（控制器元数据，需主控解锁；非签名态）。
+  const savePool = async (patch) => {
+    const ok = await requireUnlock()
+    if (!ok) return false
+    try {
+      await api.ipPoolSet({
+        trust_domain_id: td,
+        network_local_id: nid,
+        ip_pool_cidr: patch.ip_pool_cidr ?? poolData.ip_pool_cidr ?? '',
+        auto_assign: patch.auto_assign ?? !!poolData.auto_assign,
+      })
+      toast.ok('IP 池设置已保存')
+      await pool.refresh()
+      return true
+    } catch (e) {
+      toast.err(e.message)
+      return false
+    }
+  }
+
+  // 从池自动为某设备分配空闲 IP（走 assigned-ipv4 签名路径）。
+  const autoAssign = async (fp) => {
+    const ok = await requireUnlock()
+    if (!ok) return
+    try {
+      await api.autoAssign(fp)
+      toast.ok('已自动分配 IP')
+      members.refresh()
+    } catch (e) {
+      toast.err(e.message)
+    }
+  }
+
+  // 本机托管路由增删（daemon RPC，无需签名）。
+  const routeOp = async (action, cidr) => {
+    try {
+      await api.cfgProxyNetwork({ action, cidr })
+      toast.ok(action === 'add' ? '已添加本机通告网段' : '已移除')
+      routes.refresh(); node.refresh()
+      return true
+    } catch (e) {
+      toast.err(e.message)
+      return false
+    }
+  }
+  const addRoute = async () => {
+    const v = newRoute.trim()
+    if (!v) return
+    if (await routeOp('add', v)) setNewRoute('')
+  }
+
   return (
     <>
       {/* 网络信息 */}
       <div class="card">
-        <div class="card-title">网络信息</div>
+        <div class="card-title">网络信息{!isRoot && <span class="badge-role role-cred-soft">成员视图</span>}</div>
         <dl class="kv">
           <dt>网络名</dt><dd>{network.label}</dd>
           <dt>网络 ID</dt><dd class="mono">{nid}</dd>
@@ -59,14 +121,38 @@ export function Network({ onNavigate }) {
         </dl>
       </div>
 
-      {/* IP 分配 */}
+      {/* IP 分配（IP 池 + 自动分配） */}
       <div class="card">
         <div class="card-title">IP 分配</div>
+        <dl class="kv">
+          <dt>地址池网段</dt>
+          <dd>
+            {isRoot ? (
+              <InlineEdit
+                value={poolData.ip_pool_cidr || ''}
+                placeholder="10.10.0.0/24"
+                mono
+                title="点击设置自动分配的地址范围"
+                onCommit={(v) => savePool({ ip_pool_cidr: v })}
+                render={(v) => v ? <span class="mono">{v}</span> : <span class="muted">未设置</span>}
+              />
+            ) : (poolData.ip_pool_cidr ? <span class="mono">{poolData.ip_pool_cidr}</span> : <span class="muted">未设置</span>)}
+          </dd>
+          <dt>自动分配</dt>
+          <dd>
+            {isRoot ? (
+              <Toggle
+                label={poolData.auto_assign ? '开启' : '关闭'}
+                hint="新设备审批时自动从池中分配固定 IP"
+                checked={!!poolData.auto_assign}
+                onChange={(next) => savePool({ auto_assign: next })}
+              />
+            ) : (poolData.auto_assign ? <Dot kind="ok" label="开启" /> : <Dot kind="muted" label="关闭" />)}
+          </dd>
+        </dl>
         <p class="muted">
-          默认<strong>设备自助分配</strong>：每台设备启动时自选虚拟 IPv4（DHCP 模式，地址冲突自动重选），或在该设备「本机配置 › 虚拟 IP」中设置静态地址。
-        </p>
-        <p class="muted">
-          <strong>主控指派</strong>：为指定设备锁定固定虚拟 IP，经 root 签名的网络状态实时下发、节点运行时自动应用。到「设备 › 管理 › 指派 IP」逐台指派或清除。
+          未指派的设备默认<strong>自助分配</strong>虚拟 IPv4（DHCP，冲突自动重选）。设置地址池后，可为设备
+          <strong>从池中自动分配</strong>或在「设备」页逐台指派固定 IP，经 root 签名的网络状态实时下发。
         </p>
       </div>
 
@@ -91,7 +177,13 @@ export function Network({ onNavigate }) {
                       <td>{d.device_label || '未命名设备'}</td>
                       <td class="mono-cell">{d.hostname || <span class="muted">—</span>}</td>
                       <td class="mono-cell">
-                        {d.assigned_ipv4 ? <span class="chip chip-ok"><code>{d.assigned_ipv4}</code></span> : <span class="muted">自分配</span>}
+                        {d.assigned_ipv4 ? (
+                          <span class="chip chip-ok"><code>{d.assigned_ipv4}</code></span>
+                        ) : isRoot && d.role !== 'root' ? (
+                          <button class="btn btn-ghost btn-sm" title="从地址池自动分配一个空闲 IP" onClick={() => autoAssign(d.fingerprint)}>自动分配</button>
+                        ) : (
+                          <span class="muted">自分配</span>
+                        )}
                       </td>
                       <td class="mono-cell">{r ? r.ip : <span class="muted">—</span>}</td>
                       <td>
@@ -106,28 +198,44 @@ export function Network({ onNavigate }) {
         )}
       </div>
 
-      {/* 托管路由 */}
+      {/* 托管路由（本机通告可编辑） */}
       <div class="card">
         <div class="card-title">托管路由</div>
-        <p class="muted">网络内各设备对外通告、经其可达的网段。在设备的「本机配置 › 路由 / 代理网段」中设置。</p>
+        <p class="muted">网络内各设备对外通告、经其可达的网段。<strong>本机</strong>通告的网段可在此增删（作用于本机、经数据面下发）。</p>
         {runtimeDown ? (
-          <div class="card-degrade"><Dot kind="err" label="daemon 未连接" /><span class="muted">启动 daemon 后显示托管路由。</span></div>
-        ) : !managed.length ? (
-          <span class="muted">暂无对外通告的网段。</span>
+          <div class="card-degrade"><Dot kind="err" label="daemon 未连接" /><span class="muted">启动 daemon 后显示并可编辑托管路由。</span></div>
         ) : (
-          <div class="table-wrap">
-            <table class="dtable">
-              <thead><tr><th>网段</th><th>经由</th></tr></thead>
-              <tbody>
-                {managed.map((m, i) => (
-                  <tr key={i}>
-                    <td class="mono-cell">{m.cidr}</td>
-                    <td>{m.via}{m.self && <span class="badge-role role-root">本机</span>}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <>
+            {managed.length > 0 && (
+              <div class="table-wrap">
+                <table class="dtable">
+                  <thead><tr><th>网段</th><th>经由</th><th></th></tr></thead>
+                  <tbody>
+                    {managed.map((m, i) => (
+                      <tr key={i}>
+                        <td class="mono-cell">{m.cidr}</td>
+                        <td>{m.via}{m.self && <span class="badge-role role-root">本机</span>}</td>
+                        <td class="ta-right">
+                          {m.self && <button class="icon-btn danger" title="移除本机通告" onClick={() => routeOp('remove', m.cidr)}>✕</button>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {!managed.length && <p class="muted">暂无对外通告的网段。</p>}
+            <div class="inline-field route-add">
+              <input
+                class="field mono"
+                value={newRoute}
+                placeholder="192.168.9.0/24"
+                onInput={(e) => setNewRoute(e.currentTarget.value)}
+                onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addRoute())}
+              />
+              <button class="btn btn-sm" onClick={addRoute}>添加本机通告</button>
+            </div>
+          </>
         )}
       </div>
 
@@ -141,15 +249,53 @@ export function Network({ onNavigate }) {
         )}
       </div>
 
-      {/* 访问控制入口 */}
-      <div class="card">
-        <div class="card-title">访问控制</div>
-        <p class="muted">控制网络内谁能访问什么。</p>
-        <div class="quick-actions">
-          <button class="btn" onClick={() => onNavigate?.('policy')}>访问策略</button>
-          <button class="btn" onClick={() => onNavigate?.('groups')}>分组</button>
+      {/* 访问控制入口（仅主控） */}
+      {isRoot && (
+        <div class="card">
+          <div class="card-title">访问控制</div>
+          <p class="muted">控制网络内谁能访问什么。</p>
+          <div class="quick-actions">
+            <button class="btn" onClick={() => onNavigate?.('policy')}>访问策略</button>
+            <button class="btn" onClick={() => onNavigate?.('groups')}>分组</button>
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* 离开网络（成员） */}
+      {!isRoot && (
+        <div class="card danger-card">
+          <div class="card-title">离开网络</div>
+          <p class="muted">停止本机在此网络的连接并从本机移除该网络。你的设备将立即断开，需重新经邀请加入。</p>
+          <button class="btn btn-danger btn-sm" onClick={() => setLeaving(true)}>离开网络</button>
+        </div>
+      )}
+
+      {leaving && (
+        <Modal
+          title={`离开网络「${network.label}」`}
+          onClose={() => setLeaving(false)}
+          footer={
+            <>
+              <button class="btn" onClick={() => setLeaving(false)}>取消</button>
+              <button
+                class="btn btn-danger"
+                onClick={async () => {
+                  try {
+                    await api.leave(td, nid)
+                    toast.ok('已离开网络')
+                    setLeaving(false)
+                    refreshInstances()
+                  } catch (e) {
+                    toast.err(e.message)
+                  }
+                }}
+              >确认离开</button>
+            </>
+          }
+        >
+          <p class="modal-note">本机将停止连接并移除该网络配置。此操作只影响本机，不影响网络中的其他设备。</p>
+        </Modal>
+      )}
     </>
   )
 }

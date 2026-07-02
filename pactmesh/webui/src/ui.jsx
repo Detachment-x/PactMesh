@@ -181,3 +181,60 @@ export function Dot({ kind = 'muted', label }) {
     </span>
   )
 }
+
+// ---------------- 行内可编辑单元格（展示即编辑） ----------------
+// 显示态点击进入输入态；Enter/失焦提交、Esc 取消。onCommit(v) 返回 false 则保持编辑
+// （如未解锁被取消、提交失败）。空串允许（由 onCommit 自行处理清除语义）。
+export function InlineEdit({ value, placeholder = '—', mono, disabled, title = '点击编辑', onCommit, render }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [busy, setBusy] = useState(false)
+  const busyRef = useRef(false)
+  const inputRef = useRef(null)
+  useEffect(() => { if (editing) inputRef.current?.focus() }, [editing])
+
+  const shown = render
+    ? render(value)
+    : value
+      ? <span class={mono ? 'mono' : ''}>{value}</span>
+      : <span class="muted">{placeholder}</span>
+
+  if (disabled) return <span class="inline-ro">{shown}</span>
+  if (!editing) {
+    return (
+      <button type="button" class="inline-edit" title={title} onClick={() => { setDraft(value ?? ''); setEditing(true) }}>
+        {shown}
+        <span class="inline-pen" aria-hidden="true">✎</span>
+      </button>
+    )
+  }
+  const finish = () => { busyRef.current = false; setBusy(false); setEditing(false) }
+  const commit = async () => {
+    if (busyRef.current) return
+    const v = draft.trim()
+    if (v === (value ?? '').trim()) { finish(); return }
+    busyRef.current = true
+    setBusy(true)
+    let ok
+    try { ok = await onCommit(v) } catch { ok = false }
+    if (ok === false) { busyRef.current = false; setBusy(false); inputRef.current?.focus() }
+    else finish()
+  }
+  return (
+    <span class="inline-edit-box">
+      <input
+        ref={inputRef}
+        class={'field field-sm' + (mono ? ' mono' : '')}
+        value={draft}
+        disabled={busy}
+        placeholder={placeholder}
+        onInput={(e) => setDraft(e.currentTarget.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); commit() }
+          else if (e.key === 'Escape') { e.preventDefault(); finish() }
+        }}
+        onBlur={commit}
+      />
+    </span>
+  )
+}

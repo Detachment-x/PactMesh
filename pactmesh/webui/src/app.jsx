@@ -41,12 +41,29 @@ const NAV = [
 
 const LABELS = Object.fromEntries(NAV.flatMap((g) => g.items).map((i) => [i.id, i.label]))
 
+// 治理专属页面：仅主控（持 root）可见；成员降级为精简只读 Console。
+const GOV_ONLY = new Set(['pending', 'policy', 'groups', 'advanced'])
+
 export function App() {
   const [active, setActive] = useState('overview')
-  const { attached, instancesLoading } = useApp()
+  const { attached, instancesLoading, network } = useApp()
+  const isRoot = !!network?.isRoot
   // 「未加网」空状态（以 ListNetworkInstance 为键）：空载常驻 daemon 起着但零实例挂载
   // → 接管内容区，引导用户建网并运行时加网（不重启 daemon）。
   const onboarding = !instancesLoading && !attached
+
+  // 角色感知导航：成员隐藏治理页并剔除空分组。
+  const nav = NAV
+    .map((section) => ({
+      ...section,
+      items: section.items.filter((item) => isRoot || !GOV_ONLY.has(item.id)),
+    }))
+    .filter((section) => section.items.length)
+
+  // 切到成员网络后若当前停在被隐藏的治理页 → 回落到概览。
+  useEffect(() => {
+    if (!isRoot && GOV_ONLY.has(active)) setActive('overview')
+  }, [isRoot, active])
 
   const go = (id) => (e) => {
     if (e && e.type === 'keydown') {
@@ -61,7 +78,7 @@ export function App() {
       <TopBar />
       <div class="body-grid">
         <nav class="sidebar" aria-label="主导航">
-          {NAV.map((section) => (
+          {nav.map((section) => (
             <div key={section.group ?? '_'}>
               {section.group && <div class="nav-group-title">{section.group}</div>}
               {section.items.map((item) => (

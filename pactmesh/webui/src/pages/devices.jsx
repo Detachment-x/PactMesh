@@ -3,7 +3,7 @@ import { useState, useCallback } from 'preact/hooks'
 import { api } from '../api.js'
 import { usePoll } from '../hooks.js'
 import { useApp } from '../store.jsx'
-import { Skeleton, EmptyState, ErrorState, CopyId, Dot, Drawer, Toggle, useToast } from '../ui.jsx'
+import { Skeleton, EmptyState, ErrorState, CopyId, Dot, Drawer, Toggle, Modal, InlineEdit, useToast } from '../ui.jsx'
 import { ipv4, ipv6, bytes, latencyUs, ipList as fmtIpList, dnsZone, NAT_TYPE, IDENTITY } from '../format.js'
 
 const ROLE = {
@@ -24,26 +24,6 @@ const REASONS = [
   { v: 'key-compromise', t: '密钥泄露' },
   { v: 'superseded', t: '证书更替' },
 ]
-
-// 从全体成员已指派 IP 推荐一个空闲地址（easy-mode，/24 末位自增）。
-// 取首个已指派网段为池，无则默认 10.10.0.0/24，从 .2 起找首个未用。
-function suggestIp(members) {
-  const used = new Set()
-  let base = null
-  for (const m of members || []) {
-    if (!m.assigned_ipv4) continue
-    const [ip, prefix] = m.assigned_ipv4.split('/')
-    used.add(ip)
-    if (!base) base = { parts: ip.split('.'), prefix: prefix || '24' }
-  }
-  const [a, b, c] = base ? base.parts : ['10', '10', '0', '0']
-  const prefix = base ? base.prefix : '24'
-  for (let h = 2; h <= 254; h++) {
-    const cand = `${a}.${b}.${c}.${h}`
-    if (!used.has(cand)) return `${cand}/${prefix}`
-  }
-  return ''
-}
 
 function capChips(c) {
   const out = []
@@ -102,11 +82,21 @@ function runtimeIndex(peers, routes, selfNode) {
   return { byHost, entries, my }
 }
 
+// 指派/虚拟 IP 单元格显示：已指派 → 绿色 chip；否则运行时自分配地址（灰）或「自分配」。
+function ipCellDisplay(assigned, r) {
+  if (assigned) return <span class="chip chip-ok"><code>{assigned}</code></span>
+  if (r && r.overlayV4 && r.overlayV4 !== '—') return <span class="mono muted" title="运行时自分配">{r.overlayV4}</span>
+  return <span class="muted">自分配</span>
+}
+
 export function Devices() {
-  const { network } = useApp()
+  const { network, requireUnlock } = useApp()
+  const toast = useToast()
+  const isRoot = !!network?.isRoot
   const td = network?.td
   const nid = network?.nid
   const [sel, setSel] = useState(null) // { kind:'member', id:device_id } | { kind:'temp', id:peer_id }
+  const [revoking, setRevoking] = useState(null) // 待吊销设备
 
   const members = usePoll(
     useCallback(() => (td ? api.members(td, nid) : Promise.resolve([])), [td, nid]),
@@ -116,6 +106,22 @@ export function Devices() {
   const peers = usePoll(api.peers, [], 4000)
   const routes = usePoll(api.routes, [], 4000)
   const node = usePoll(api.node, [], 4000)
+
+  // 单项治理提交：JIT 解锁 → 调用 → 刷新。返回 true/false（false=未解锁/失败，供 InlineEdit 保持编辑）。
+  const gov = useCallback(async (fn, okMsg) => {
+    const ok = await requireUnlock()
+    if (!ok) return false
+    try {
+      await fn()
+      toast.ok(okMsg)
+      await members.refresh()
+      return true
+    } catch (e) {
+      toast.err(e.message)
+      return false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requireUnlock])
 
   if (!network) {
     return <EmptyState icon="◍" title="尚未选择网络" hint="在顶栏选择一个网络后查看其设备。" />
@@ -156,6 +162,7 @@ export function Devices() {
         <span class="muted">
           {members.loading ? '加载中…' : `${list.length} 台设备`}
           {!members.loading && tempRows.length > 0 && ` · ${tempRows.length} 台临时设备在线`}
+          {!isRoot && ' · 成员视图（只读）'}
           {runtimeDown && ' · daemon 未连接，运行时信息不可用'}
         </span>
         <button class="btn btn-ghost" onClick={refreshAll}>刷新</button>
@@ -175,9 +182,9 @@ export function Devices() {
             <thead>
               <tr>
                 <th>设备</th>
-                <th>状态</th>
+                <th>{isRoot ? '启用' : '状态'}</th>
                 <th>主机名</th>
-                <th>虚拟 IP</th>
+                <th>指派 / 虚拟 IP</th>
                 <th>连接</th>
                 <th>延迟</th>
                 <th></th>
@@ -188,11 +195,21 @@ export function Devices() {
                 const st = STATUS[d.status] || STATUS.active
                 const chips = capChips(d.capabilities)
                 const isSelf = !!r?.isSelf
+                const fp = d.fingerprint
+                const canGov = isRoot && d.role !== 'root'
                 return (
                   <tr key={d.device_id}>
                     <td>
                       <div class="dev-name">
-                        <span>{d.device_label || '未命名设备'}</span>
+                        {isRoot ? (
+                          <InlineEdit
+                            value={d.device_label || ''}
+                            placeholder="未命名设备"
+                            onCommit={(v) => (v ? gov(() => api.rename(fp, v), '已重命名') : false)}
+                          />
+                        ) : (
+                          <span>{d.device_label || '未命名设备'}</span>
+                        )}
                         {isSelf && <span class="badge-role role-root">本机</span>}
                         {d.role === 'root' && <span class="badge-role role-root">主控</span>}
                         {chips.length > 0 && (
@@ -200,13 +217,50 @@ export function Devices() {
                         )}
                       </div>
                     </td>
-                    <td><Dot kind={st.kind} label={st.label} /></td>
-                    <td class="mono-cell">{d.hostname || <span class="muted" title="设主机名后可显示在线状态与虚拟 IP">—</span>}</td>
-                    <td class="mono-cell">{r ? r.overlayV4 : <span class="muted">—</span>}</td>
+                    <td>
+                      {canGov && (d.status === 'active' || d.status === 'disabled') ? (
+                        <Toggle
+                          checked={d.status === 'active'}
+                          onChange={(next) => gov(next ? () => api.enable(fp) : () => api.disable(fp), next ? '已启用' : '已禁用')}
+                        />
+                      ) : (
+                        <Dot kind={st.kind} label={st.label} />
+                      )}
+                    </td>
+                    <td class="mono-cell">
+                      {isRoot ? (
+                        <InlineEdit
+                          value={d.hostname || ''}
+                          mono
+                          title={d.hostname ? '点击编辑（留空清除）' : '点击设置主机名'}
+                          onCommit={(v) => gov(() => api.hostname(fp, v || undefined), v ? '主机名已更新' : '主机名已清除')}
+                          render={(v) => v ? <span class="mono">{v}</span> : <span class="muted" title="设主机名后可显示在线状态与虚拟 IP">—</span>}
+                        />
+                      ) : (d.hostname || <span class="muted">—</span>)}
+                    </td>
+                    <td class="mono-cell">
+                      {isRoot ? (
+                        <InlineEdit
+                          value={d.assigned_ipv4 || ''}
+                          placeholder="10.10.0.2/24"
+                          mono
+                          title={d.assigned_ipv4 ? '点击改派（留空清除回退自分配）' : '点击指派固定 IP'}
+                          onCommit={(v) => gov(() => api.assignedIpv4(fp, v || null), v ? '已指派 IP' : '已清除指派')}
+                          render={(v) => ipCellDisplay(v, r)}
+                        />
+                      ) : ipCellDisplay(d.assigned_ipv4, r)}
+                    </td>
                     <td>{connCell(r, d.hostname)}</td>
                     <td class="mono-cell">{r?.sum?.online && !r.isSelf ? latencyUs(r.sum.latencyUs) : r?.isSelf ? '本机' : '—'}</td>
                     <td class="ta-right">
-                      <button class="btn btn-ghost btn-sm" onClick={() => setSel({ kind: 'member', id: d.device_id })}>管理</button>
+                      <div class="row-ops">
+                        <button class="btn btn-ghost btn-sm" onClick={() => setSel({ kind: 'member', id: d.device_id })}>
+                          {isRoot ? '管理' : '详情'}
+                        </button>
+                        {canGov && d.status !== 'revoked' && (
+                          <button class="icon-btn danger" title="吊销设备" onClick={() => setRevoking(d)}>🗑</button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 )
@@ -238,9 +292,9 @@ export function Devices() {
         <DeviceDrawer
           key={current.dev.device_id}
           device={current.dev}
-          members={list}
           rt={current.rt}
           zone={zone}
+          canEdit={isRoot}
           onClose={() => setSel(null)}
           onChanged={members.refresh}
         />
@@ -248,7 +302,62 @@ export function Devices() {
       {current && sel.kind === 'temp' && (
         <TempDrawer rt={current.rt} zone={zone} onClose={() => setSel(null)} />
       )}
+      {revoking && (
+        <RevokeDialog
+          device={revoking}
+          onCancel={() => setRevoking(null)}
+          onConfirm={async (reason, note) => {
+            const ok = await gov(() => api.revoke(revoking.fingerprint, reason, note), '设备已吊销')
+            if (ok) setRevoking(null)
+            return ok
+          }}
+        />
+      )}
     </>
+  )
+}
+
+// 吊销确认对话框（不可逆，需二次确认 + 原因）。
+function RevokeDialog({ device, onCancel, onConfirm }) {
+  const [reason, setReason] = useState('removed')
+  const [note, setNote] = useState('')
+  const [confirm, setConfirm] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const go = async () => {
+    if (!confirm || busy) return
+    setBusy(true)
+    const ok = await onConfirm(reason, note || undefined)
+    if (!ok) setBusy(false)
+  }
+  return (
+    <Modal
+      title={`吊销「${device.device_label || '设备'}」`}
+      onClose={onCancel}
+      footer={
+        <>
+          <button class="btn" onClick={onCancel}>取消</button>
+          <button class="btn btn-danger" disabled={!confirm || busy} onClick={go}>
+            {busy ? '吊销中…' : '吊销设备'}
+          </button>
+        </>
+      }
+    >
+      <p class="modal-note">吊销不可恢复：该设备证书将被永久作废、立即失去网络访问。</p>
+      <div class="form-row">
+        <label class="field-label">原因</label>
+        <select class="field" value={reason} onChange={(e) => setReason(e.currentTarget.value)}>
+          {REASONS.map((r) => <option key={r.v} value={r.v}>{r.t}</option>)}
+        </select>
+      </div>
+      <div class="form-row">
+        <label class="field-label">备注<small>（可选，记入证书审计）</small></label>
+        <input class="field" value={note} placeholder="吊销原因…" onInput={(e) => setNote(e.currentTarget.value)} />
+      </div>
+      <label class="check-row">
+        <input type="checkbox" checked={confirm} onChange={(e) => setConfirm(e.currentTarget.checked)} />
+        <span>我确认永久吊销此设备，吊销后无法恢复。</span>
+      </label>
+    </Modal>
   )
 }
 
@@ -349,41 +458,20 @@ function TempDrawer({ rt, zone, onClose }) {
   )
 }
 
-function DeviceDrawer({ device, members, rt, zone, onClose, onChanged }) {
+// 设备详情/管理抽屉：常用编辑（名/主机名/启用/指派IP/吊销）已内联到表格；
+// 此处承载复合项 —— 运行时详情、能力（开关 + 代理网段）、指纹审计。canEdit=false（成员）时降级只读。
+function DeviceDrawer({ device, rt, zone, canEdit, onClose, onChanged }) {
   const { requireUnlock } = useApp()
   const toast = useToast()
   const fp = device.fingerprint
-  const isRoot = device.role === 'root'
+  const caps = device.capabilities
 
-  const [label, setLabel] = useState(device.device_label || '')
-  const [hostname, setHostname] = useState(device.hostname || '')
-  const [assignIp, setAssignIp] = useState(device.assigned_ipv4 || '')
-  const [relayData, setRelayData] = useState(!!device.capabilities.relay_data)
-  const [relayControl, setRelayControl] = useState(!!device.capabilities.relay_control)
-  const [cidrs, setCidrs] = useState(device.capabilities.proxy_subnets || [])
+  const [relayData, setRelayData] = useState(!!caps.relay_data)
+  const [relayControl, setRelayControl] = useState(!!caps.relay_control)
+  const [cidrs, setCidrs] = useState(caps.proxy_subnets || [])
   const [newCidr, setNewCidr] = useState('')
   const [note, setNote] = useState('')
-  const [reason, setReason] = useState('removed')
-  const [confirmRevoke, setConfirmRevoke] = useState(false)
-  const [busy, setBusy] = useState('')
-
-  const act = async (tag, fn, okMsg, after) => {
-    if (busy) return
-    const ok = await requireUnlock()
-    if (!ok) return
-    setBusy(tag)
-    try {
-      await fn()
-      toast.ok(okMsg)
-      // reissue 会换 fingerprint：等列表刷新后 device prop 指向新证书，下个操作才用对 fp
-      await onChanged?.()
-      after?.()
-    } catch (e) {
-      toast.err(e.message)
-    } finally {
-      setBusy('')
-    }
-  }
+  const [busy, setBusy] = useState(false)
 
   const addCidr = () => {
     const v = newCidr.trim()
@@ -392,14 +480,27 @@ function DeviceDrawer({ device, members, rt, zone, onClose, onChanged }) {
     setNewCidr('')
   }
 
-  const saveCaps = () => {
+  const saveCaps = async () => {
+    if (busy) return
+    const ok = await requireUnlock()
+    if (!ok) return
     const body = { relay_data: relayData, relay_control: relayControl }
-    const orig = device.capabilities.proxy_subnets || []
+    const orig = caps.proxy_subnets || []
     if (cidrs.join(',') !== orig.join(',')) {
       if (cidrs.length === 0) body.clear_proxy_subnet = true
       else body.proxy_subnet = cidrs
     }
-    return act('caps', () => api.capability(fp, body), '能力已更新')
+    body.note = note || undefined
+    setBusy(true)
+    try {
+      await api.capability(fp, body)
+      toast.ok('能力已更新')
+      await onChanged?.() // reissue 换 fingerprint：刷新后 device prop 指向新证书
+    } catch (e) {
+      toast.err(e.message)
+    } finally {
+      setBusy(false)
+    }
   }
 
   const st = STATUS[device.status] || STATUS.active
@@ -411,158 +512,71 @@ function DeviceDrawer({ device, members, rt, zone, onClose, onChanged }) {
       onClose={onClose}
       footer={<button class="btn" onClick={onClose}>关闭</button>}
     >
-      {/* 标识 */}
-      <section class="drawer-sec">
-        <div class="sec-title">标识</div>
-        <div class="form-row">
-          <label class="field-label">设备名</label>
-          <div class="inline-field">
-            <input class="field" value={label} onInput={(e) => setLabel(e.currentTarget.value)} placeholder="如：办公笔记本" />
-            <button
-              class="btn btn-primary btn-sm"
-              disabled={busy === 'name' || !label.trim() || label === device.device_label}
-              onClick={() => act('name', () => api.rename(fp, label.trim(), note || undefined), '已重命名')}
-            >保存</button>
-          </div>
-        </div>
-        <div class="form-row">
-          <label class="field-label">主机名<small>（留空清除）</small></label>
-          <div class="inline-field">
-            <input class="field mono" value={hostname} onInput={(e) => setHostname(e.currentTarget.value)} placeholder="laptop-01" />
-            <button
-              class="btn btn-primary btn-sm"
-              disabled={busy === 'host' || hostname === (device.hostname || '')}
-              onClick={() => act('host', () => api.hostname(fp, hostname.trim() || undefined, note || undefined), hostname.trim() ? '主机名已更新' : '主机名已清除')}
-            >保存</button>
-          </div>
-        </div>
-        {zone && device.hostname && (
+      {zone && device.hostname && (
+        <section class="drawer-sec">
           <div class="form-row">
             <label class="field-label">网络域名<small>（MagicDNS）</small></label>
             <div class="mono">{device.hostname}.{zone}</div>
           </div>
-        )}
-      </section>
+        </section>
+      )}
 
       {/* 运行时（在线时并入连通信息） */}
       {rt && <RuntimeSection rt={rt} />}
 
-      {/* 主控指派 IP（network_state 指令，不重签证书；节点运行时自动应用） */}
-      <section class="drawer-sec">
-        <div class="sec-title">指派 IP<small>（主控固定虚拟 IPv4）</small></div>
-        <div class="form-row">
-          <label class="field-label">当前</label>
-          <div class="mono">
-            {device.assigned_ipv4 || <span class="muted">未指派 · 设备自分配（DHCP/静态）</span>}
-          </div>
-        </div>
-        <div class="form-row">
-          <label class="field-label">指派为<small>（CIDR）</small></label>
-          <div class="inline-field">
-            <input
-              class="field mono"
-              value={assignIp}
-              placeholder="10.10.0.2/24"
-              onInput={(e) => setAssignIp(e.currentTarget.value)}
-              onKeyDown={(e) => e.key === 'Enter' && e.preventDefault()}
-            />
-            <button class="btn btn-sm" title="从已用地址推荐一个空闲 IP" onClick={() => setAssignIp(suggestIp(members))}>建议</button>
-            <button
-              class="btn btn-primary btn-sm"
-              disabled={busy === 'ip' || !assignIp.trim() || assignIp.trim() === (device.assigned_ipv4 || '')}
-              onClick={() => act('ip', () => api.assignedIpv4(fp, assignIp.trim()), '已指派 IP')}
-            >指派</button>
-          </div>
-        </div>
-        {device.assigned_ipv4 && (
-          <button
-            class="btn btn-sm"
-            disabled={busy === 'ipclear'}
-            onClick={() => act('ipclear', () => api.assignedIpv4(fp, null), '已清除指派，回退自分配', () => setAssignIp(''))}
-          >清除指派（回退 DHCP）</button>
-        )}
-      </section>
-
       {/* 能力 */}
       <section class="drawer-sec">
         <div class="sec-title">能力</div>
-        <Toggle label="中继数据" hint="允许为他人转发数据流量" checked={relayData} onChange={setRelayData} />
-        <Toggle label="中继控制" hint="允许参与控制面中继" checked={relayControl} onChange={setRelayControl} />
-        <div class="form-row">
-          <label class="field-label">代理网段<small>（CIDR，可访问的子网）</small></label>
-          {cidrs.length > 0 && (
-            <div class="chips editable">
-              {cidrs.map((c) => (
-                <span key={c} class="chip">
-                  <code>{c}</code>
-                  <button class="chip-x" onClick={() => setCidrs(cidrs.filter((x) => x !== c))}>✕</button>
-                </span>
-              ))}
-            </div>
-          )}
-          <div class="inline-field">
-            <input
-              class="field mono"
-              value={newCidr}
-              placeholder="10.0.0.0/24"
-              onInput={(e) => setNewCidr(e.currentTarget.value)}
-              onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addCidr())}
-            />
-            <button class="btn btn-sm" onClick={addCidr}>添加</button>
-          </div>
-        </div>
-        <button class="btn btn-primary btn-sm" disabled={busy === 'caps'} onClick={saveCaps}>
-          {busy === 'caps' ? '保存中…' : '保存能力'}
-        </button>
-      </section>
-
-      {/* 备注（应用于本次签名操作的审计说明） */}
-      <section class="drawer-sec">
-        <div class="sec-title">操作备注<small>（可选，记入证书审计）</small></div>
-        <input class="field" value={note} placeholder="变更原因…" onInput={(e) => setNote(e.currentTarget.value)} />
-      </section>
-
-      {/* 状态 / 危险区 */}
-      {!isRoot && (
-        <section class="drawer-sec danger-sec">
-          <div class="sec-title">状态</div>
-          {device.status === 'disabled' ? (
-            <button class="btn btn-sm" disabled={busy === 'enable'} onClick={() => act('enable', () => api.enable(fp), '已启用')}>
-              启用设备
-            </button>
-          ) : device.status === 'active' ? (
-            <button class="btn btn-warn btn-sm" disabled={busy === 'disable'} onClick={() => act('disable', () => api.disable(fp, note || undefined), '已禁用')}>
-              禁用设备
-            </button>
-          ) : (
-            <span class="muted">当前状态不可切换</span>
-          )}
-
-          {device.status !== 'revoked' && (
-            <div class="revoke-box">
-              <div class="sec-title">吊销（不可恢复）</div>
-              <div class="form-row">
-                <label class="field-label">原因</label>
-                <select class="field" value={reason} onChange={(e) => setReason(e.currentTarget.value)}>
-                  {REASONS.map((r) => <option key={r.v} value={r.v}>{r.t}</option>)}
-                </select>
+        {canEdit ? (
+          <>
+            <Toggle label="中继数据" hint="允许为他人转发数据流量" checked={relayData} onChange={setRelayData} />
+            <Toggle label="中继控制" hint="允许参与控制面中继" checked={relayControl} onChange={setRelayControl} />
+            <div class="form-row">
+              <label class="field-label">代理网段<small>（CIDR，可访问的子网）</small></label>
+              {cidrs.length > 0 && (
+                <div class="chips editable">
+                  {cidrs.map((c) => (
+                    <span key={c} class="chip">
+                      <code>{c}</code>
+                      <button class="chip-x" onClick={() => setCidrs(cidrs.filter((x) => x !== c))}>✕</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div class="inline-field">
+                <input
+                  class="field mono"
+                  value={newCidr}
+                  placeholder="10.0.0.0/24"
+                  onInput={(e) => setNewCidr(e.currentTarget.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addCidr())}
+                />
+                <button class="btn btn-sm" onClick={addCidr}>添加</button>
               </div>
-              <label class="check-row">
-                <input type="checkbox" checked={confirmRevoke} onChange={(e) => setConfirmRevoke(e.currentTarget.checked)} />
-                <span>我确认永久吊销「{device.device_label || '该设备'}」，吊销后无法恢复。</span>
-              </label>
-              <button
-                class="btn btn-danger btn-sm"
-                disabled={!confirmRevoke || busy === 'revoke'}
-                onClick={() => act('revoke', () => api.revoke(fp, reason, note || undefined), '设备已吊销', onClose)}
-              >
-                {busy === 'revoke' ? '吊销中…' : '吊销设备'}
-              </button>
             </div>
-          )}
-        </section>
-      )}
-      {isRoot && <div class="muted drawer-note">主控设备不可在此禁用或吊销。</div>}
+            <div class="form-row">
+              <label class="field-label">操作备注<small>（可选，记入证书审计）</small></label>
+              <input class="field" value={note} placeholder="变更原因…" onInput={(e) => setNote(e.currentTarget.value)} />
+            </div>
+            <button class="btn btn-primary btn-sm" disabled={busy} onClick={saveCaps}>
+              {busy ? '保存中…' : '保存能力'}
+            </button>
+          </>
+        ) : (
+          <>
+            <dl class="kv">
+              <dt>中继数据</dt><dd>{caps.relay_data ? '允许' : '否'}</dd>
+              <dt>中继控制</dt><dd>{caps.relay_control ? '允许' : '否'}</dd>
+            </dl>
+            {caps.proxy_subnets?.length > 0 && (
+              <div class="form-row">
+                <label class="field-label">代理网段</label>
+                <div class="chips">{caps.proxy_subnets.map((c) => <span key={c} class="chip"><code>{c}</code></span>)}</div>
+              </div>
+            )}
+          </>
+        )}
+      </section>
 
       {/* 高级 / 审计（内部标识，默认折叠） */}
       <section class="drawer-sec">

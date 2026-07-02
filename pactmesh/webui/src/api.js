@@ -76,6 +76,14 @@ export const api = {
   // 一站式建网+运行时加网：建域(可选)→建网→自举→封存口令→对运行中空载 daemon 挂实例，不重启
   networkRun: (body) => postJson('/api/network/run', body),
 
+  // 网络级 IP 池（控制器元数据 controller_meta.json，非签名态）：读/写网段 + 自动分配开关
+  ipPool: (td, nid) => getJson(`/api/network/ip-pool?${netQS(td, nid)}`),
+  ipPoolSet: (body) => postJson('/api/network/ip-pool', body),
+  // 从池自动为某设备选一个空闲 IP 并指派（走 assigned-ipv4 签名路径，需会话）
+  autoAssign: (fingerprint) => postJson('/api/network/auto-assign', { fingerprint }),
+  // 成员离开网络：停本机实例（DeleteNetworkInstance）+ 可选清本机封存口令；本机 daemon 操作，不需签名
+  leave: (td, nid) => postJson('/api/network/leave', { trust_domain_id: td, network_local_id: nid }),
+
   // 经邀请加入既有网络（异步：预览→提交(非阻塞)→轮询状态，批准后服务端自动挂载）
   invitePreview: (invite_url) => postJson('/api/network/invite-preview', { invite_url }),
   join: (body) => postJson('/api/network/join', body),

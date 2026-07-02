@@ -45,8 +45,9 @@ use std::str::FromStr;
 use anyhow::Context as _;
 use crate::proto::rpc_types::controller::BaseController;
 use crate::proto::api::manage::{
-    ListNetworkInstanceRequest, ListNetworkInstanceResponse, NetworkConfig, NetworkingMethod,
-    RunNetworkInstanceRequest, TrustDomainLocator, WebClientService, WebClientServiceClientFactory,
+    DeleteNetworkInstanceRequest, GetNetworkInstanceConfigRequest, ListNetworkInstanceRequest,
+    ListNetworkInstanceResponse, NetworkConfig, NetworkingMethod, RunNetworkInstanceRequest,
+    TrustDomainLocator, WebClientService, WebClientServiceClientFactory,
 };
 use crate::trust::{
     AssignedIpv4, DeviceFingerprint, DisabledCert, IpAssignment, MemberCertFingerprint,
@@ -104,6 +105,9 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/trust/create-domain", post(api_trust_create_domain))
         .route("/api/trust/create-network", post(api_trust_create_network))
         .route("/api/network/run", post(api_network_run))
+        .route("/api/network/ip-pool", get(api_ip_pool_get).post(api_ip_pool_set))
+        .route("/api/network/auto-assign", post(api_auto_assign))
+        .route("/api/network/leave", post(api_network_leave))
         .route("/api/trust/upgrade-peer-to-root", post(api_trust_upgrade_root))
         .route("/api/trust/arm-root-upgrade", post(api_trust_arm_root_upgrade))
         .route("/api/trust/tags", get(api_trust_tags))
@@ -840,6 +844,242 @@ fn parse_reason(value: Option<&str>) -> RevocationReason {
         "removed" => RevocationReason::Removed,
         "superseded" => RevocationReason::Superseded,
         _ => RevocationReason::Unspecified,
+    }
+}
+
+// ---------- 网络级 IP 池（controller_meta.json，控制器元数据、非签名态） ----------
+
+#[derive(Deserialize, serde::Serialize, Default)]
+struct ControllerMeta {
+    #[serde(default)]
+    ip_pool_cidr: String,
+    #[serde(default)]
+    auto_assign: bool,
+}
+
+fn controller_meta_path(td: &str, nid: &str) -> anyhow::Result<std::path::PathBuf> {
+    Ok(crate::common::config_dir::pnw_trust_domains_dir()?
+        .join(td)
+        .join("networks")
+        .join(nid)
+        .join("controller_meta.json"))
+}
+
+fn read_controller_meta(td: &str, nid: &str) -> ControllerMeta {
+    controller_meta_path(td, nid)
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 写 0600 私有文件（同 sk_self.seal 的权限约束）。
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    std::fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct IpPoolQuery {
+    trust_domain_id: String,
+    network_local_id: String,
+}
+
+/// 读网络级 IP 池设置（只读，不需解锁）。
+async fn api_ip_pool_get(Query(q): Query<IpPoolQuery>) -> Response {
+    let meta = read_controller_meta(&q.trust_domain_id, &q.network_local_id);
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({ "ip_pool_cidr": meta.ip_pool_cidr, "auto_assign": meta.auto_assign }),
+    )
+}
+
+#[derive(Deserialize)]
+struct IpPoolSetReq {
+    trust_domain_id: String,
+    network_local_id: String,
+    ip_pool_cidr: String,
+    auto_assign: bool,
+}
+
+/// 写网络级 IP 池设置（需主控解锁：证明持有该网络 root 口令；本身非签名态）。
+async fn api_ip_pool_set(State(s): State<AppState>, Json(req): Json<IpPoolSetReq>) -> Response {
+    let (td, nid, _pass) = match require_session(&s).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if td != req.trust_domain_id || nid != req.network_local_id {
+        return json_error(StatusCode::FORBIDDEN, "unlocked session is for a different network");
+    }
+    let result = (|| {
+        let cidr = req.ip_pool_cidr.trim();
+        if !cidr.is_empty() {
+            Ipv4Inet::from_str(cidr)
+                .map_err(|e| anyhow::anyhow!("invalid pool cidr '{cidr}': {e}"))?;
+        }
+        let path = controller_meta_path(&td, &nid)?;
+        if !path.parent().map(|p| p.is_dir()).unwrap_or(false) {
+            anyhow::bail!("network not found");
+        }
+        let meta = ControllerMeta { ip_pool_cidr: cidr.to_string(), auto_assign: req.auto_assign };
+        write_private_file(&path, serde_json::to_string(&meta)?.as_bytes())?;
+        Ok::<(), anyhow::Error>(())
+    })();
+    match result {
+        Ok(()) => json_response(StatusCode::OK, serde_json::json!({ "ok": true })),
+        Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+/// 从池 CIDR 选一个空闲主机地址（跳过网络地址、.1 网关约定、广播、已指派）。addr = u32::from(Ipv4Addr) 大端。
+fn pick_free_ip(pool: &Ipv4Inet, assignments: &[IpAssignment]) -> anyhow::Result<u32> {
+    let base = pool.address.as_ref().map(|a| a.addr).unwrap_or(0);
+    let prefix = pool.network_length as u32;
+    if prefix >= 31 {
+        anyhow::bail!("pool prefix too small for host allocation");
+    }
+    let host_bits = 32 - prefix;
+    let mask = u32::MAX.checked_shl(host_bits).unwrap_or(0);
+    let network = base & mask;
+    let broadcast = network | !mask;
+    let used: std::collections::HashSet<u32> = assignments.iter().map(|a| a.ipv4.addr).collect();
+    for host in network.saturating_add(2)..broadcast {
+        if !used.contains(&host) {
+            return Ok(host);
+        }
+    }
+    anyhow::bail!("no free address left in pool")
+}
+
+#[derive(Deserialize)]
+struct AutoAssignReq {
+    fingerprint: String,
+}
+
+/// 从 IP 池自动为某设备分配空闲 IP，走 assigned-ipv4 签名路径（需解锁）。已指派则原样返回。
+async fn api_auto_assign(State(s): State<AppState>, Json(req): Json<AutoAssignReq>) -> Response {
+    let (td, nid, pass) = match require_session(&s).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let fp = match control::parse_member_cert_fingerprint(&req.fingerprint) {
+        Ok(fp) => fp,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
+    };
+    let result = (|| {
+        let meta = read_controller_meta(&td, &nid);
+        let cidr = meta.ip_pool_cidr.trim();
+        if cidr.is_empty() {
+            anyhow::bail!("IP pool not configured; set the pool CIDR first");
+        }
+        let pool = Ipv4Inet::from_str(cidr)
+            .map_err(|e| anyhow::anyhow!("invalid pool cidr '{cidr}': {e}"))?;
+        let sess = SigningSession::open(&td, &nid, &pass)?;
+        let cert = active_member_cert(&sess, fp)?;
+        let device_id = encode_device_id(cert.details.device_pk.as_bytes());
+        if let Some(a) = sess
+            .original_state
+            .details
+            .payload
+            .ip_assignments
+            .iter()
+            .find(|a| a.device_id == device_id)
+        {
+            let v = sess.version();
+            let ip = format!("{}/{}", std::net::Ipv4Addr::from(a.ipv4.addr), a.ipv4.prefix);
+            return Ok((v, v, ip));
+        }
+        let free = pick_free_ip(&pool, &sess.original_state.details.payload.ip_assignments)?;
+        let assign = AssignedIpv4 { addr: free, prefix: pool.network_length as u8 };
+        let ip = format!("{}/{}", std::net::Ipv4Addr::from(free), pool.network_length);
+        let prev = sess.version();
+        let version = sess.commit(move |next, _root| {
+            next.payload.ip_assignments.retain(|a| a.device_id != device_id);
+            next.payload
+                .ip_assignments
+                .push(IpAssignment { device_id: device_id.clone(), ipv4: assign });
+            Ok(())
+        })?;
+        Ok::<(u64, u64, String), anyhow::Error>((prev, version, ip))
+    })();
+    if let Ok((prev, version, _)) = &result
+        && version != prev
+        && let Ok((_d, _p, state)) = control::read_network_state(&td, &nid)
+    {
+        push_network_state_to_daemon(&s, crate::trust::to_canonical_cbor(&state)).await;
+    }
+    match result {
+        Ok((_prev, version, ip)) => json_response(
+            StatusCode::OK,
+            serde_json::json!({ "fingerprint": req.fingerprint, "assigned_ipv4": ip, "version": version }),
+        ),
+        Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+// ---------- 成员离开网络（停本机实例 + 清封存口令；本机 daemon 操作、不签名） ----------
+
+#[derive(Deserialize)]
+struct LeaveReq {
+    trust_domain_id: String,
+    network_local_id: String,
+}
+
+/// 离开网络：匹配 (td,nid) 对应的运行实例 → DeleteNetworkInstance（停实例 + 删持久化 toml）
+/// → 删本机 sk_self.seal（避免开机自动重连）。不需 root 签名（纯本机 daemon 操作）。
+async fn api_network_leave(State(s): State<AppState>, Json(req): Json<LeaveReq>) -> Response {
+    let result = async {
+        let client = {
+            let mut g = s.client.lock().await;
+            g.scoped_client::<WebClientServiceClientFactory<BaseController>>(String::new())
+                .await?
+        };
+        let listed = client
+            .list_network_instance(BaseController::default(), ListNetworkInstanceRequest {})
+            .await?;
+        let domain_dir =
+            crate::common::config_dir::pnw_trust_domains_dir()?.join(&req.trust_domain_id);
+        let mut matched = Vec::new();
+        for inst in listed.inst_ids.iter() {
+            let cfg = client
+                .get_network_instance_config(
+                    BaseController::default(),
+                    GetNetworkInstanceConfigRequest { inst_id: Some(inst.clone()) },
+                )
+                .await;
+            let Ok(cfg) = cfg else { continue };
+            let Some(loc) = cfg.config.and_then(|c| c.trust_domain) else { continue };
+            let dir_match = std::path::Path::new(&loc.trust_domain_dir) == domain_dir
+                || loc
+                    .trust_domain_dir
+                    .trim_end_matches(|c| c == '/' || c == '\\')
+                    .ends_with(&req.trust_domain_id);
+            if dir_match && loc.network_local_id == req.network_local_id {
+                matched.push(inst.clone());
+            }
+        }
+        if matched.is_empty() {
+            anyhow::bail!("no running instance found for this network");
+        }
+        client
+            .delete_network_instance(
+                BaseController::default(),
+                DeleteNetworkInstanceRequest { inst_ids: matched },
+            )
+            .await?;
+        let network_dir = domain_dir.join("networks").join(&req.network_local_id);
+        let _ = std::fs::remove_file(network_dir.join("sk_self.seal"));
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    match result {
+        Ok(()) => json_response(StatusCode::OK, serde_json::json!({ "status": "left" })),
+        Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
     }
 }
 
