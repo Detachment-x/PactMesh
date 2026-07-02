@@ -76,6 +76,11 @@ export const api = {
   // 一站式建网+运行时加网：建域(可选)→建网→自举→封存口令→对运行中空载 daemon 挂实例，不重启
   networkRun: (body) => postJson('/api/network/run', body),
 
+  // 经邀请加入既有网络（异步：预览→提交(非阻塞)→轮询状态，批准后服务端自动挂载）
+  invitePreview: (invite_url) => postJson('/api/network/invite-preview', { invite_url }),
+  join: (body) => postJson('/api/network/join', body),
+  joinStatus: () => getJson('/api/network/join-status'),
+
   // 连通 / 诊断（均为 daemon RPC 透传，无 daemon → 502）
   node: () => getJson('/api/node'),
   peers: () => getJson('/api/peers'),

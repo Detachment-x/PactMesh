@@ -4,12 +4,61 @@ import { useApp } from './store.jsx'
 import { useToast } from './ui.jsx'
 
 // 「未加网」空状态（Flow A）：空载常驻 daemon 起着但零实例挂载时接管内容区。
-// 两步把用户带到「拥有一个正在运行的网络」——新建/选择信任域（建域）→ 建网，
-// 然后一次性 POST /api/network/run（建域?→建网→自举本机→封存口令→对运行中
-// daemon 调 RunNetworkInstance，不重启），网络即时上线、设备就此挂上。
-// 已有主控信任域时可跳过建域、直接在其下建网。
+// 先分叉角色（F-1）：新建网络（成为主控）或经邀请加入既有网络（成为成员设备）。
+//  - 建网 → 一次性 POST /api/network/run（建域?→建网→自举→封存口令→RunNetworkInstance，不重启）。
+//  - 加入 → 预览邀请确认（F-2）→ POST /api/network/join 起后台 accept-invite（非阻塞）→
+//    等待主控批准（F-3，轮询 join-status，批准后服务端自动挂载）。
+// 有进行中的加入时（含 Console 重开，F-4）直接接管为等待界面。
 
 export function Onboarding() {
+  const { pendingJoins, refreshJoins } = useApp()
+  const [role, setRole] = useState(null) // null | 'create' | 'join'
+  const [dismissed, setDismissed] = useState(false)
+
+  const join = pendingJoins[0]
+  const waiting = join && (join.status === 'pending' || join.status === 'submitting')
+  const terminal = join && (join.status === 'error' || join.status === 'timeout') && !dismissed
+
+  if (waiting) return <JoinWaiting join={join} />
+  if (terminal) {
+    return <JoinWaiting join={join} onRetry={() => { setDismissed(true); setRole('join') }} />
+  }
+
+  return (
+    <div class="onb">
+      <div class="onb-hero">
+        <div class="onb-mark" />
+        <h1>欢迎使用 PactMesh</h1>
+        <p class="onb-lead">服务已在后台常驻，但还没有运行中的网络。你可以新建一个网络成为主控，或用邀请链接加入既有网络。</p>
+      </div>
+
+      {role === null && <RolePicker onPick={setRole} />}
+      {role === 'create' && <CreateFlow onBack={() => setRole(null)} />}
+      {role === 'join' && <JoinFlow onBack={() => setRole(null)} onSubmitted={() => { setDismissed(false); refreshJoins() }} />}
+    </div>
+  )
+}
+
+// ---------- F-1 角色分叉 ----------
+function RolePicker({ onPick }) {
+  return (
+    <div class="onb-roles">
+      <button type="button" class="card onb-role" onClick={() => onPick('create')}>
+        <div class="onb-role-icon">＋</div>
+        <div class="onb-role-title">新建网络</div>
+        <p class="muted">成为网络主控，持有 root 私钥，审批成员、下发策略。适合第一次搭建自己的网络。</p>
+      </button>
+      <button type="button" class="card onb-role" onClick={() => onPick('join')}>
+        <div class="onb-role-icon">↳</div>
+        <div class="onb-role-title">加入既有网络</div>
+        <p class="muted">用别人给你的邀请链接，作为成员设备加入。提交后等待主控批准，批准后自动上线。</p>
+      </button>
+    </div>
+  )
+}
+
+// ---------- 建网（成为主控），沿用原一站式 /api/network/run ----------
+function CreateFlow({ onBack }) {
   const toast = useToast()
   const { domains, refreshDomains, refreshInstances, selectNetwork, daemonReachable } = useApp()
   const rootDomains = useMemo(() => domains.filter((d) => d.is_root_holder), [domains])
@@ -54,13 +103,7 @@ export function Onboarding() {
   }
 
   return (
-    <div class="onb">
-      <div class="onb-hero">
-        <div class="onb-mark" />
-        <h1>欢迎使用 PactMesh</h1>
-        <p class="onb-lead">服务已在后台常驻，但还没有运行中的网络。两步建立你的第一个网络，它会立即上线，随后即可邀请设备加入。</p>
-      </div>
-
+    <>
       {!daemonReachable && (
         <div class="warnbar">后台 daemon 暂不可达——新建网络需要它在运行。请确认服务已启动后再试。</div>
       )}
@@ -137,6 +180,7 @@ export function Onboarding() {
             </label>
 
             <div class="onb-actions">
+              <button class="btn" onClick={onBack}>返回</button>
               <button class="btn btn-primary" disabled={!step1Valid} onClick={() => setStep(2)}>下一步</button>
             </div>
           </>
@@ -186,8 +230,155 @@ export function Onboarding() {
           </>
         )}
       </div>
+    </>
+  )
+}
 
-      <p class="onb-foot muted">已经有邀请链接？让目标设备运行 <code>pactmesh accept-invite "&lt;链接&gt;"</code> 即可申请加入既有网络。</p>
+// ---------- F-2 加入既有网络：预览确认 → 提交加入申请 ----------
+function JoinFlow({ onBack, onSubmitted }) {
+  const toast = useToast()
+  const [url, setUrl] = useState('')
+  const [preview, setPreview] = useState(null)
+  const [checking, setChecking] = useState(false)
+  const [devPass, setDevPass] = useState('')
+  const [remember, setRemember] = useState(true)
+  const [noTun, setNoTun] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  const doPreview = async () => {
+    if (!url.trim() || checking) return
+    setChecking(true)
+    try {
+      const p = await api.invitePreview(url.trim())
+      setPreview(p)
+    } catch (e) {
+      setPreview(null)
+      toast.err('邀请链接无效：' + e.message)
+    }
+    setChecking(false)
+  }
+
+  const submit = async () => {
+    if (busy || devPass.length < 8) return
+    setBusy(true)
+    try {
+      await api.join({
+        invite_url: url.trim(),
+        device_passphrase: devPass,
+        remember,
+        no_tun: noTun,
+      })
+      toast.ok('已提交加入申请，等待主控批准')
+      onSubmitted()
+    } catch (e) {
+      toast.err('提交加入失败：' + e.message)
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div class="card onb-card">
+      <div class="onb-card-title">加入既有网络</div>
+      <p class="muted">粘贴主控给你的邀请链接。核对信任域与网络无误后，为本机设备私钥设置口令并提交申请。</p>
+
+      <label class="form-row">
+        <span class="field-label">邀请链接<small>privatenetwork://join?…</small></span>
+        <textarea
+          class="field invite"
+          rows={3}
+          value={url}
+          placeholder="privatenetwork://join?d=…"
+          onInput={(e) => { setUrl(e.currentTarget.value); setPreview(null) }}
+        />
+      </label>
+
+      {!preview ? (
+        <div class="onb-actions">
+          <button class="btn" onClick={onBack}>返回</button>
+          <button class="btn btn-primary" disabled={!url.trim() || checking} onClick={doPreview}>
+            {checking ? '校验中…' : '校验邀请'}
+          </button>
+        </div>
+      ) : (
+        <>
+          <div class="onb-note">
+            <div class="kv"><span>信任域</span><b>{preview.domain_label || preview.trust_domain_id.slice(0, 12)}</b></div>
+            <div class="kv"><span>网络</span><b>{preview.network_name || preview.network_local_id}</b></div>
+            <div class="kv"><span>网络 ID</span><code>{preview.network_local_id}</code></div>
+            <div class="kv"><span>落脚点</span><b>{preview.seed_count} 个</b></div>
+          </div>
+
+          <label class="form-row">
+            <span class="field-label">设备私钥口令<small>至少 8 位</small></span>
+            <input
+              class="field"
+              type="password"
+              autocomplete="new-password"
+              value={devPass}
+              placeholder="为本机设备私钥设置口令"
+              onInput={(e) => setDevPass(e.currentTarget.value)}
+            />
+          </label>
+          <p class="muted small">若本机此前已加入过网络，请使用同一把设备口令（加入复用本机设备身份）。</p>
+
+          <label class="check-row">
+            <input type="checkbox" checked={remember} onInput={(e) => setRemember(e.currentTarget.checked)} />
+            <span>在本机记住（开机自动重连，推荐）<small class="muted">口令经系统级封装后存于特权文件，绝不明文落盘。</small></span>
+          </label>
+          <label class="check-row">
+            <input type="checkbox" checked={noTun} onInput={(e) => setNoTun(e.currentTarget.checked)} />
+            <span>不创建虚拟网卡（无 TUN）<small class="muted">用于无 cap_net_admin 的测试/纯中继场景。</small></span>
+          </label>
+
+          <div class="onb-actions">
+            <button class="btn" disabled={busy} onClick={() => setPreview(null)}>上一步</button>
+            <button class="btn btn-primary" disabled={busy || devPass.length < 8} onClick={submit}>
+              {busy ? '提交中…' : '提交加入申请'}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ---------- F-3 等待主控批准 ----------
+function JoinWaiting({ join, onRetry }) {
+  const label = join.domain_label || (join.trust_domain_id || '').slice(0, 12)
+  const netName = join.network_name || join.network_local_id
+  const failed = join.status === 'error' || join.status === 'timeout'
+
+  return (
+    <div class="onb">
+      <div class="onb-hero">
+        <div class="onb-mark" />
+        <h1>{failed ? '加入未完成' : '等待主控批准'}</h1>
+        <p class="onb-lead">
+          加入网络 <b>{netName}</b>（信任域 {label}）
+        </p>
+      </div>
+
+      <div class="card onb-card onb-wait">
+        {!failed ? (
+          <>
+            <div class="onb-spinner" aria-hidden="true" />
+            <div class="onb-card-title">申请已提交，等待批准…</div>
+            <p class="muted">主控批准后本机会自动上线，无需再操作。可以关闭此页面——稍后重新打开会自动恢复等待。</p>
+          </>
+        ) : join.status === 'timeout' ? (
+          <>
+            <div class="onb-card-title">加入超时</div>
+            <p class="muted">主控未在时限内批准这次申请。你可以重新发起加入。</p>
+            {onRetry && <div class="onb-actions"><button class="btn btn-primary" onClick={onRetry}>重新加入</button></div>}
+          </>
+        ) : (
+          <>
+            <div class="onb-card-title">加入出错</div>
+            <p class="warnbar">{join.error || '未知错误'}</p>
+            {onRetry && <div class="onb-actions"><button class="btn btn-primary" onClick={onRetry}>重新加入</button></div>}
+          </>
+        )}
+      </div>
     </div>
   )
 }

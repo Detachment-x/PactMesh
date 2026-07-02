@@ -49,8 +49,9 @@ use crate::proto::api::manage::{
     RunNetworkInstanceRequest, TrustDomainLocator, WebClientService, WebClientServiceClientFactory,
 };
 use crate::trust::{
-    AssignedIpv4, DeviceFingerprint, DisabledCert, IpAssignment, MemberCertFingerprint, PeerHint,
-    RevocationReason, RevokedCert, TagName, UnsignedMemberCert, encode_device_id,
+    AssignedIpv4, DeviceFingerprint, DisabledCert, IpAssignment, MemberCertFingerprint,
+    NetworkBootstrap, PeerHint, RevocationReason, RevokedCert, TagName, UnsignedMemberCert,
+    encode_device_id,
 };
 
 const INDEX_HTML: &str = include_str!("assets/dist/index.html");
@@ -110,6 +111,9 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/trust/peer-hints", get(api_trust_peer_hints))
         .route("/api/trust/peer-hint", post(api_trust_peer_hint))
         .route("/api/trust/invite", post(api_trust_invite))
+        .route("/api/network/invite-preview", post(api_invite_preview))
+        .route("/api/network/join", post(api_network_join))
+        .route("/api/network/join-status", get(api_join_status))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::guard))
         .with_state(state)
 }
@@ -1492,6 +1496,68 @@ struct NetworkRunReq {
     no_tun: bool,
 }
 
+/// 对**运行中**空载 daemon 挂载信任域网络实例（不重启）。`sk_self.seal` 须已在
+/// `network_dir`（口令通道）。返回 inst_id 串。`!remember` 时载入后删封存文件 + 删持久化 toml。
+/// 建网(`api_network_run`)与经邀请加入(`api_join_status`)共用此尾部。
+async fn attach_trust_network(
+    s: &AppState,
+    trust_domain_id: &str,
+    network_local_id: &str,
+    listeners: Vec<String>,
+    no_tun: bool,
+    remember: bool,
+) -> anyhow::Result<Option<String>> {
+    let domain_dir = crate::common::config_dir::pnw_trust_domains_dir()?.join(trust_domain_id);
+    let network_dir = domain_dir.join("networks").join(network_local_id);
+    let seal_path = network_dir.join("sk_self.seal");
+    let domain_dir_str = domain_dir.to_string_lossy().into_owned();
+    let listeners = if listeners.is_empty() {
+        vec!["tcp://0.0.0.0:11010".to_string()]
+    } else {
+        listeners
+    };
+    let nc = NetworkConfig {
+        network_name: Some(network_local_id.to_string()),
+        networking_method: Some(NetworkingMethod::Standalone as i32),
+        listener_urls: listeners,
+        no_tun: Some(no_tun),
+        trust_domain: Some(TrustDomainLocator {
+            trust_domain_dir: domain_dir_str,
+            network_local_id: network_local_id.to_string(),
+            sk_self_password_env: "PNW_DEVICE_PASSPHRASE".to_string(),
+        }),
+        ..Default::default()
+    };
+    let client = {
+        let mut g = s.client.lock().await;
+        g.scoped_client::<WebClientServiceClientFactory<BaseController>>(String::new())
+            .await?
+    };
+    let resp = client
+        .run_network_instance(
+            BaseController::default(),
+            RunNetworkInstanceRequest {
+                inst_id: None,
+                config: Some(nc),
+                overwrite: true,
+                source: 0,
+            },
+        )
+        .await?;
+    let inst_id_str = resp.inst_id.map(|u| uuid::Uuid::from(u).to_string());
+    if !remember {
+        tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+        let _ = std::fs::remove_file(&seal_path);
+        if let (Ok(dir), Some(id)) = (
+            crate::common::config_dir::pnw_serve_instances_dir(),
+            inst_id_str.as_ref(),
+        ) {
+            let _ = std::fs::remove_file(dir.join(format!("{id}.toml")));
+        }
+    }
+    Ok(inst_id_str)
+}
+
 /// 一站式建网+加网：建域(可选)→建网→自举本机→封存口令→对**运行中**空载 daemon
 /// 调 `RunNetworkInstance`（不重启）。口令经 `sk_self.seal` 送达，绝不进 toml/明文。
 async fn api_network_run(State(s): State<AppState>, Json(req): Json<NetworkRunReq>) -> Response {
@@ -1547,54 +1613,16 @@ async fn api_network_run(State(s): State<AppState>, Json(req): Json<NetworkRunRe
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&seal_path, std::fs::Permissions::from_mode(0o600));
         }
-        // 5) 对运行中空载 daemon 加网（NetworkConfig 带 trust_domain locator；不重启）
-        let domain_dir_str = domain_dir.to_string_lossy().into_owned();
-        let listeners = if req.listeners.is_empty() {
-            vec!["tcp://0.0.0.0:11010".to_string()]
-        } else {
-            req.listeners.clone()
-        };
-        let nc = NetworkConfig {
-            network_name: Some(req.network_local_id.clone()),
-            networking_method: Some(NetworkingMethod::Standalone as i32),
-            listener_urls: listeners,
-            no_tun: Some(req.no_tun),
-            trust_domain: Some(TrustDomainLocator {
-                trust_domain_dir: domain_dir_str,
-                network_local_id: req.network_local_id.clone(),
-                sk_self_password_env: "PNW_DEVICE_PASSPHRASE".to_string(),
-            }),
-            ..Default::default()
-        };
-        let client = {
-            let mut g = s.client.lock().await;
-            g.scoped_client::<WebClientServiceClientFactory<BaseController>>(String::new())
-                .await?
-        };
-        let resp = client
-            .run_network_instance(
-                BaseController::default(),
-                RunNetworkInstanceRequest {
-                    inst_id: None,
-                    config: Some(nc),
-                    overwrite: true,
-                    source: 0,
-                },
-            )
-            .await?;
-        let inst_id_str = resp.inst_id.map(|u| uuid::Uuid::from(u).to_string());
-        // 6) 「不记住」：实例载入后删封存文件 + 删持久化 toml（口令仅为本次加网用、
-        //    重启不再自动重连；in-memory 实例本会话继续运行直到 daemon 停止）。
-        if !req.remember {
-            tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
-            let _ = std::fs::remove_file(&seal_path);
-            if let (Ok(dir), Some(id)) = (
-                crate::common::config_dir::pnw_serve_instances_dir(),
-                inst_id_str.as_ref(),
-            ) {
-                let _ = std::fs::remove_file(dir.join(format!("{id}.toml")));
-            }
-        }
+        // 5+6) 对运行中空载 daemon 加网（不重启）+「不记住」清理，共用 helper。
+        let inst_id_str = attach_trust_network(
+            &s,
+            &trust_domain_id,
+            &req.network_local_id,
+            req.listeners.clone(),
+            req.no_tun,
+            req.remember,
+        )
+        .await?;
         Ok::<_, anyhow::Error>(serde_json::json!({
             "trust_domain_id": trust_domain_id,
             "network_local_id": req.network_local_id,
@@ -1607,6 +1635,223 @@ async fn api_network_run(State(s): State<AppState>, Json(req): Json<NetworkRunRe
         Ok(v) => json_response(StatusCode::OK, v),
         Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
     }
+}
+
+// ---------- 经邀请加入既有网络（异步：提交→轮询→批准后自动挂载）----------
+
+const JOIN_WAIT_SECS: u64 = 3600;
+const JOIN_POLL_SECS: u64 = 30;
+
+/// 把 td/nid 拼成文件系统安全的 pending-join meta 键（非 [A-Za-z0-9._-] 一律换 `_`）。
+fn pending_join_key(trust_domain_id: &str, network_local_id: &str) -> String {
+    let raw = format!("{trust_domain_id}__{network_local_id}");
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[derive(Deserialize)]
+struct JoinReq {
+    invite_url: String,
+    #[serde(default)]
+    device_label: Option<String>,
+    /// 设备私钥口令（≥8）：封存到 sk_self.seal 供后台子进程 + 批准后挂载解锁。
+    device_passphrase: String,
+    #[serde(default)]
+    remember: bool,
+    #[serde(default)]
+    no_tun: bool,
+    #[serde(default)]
+    listeners: Vec<String>,
+}
+
+/// B-2 发起加入（非阻塞）：解析邀请 → 封存口令 → 起脱离会话子进程 `accept-invite`
+/// （自己等批准）→ 落一份 pending-join meta 供 B-3 判定/挂载 → 立即返回 pending。
+async fn api_network_join(State(_s): State<AppState>, Json(req): Json<JoinReq>) -> Response {
+    // 1) 解析校验邀请链接（失败 400，与 invite-preview 一致）
+    let url = match url::Url::parse(req.invite_url.trim()) {
+        Ok(u) => u,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, format!("invalid invite url: {e}")),
+    };
+    let bootstrap = match NetworkBootstrap::from_url(&url) {
+        Ok(b) => b,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
+    };
+    let td = bootstrap.trust_domain_id.to_string();
+    let nid = bootstrap.network_local_id.to_string();
+
+    let device_pass = Zeroizing::new(req.device_passphrase.clone());
+    let result = (|| {
+        // 2) 计算 network_dir，封存设备口令到 sk_self.seal（唯一送达通道，绝不明文）
+        let domain_dir = crate::common::config_dir::pnw_trust_domains_dir()?.join(&td);
+        let network_dir = domain_dir.join("networks").join(&nid);
+        std::fs::create_dir_all(&network_dir)
+            .with_context(|| format!("failed to create {}", network_dir.display()))?;
+        let seal_path = network_dir.join("sk_self.seal");
+        let sealed = crate::secret_seal::seal(device_pass.as_bytes())?;
+        std::fs::write(&seal_path, &sealed)
+            .with_context(|| format!("failed to write {}", seal_path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&seal_path, std::fs::Permissions::from_mode(0o600));
+        }
+
+        // 3) 脱离会话起后台子进程 accept-invite（online 默认；口令经 env，日志落盘）
+        let device_label = req
+            .device_label
+            .clone()
+            .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().to_string());
+        let exe = std::env::current_exe().context("failed to locate the pactmesh executable")?;
+        let log_path = crate::common::config_dir::pnw_config_dir()?
+            .join(format!("pactmesh-join-{}.log", pending_join_key(&td, &nid)));
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("failed to open {}", log_path.display()))?;
+        let log_err = log.try_clone()?;
+        std::process::Command::new(&exe)
+            .args([
+                "trust",
+                "accept-invite",
+                req.invite_url.trim(),
+                "--device-label",
+                &device_label,
+                "--wait-secs",
+                &JOIN_WAIT_SECS.to_string(),
+                "--poll-secs",
+                &JOIN_POLL_SECS.to_string(),
+            ])
+            .env("PNW_DEVICE_PASSPHRASE", device_pass.as_str())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log))
+            .stderr(std::process::Stdio::from(log_err))
+            .spawn()
+            .context("failed to start accept-invite")?;
+
+        // 4) 落控制器 meta 供 B-3（join-status）判定 + 批准后挂载 + F-4 重开恢复
+        let meta_dir = crate::common::config_dir::pnw_config_dir()?.join("pending-joins");
+        std::fs::create_dir_all(&meta_dir)
+            .with_context(|| format!("failed to create {}", meta_dir.display()))?;
+        let meta = serde_json::json!({
+            "trust_domain_id": td,
+            "network_local_id": nid,
+            "domain_label": bootstrap.trust_domain_label,
+            "network_name": bootstrap.network_name,
+            "network_dir": network_dir.to_string_lossy(),
+            "remember": req.remember,
+            "no_tun": req.no_tun,
+            "listeners": req.listeners,
+            "started_at": now_unix(),
+            "wait_secs": JOIN_WAIT_SECS,
+        });
+        let meta_path = meta_dir.join(format!("{}.json", pending_join_key(&td, &nid)));
+        std::fs::write(&meta_path, serde_json::to_vec_pretty(&meta)?)
+            .with_context(|| format!("failed to write {}", meta_path.display()))?;
+
+        Ok::<_, anyhow::Error>(serde_json::json!({
+            "trust_domain_id": td,
+            "network_local_id": nid,
+            "status": "pending",
+        }))
+    })();
+    match result {
+        Ok(v) => json_response(StatusCode::OK, v),
+        Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+/// B-3 查状态 + 批准后自动挂载。扫描 pending-joins/*.json，逐个判定：
+/// member_cert.pem 出现 → 挂载(不重启)、删 meta、报 online{inst_id}；
+/// pending_join_request.cbor.pem 在且未超时 → pending；超时无 cert → timeout(清理)。
+/// 无参数（扫全部）→ 供 F-3 轮询 + F-4 Console 重开恢复等待界面。
+async fn api_join_status(State(s): State<AppState>) -> Response {
+    let meta_dir = match crate::common::config_dir::pnw_config_dir() {
+        Ok(d) => d.join("pending-joins"),
+        Err(e) => return json_error(StatusCode::BAD_GATEWAY, e),
+    };
+    let mut joins = Vec::new();
+    let entries = match std::fs::read_dir(&meta_dir) {
+        Ok(rd) => rd,
+        Err(_) => return json_response(StatusCode::OK, serde_json::json!({ "joins": joins })),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let meta: serde_json::Value = match std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+        {
+            Some(m) => m,
+            None => continue,
+        };
+        let td = meta["trust_domain_id"].as_str().unwrap_or_default().to_string();
+        let nid = meta["network_local_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let network_dir = std::path::PathBuf::from(meta["network_dir"].as_str().unwrap_or_default());
+        let remember = meta["remember"].as_bool().unwrap_or(false);
+        let no_tun = meta["no_tun"].as_bool().unwrap_or(false);
+        let listeners: Vec<String> = meta["listeners"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let started_at = meta["started_at"].as_u64().unwrap_or(0);
+        let wait_secs = meta["wait_secs"].as_u64().unwrap_or(JOIN_WAIT_SECS);
+
+        let base = serde_json::json!({
+            "trust_domain_id": td,
+            "network_local_id": nid,
+            "domain_label": meta["domain_label"].clone(),
+            "network_name": meta["network_name"].clone(),
+        });
+        let cert_ok = network_dir.join("member_cert.pem").exists();
+        let submitted = network_dir.join("pending_join_request.cbor.pem").exists();
+
+        let mut item = base.clone();
+        if cert_ok {
+            // 批准：挂载到运行中空载 daemon（不重启）→ 成功删 meta。
+            match attach_trust_network(&s, &td, &nid, listeners, no_tun, remember).await {
+                Ok(inst_id) => {
+                    let _ = std::fs::remove_file(&path);
+                    item["status"] = serde_json::json!("online");
+                    item["inst_id"] = serde_json::json!(inst_id);
+                }
+                Err(e) => {
+                    item["status"] = serde_json::json!("error");
+                    item["error"] = serde_json::json!(e.to_string());
+                }
+            }
+        } else if started_at > 0 && now_unix().saturating_sub(started_at) > wait_secs {
+            // 超时无 cert：清理封存文件 + meta（子进程已放弃）。
+            let _ = std::fs::remove_file(network_dir.join("sk_self.seal"));
+            let _ = std::fs::remove_file(&path);
+            item["status"] = serde_json::json!("timeout");
+        } else if submitted {
+            item["status"] = serde_json::json!("pending");
+        } else {
+            item["status"] = serde_json::json!("submitting");
+        }
+        joins.push(item);
+    }
+    json_response(StatusCode::OK, serde_json::json!({ "joins": joins }))
 }
 
 #[derive(Deserialize)]
@@ -2018,6 +2263,33 @@ async fn api_trust_invite(State(s): State<AppState>, Json(req): Json<InviteReq>)
         ),
         Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
     }
+}
+
+#[derive(Deserialize)]
+struct InvitePreviewReq {
+    invite_url: String,
+}
+
+/// 解析邀请链接，回显信任域/网络元数据供加入前确认。只读，不落盘、不解锁、不碰 daemon。
+async fn api_invite_preview(Json(req): Json<InvitePreviewReq>) -> Response {
+    let url = match url::Url::parse(req.invite_url.trim()) {
+        Ok(url) => url,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, format!("invalid invite url: {e}")),
+    };
+    let bootstrap = match NetworkBootstrap::from_url(&url) {
+        Ok(b) => b,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
+    };
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "trust_domain_id": bootstrap.trust_domain_id.to_string(),
+            "network_local_id": bootstrap.network_local_id.to_string(),
+            "domain_label": bootstrap.trust_domain_label,
+            "network_name": bootstrap.network_name,
+            "seed_count": bootstrap.bootstrap_seeds.len(),
+        }),
+    )
 }
 
 /// 拉取控制器绑定实例的 `NodeInfo`（用于推导本机监听地址）。
