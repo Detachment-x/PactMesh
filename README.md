@@ -145,10 +145,10 @@ pactmesh --rpc-portal 127.0.0.1:<rpc> controller --listen 127.0.0.1:15810
 <table>
   <tr>
     <td><img src="pactmesh/docs/screenshots/01-overview.png" width="430" alt="概览"><br><sub>概览 · 健康指标 + 邀请设备 CTA</sub></td>
-    <td><img src="pactmesh/docs/screenshots/03-devices.png" width="430" alt="设备"><br><sub>设备 · 身份与运行时融合表</sub></td>
+    <td><img src="pactmesh/docs/screenshots/03-devices.png" width="430" alt="设备"><br><sub>设备 · 融合表 · 逐项内联编辑</sub></td>
   </tr>
   <tr>
-    <td><img src="pactmesh/docs/screenshots/11-assign-ip.png" width="430" alt="指派 IP"><br><sub>设备抽屉 · 主控指派固定虚拟 IP</sub></td>
+    <td><img src="pactmesh/docs/screenshots/11-assign-ip.png" width="430" alt="指派 IP"><br><sub>设备 · 展示即编辑（名称/IP 点击即改）</sub></td>
     <td><img src="pactmesh/docs/screenshots/02-network.png" width="430" alt="网络"><br><sub>网络 · 成员 IP / 托管路由 / DNS 概览</sub></td>
   </tr>
   <tr>

@@ -145,10 +145,10 @@ pactmesh --rpc-portal 127.0.0.1:<rpc> controller --listen 127.0.0.1:15810
 <table>
   <tr>
     <td><img src="pactmesh/docs/screenshots/01-overview.png" width="430" alt="Overview"><br><sub>Overview · health metrics + invite CTA</sub></td>
-    <td><img src="pactmesh/docs/screenshots/03-devices.png" width="430" alt="Devices"><br><sub>Devices · fused identity + runtime table</sub></td>
+    <td><img src="pactmesh/docs/screenshots/03-devices.png" width="430" alt="Devices"><br><sub>Devices · fused table · per-field inline edit</sub></td>
   </tr>
   <tr>
-    <td><img src="pactmesh/docs/screenshots/11-assign-ip.png" width="430" alt="Assign IP"><br><sub>Device drawer · root-assigned fixed virtual IP</sub></td>
+    <td><img src="pactmesh/docs/screenshots/11-assign-ip.png" width="430" alt="Assign IP"><br><sub>Devices · edit-in-place (click any field)</sub></td>
     <td><img src="pactmesh/docs/screenshots/02-network.png" width="430" alt="Network"><br><sub>Network · member IPs / managed routes / DNS</sub></td>
   </tr>
   <tr>
