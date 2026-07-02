@@ -1504,6 +1504,7 @@ async fn attach_trust_network(
     trust_domain_id: &str,
     network_local_id: &str,
     listeners: Vec<String>,
+    peers: Vec<String>,
     no_tun: bool,
     remember: bool,
 ) -> anyhow::Result<Option<String>> {
@@ -1516,10 +1517,18 @@ async fn attach_trust_network(
     } else {
         listeners
     };
+    // gen_config 仅在 Manual 下应用 peer_urls（连接器）；建网无 seed 用 Standalone，
+    // 经邀请加入须拨向邀请里的 seed → Manual，否则挂载后连不上网络。
+    let networking_method = if peers.is_empty() {
+        NetworkingMethod::Standalone
+    } else {
+        NetworkingMethod::Manual
+    };
     let nc = NetworkConfig {
         network_name: Some(network_local_id.to_string()),
-        networking_method: Some(NetworkingMethod::Standalone as i32),
+        networking_method: Some(networking_method as i32),
         listener_urls: listeners,
+        peer_urls: peers,
         no_tun: Some(no_tun),
         trust_domain: Some(TrustDomainLocator {
             trust_domain_dir: domain_dir_str,
@@ -1619,6 +1628,7 @@ async fn api_network_run(State(s): State<AppState>, Json(req): Json<NetworkRunRe
             &trust_domain_id,
             &req.network_local_id,
             req.listeners.clone(),
+            Vec::new(),
             req.no_tun,
             req.remember,
         )
@@ -1756,6 +1766,7 @@ async fn api_network_join(State(_s): State<AppState>, Json(req): Json<JoinReq>) 
             "remember": req.remember,
             "no_tun": req.no_tun,
             "listeners": req.listeners,
+            "seeds": bootstrap.bootstrap_seeds.iter().map(|u| u.as_str().to_string()).collect::<Vec<_>>(),
             "started_at": now_unix(),
             "wait_secs": JOIN_WAIT_SECS,
         });
@@ -1813,6 +1824,10 @@ async fn api_join_status(State(s): State<AppState>) -> Response {
             .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default();
+        let seeds: Vec<String> = meta["seeds"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
         let started_at = meta["started_at"].as_u64().unwrap_or(0);
         let wait_secs = meta["wait_secs"].as_u64().unwrap_or(JOIN_WAIT_SECS);
 
@@ -1828,7 +1843,7 @@ async fn api_join_status(State(s): State<AppState>) -> Response {
         let mut item = base.clone();
         if cert_ok {
             // 批准：挂载到运行中空载 daemon（不重启）→ 成功删 meta。
-            match attach_trust_network(&s, &td, &nid, listeners, no_tun, remember).await {
+            match attach_trust_network(&s, &td, &nid, listeners, seeds, no_tun, remember).await {
                 Ok(inst_id) => {
                     let _ = std::fs::remove_file(&path);
                     item["status"] = serde_json::json!("online");
