@@ -75,6 +75,8 @@ export const api = {
   instances: () => getJson('/api/instances'),
   // 一站式建网+运行时加网：建域(可选)→建网→自举→封存口令→对运行中空载 daemon 挂实例，不重启
   networkRun: (body) => postJson('/api/network/run', body),
+  // 复用并上线：把盘上已有但未挂载的网络重新挂到运行中空载 daemon（跳过建网/自举）
+  networkMount: (td, nid) => postJson('/api/network/mount', { trust_domain_id: td, network_local_id: nid }),
 
   // 网络级 IP 池（控制器元数据 controller_meta.json，非签名态）：读/写网段 + 自动分配开关
   ipPool: (td, nid) => getJson(`/api/network/ip-pool?${netQS(td, nid)}`),

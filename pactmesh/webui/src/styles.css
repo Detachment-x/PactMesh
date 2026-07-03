@@ -617,6 +617,16 @@ body {
 .onb-role .muted { font-size: 13px; line-height: 1.6; margin: 0; }
 .onb-note .kv { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; font-size: 13px; }
 .onb-note .kv span { color: var(--muted); }
+/* 复用并上线（盘上已有网络） */
+.onb-reuse { max-width: 560px; margin: 0 auto 18px; text-align: left; }
+.onb-reuse-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.onb-reuse .muted { font-size: 13px; line-height: 1.6; margin: 0 0 12px; }
+.onb-reuse-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.onb-reuse-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card); }
+.onb-reuse-net { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.onb-reuse-net strong { font-size: 13.5px; }
+.onb-reuse-net small { font-size: 12px; }
 .onb-note .kv code { font-family: var(--mono); font-size: 12px; word-break: break-all; }
 .onb-wait { text-align: center; }
 .onb-spinner { width: 34px; height: 34px; margin: 4px auto 14px; border: 3px solid var(--primary-soft);

@@ -32,6 +32,7 @@ export function Onboarding() {
         <p class="onb-lead">服务已在后台常驻，但还没有运行中的网络。你可以新建一个网络成为主控，或用邀请链接加入既有网络。</p>
       </div>
 
+      {role === null && <ReuseBanner />}
       {role === null && <RolePicker onPick={setRole} />}
       {role === 'create' && <CreateFlow onBack={() => setRole(null)} />}
       {role === 'join' && <JoinFlow onBack={() => setRole(null)} onSubmitted={() => { setDismissed(false); refreshJoins() }} />}
@@ -53,6 +54,52 @@ function RolePicker({ onPick }) {
         <div class="onb-role-title">加入既有网络</div>
         <p class="muted">用别人给你的邀请链接，作为成员设备加入。提交后等待主控批准，批准后自动上线。</p>
       </button>
+    </div>
+  )
+}
+
+// ---------- 复用并上线：盘上已有但未挂载的网络，一键重新挂载（不重建） ----------
+function ReuseBanner() {
+  const toast = useToast()
+  const { domains, daemonReachable, refreshDomains, refreshInstances, selectNetwork } = useApp()
+  const [busy, setBusy] = useState('')
+  const disk = useMemo(
+    () =>
+      domains.flatMap((d) =>
+        d.networks.map((nid) => ({ td: d.trust_domain_id, nid, label: d.label || d.trust_domain_id.slice(0, 12) })),
+      ),
+    [domains],
+  )
+  if (!daemonReachable || disk.length === 0) return null
+
+  const mount = async (td, nid) => {
+    setBusy(td + ' ' + nid)
+    try {
+      await api.networkMount(td, nid)
+      toast.ok('网络已上线')
+      refreshDomains()
+      refreshInstances()
+      selectNetwork(td, nid)
+    } catch (e) {
+      toast.err('复用上线失败：' + e.message)
+      setBusy('')
+    }
+  }
+
+  return (
+    <div class="card onb-reuse">
+      <div class="onb-reuse-title">检测到本机已有网络</div>
+      <p class="muted">这些网络的配置与密钥仍在本机，只是当前没有运行。可直接复用并上线，无需重建。</p>
+      <ul class="onb-reuse-list">
+        {disk.map(({ td, nid, label }) => (
+          <li key={td + ' ' + nid}>
+            <span class="onb-reuse-net"><strong class="mono">{nid}</strong><small class="muted">{label}</small></span>
+            <button class="btn btn-primary btn-sm" disabled={!!busy} onClick={() => mount(td, nid)}>
+              {busy === td + ' ' + nid ? '上线中…' : '复用并上线'}
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }
@@ -93,7 +140,10 @@ function CreateFlow({ onBack }) {
       refreshInstances()
       selectNetwork(r.trust_domain_id, r.network_local_id)
     } catch (e) {
-      toast.err('建网/加网失败：' + e.message)
+      const msg = /already exists/i.test(e.message)
+        ? '该网络已存在于本机。请返回首页用「复用并上线」直接挂载；如需重建，先卸载并勾选彻底删除。'
+        : '建网/加网失败：' + e.message
+      toast.err(msg)
       setBusy(false)
     }
   }
@@ -104,7 +154,7 @@ function CreateFlow({ onBack }) {
         <div class="warnbar">后台 daemon 暂不可达——新建网络需要它在运行。请确认服务已启动后再试。</div>
       )}
       {daemonReachable && hasDiskNetwork && (
-        <div class="onb-note muted">检测到本机已有信任域/网络，但当前没有任何实例在运行。可在下方新建并上线一个网络；既有网络的开机自动重连将在后续提供。</div>
+        <div class="onb-note muted">本机已有信任域/网络。若只是想让既有网络重新上线，请返回并用「复用并上线」，无需在此重建。</div>
       )}
 
       <ol class="onb-steps" aria-label="引导步骤">

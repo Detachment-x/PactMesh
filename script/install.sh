@@ -11,6 +11,7 @@ INSTALL_PATH="/opt/pactmesh"
 GH_PROXY="https://ghfast.top/"
 USE_GH_PROXY=false
 COMMAND="install"
+PURGE=false
 
 HELP() {
   cat <<EOF
@@ -26,12 +27,14 @@ Commands:
 Options:
   --gh-proxy [URL]   Route GitHub downloads through a proxy (default: ${GH_PROXY})
   --no-gh-proxy      Download directly from GitHub (default)
+  --purge            uninstall only: also delete trust-domain data (irreversible)
 
 Examples:
   sudo ./install.sh install
   sudo ./install.sh install /usr/local/lib/pactmesh
   sudo ./install.sh install --gh-proxy        # use the bundled CN proxy
-  sudo ./install.sh uninstall
+  sudo ./install.sh uninstall                 # keep your networks/keys
+  sudo ./install.sh uninstall --purge         # wipe everything
 EOF
 }
 
@@ -45,6 +48,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --gh-proxy) USE_GH_PROXY=true; [[ $# -ge 2 && "$2" != --* ]] && { GH_PROXY="$2"; shift; } ;;
     --no-gh-proxy) USE_GH_PROXY=false ;;
+    --purge) PURGE=true ;;
     *) echo -e "${RED}Unknown option: $1${RES}"; exit 1 ;;
   esac
   shift
@@ -67,6 +71,20 @@ done
 BIN_DIR="/usr/local/bin"
 ASSET="pactmesh-linux-x86_64.tar.gz"
 
+# Trust-domain data lives at <config>/privateNetwork. Mirror the daemon's
+# resolution (XDG_CONFIG_HOME, then ~/.config) for every account that may have
+# written it: the systemd service runs as root, interactive quickstart as the
+# invoking (sudo) user.
+config_dirs() {
+  { [[ -n "${XDG_CONFIG_HOME:-}" ]] && echo "${XDG_CONFIG_HOME%/}/privateNetwork"
+    if [[ -n "${SUDO_USER:-}" ]]; then
+      local uh; uh="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+      [[ -n "$uh" ]] && echo "${uh}/.config/privateNetwork"
+    fi
+    echo "/root/.config/privateNetwork"
+  } | awk 'NF && !seen[$0]++'
+}
+
 uninstall() {
   echo -e "${YELLOW}Removing PactMesh...${RES}"
   if command -v pactmesh >/dev/null 2>&1; then
@@ -75,7 +93,18 @@ uninstall() {
   rm -f "${BIN_DIR}/pactmesh" "${BIN_DIR}/pactmesh-core"
   rm -rf "${INSTALL_PATH}"
   echo -e "${GREEN}PactMesh binaries removed.${RES}"
-  echo -e "Trust-domain data in ~/.config/privateNetwork was left untouched."
+
+  if $PURGE; then
+    local d removed=false
+    while IFS= read -r d; do
+      if [[ -d "$d" ]]; then rm -rf "$d" && { echo -e "${YELLOW}Purged ${d}${RES}"; removed=true; }; fi
+    done < <(config_dirs)
+    $removed && echo -e "${GREEN}Trust-domain data wiped.${RES}" \
+             || echo -e "No trust-domain data found to purge."
+  else
+    echo -e "Trust-domain data (networks & keys) was left untouched."
+    echo -e "Re-run with ${YELLOW}--purge${RES} to delete it: ${YELLOW}sudo ./install.sh uninstall --purge${RES}"
+  fi
 }
 
 install() {

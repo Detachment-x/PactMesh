@@ -105,6 +105,7 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/trust/create-domain", post(api_trust_create_domain))
         .route("/api/trust/create-network", post(api_trust_create_network))
         .route("/api/network/run", post(api_network_run))
+        .route("/api/network/mount", post(api_network_mount))
         .route("/api/network/ip-pool", get(api_ip_pool_get).post(api_ip_pool_set))
         .route("/api/network/auto-assign", post(api_auto_assign))
         .route("/api/network/leave", post(api_network_leave))
@@ -1847,6 +1848,41 @@ async fn api_network_run(State(s): State<AppState>, Json(req): Json<NetworkRunRe
     .await;
     match result {
         Ok(v) => json_response(StatusCode::OK, v),
+        Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct NetworkMountReq {
+    trust_domain_id: String,
+    network_local_id: String,
+    #[serde(default)]
+    listeners: Vec<String>,
+    #[serde(default)]
+    no_tun: bool,
+}
+
+/// 复用并上线：把盘上已有但未挂载的网络重新挂到运行中空载 daemon。跳过建域/建网/
+/// 自举——设备钥 raw、证书与 network_state 已在盘，无需 root 口令。返回 inst_id。
+async fn api_network_mount(State(s): State<AppState>, Json(req): Json<NetworkMountReq>) -> Response {
+    let result = attach_trust_network(
+        &s,
+        &req.trust_domain_id,
+        &req.network_local_id,
+        req.listeners,
+        Vec::new(),
+        req.no_tun,
+    )
+    .await;
+    match result {
+        Ok(inst_id) => json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "trust_domain_id": req.trust_domain_id,
+                "network_local_id": req.network_local_id,
+                "inst_id": inst_id,
+            }),
+        ),
         Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
     }
 }

@@ -108,8 +108,30 @@ begin
   RegWriteExpandStringValue(HKLM, EnvKey, 'Path', NewPath);
 end;
 
+// Trust-domain data lives under <RoamingAppData>\PactMesh. The console runs as
+// the signed-in user; the always-on service runs as LocalSystem. Wipe both.
+procedure PurgeData();
+var
+  UserDir, SysDir: string;
+begin
+  UserDir := ExpandConstant('{userappdata}\PactMesh');
+  SysDir := ExpandConstant('{sys}\config\systemprofile\AppData\Roaming\PactMesh');
+  if DirExists(UserDir) then
+    DelTree(UserDir, True, True, True);
+  if DirExists(SysDir) then
+    DelTree(SysDir, True, True, True);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then
+  begin
     RemoveFromPath(ExpandConstant('{app}'));
+    if not UninstallSilent then
+      if MsgBox('Also delete PactMesh configuration and network data (keys, domains, networks)?'
+                + #13#10 + 'This CANNOT be undone.' + #13#10 + #13#10
+                + 'Choose No to keep your data for a future reinstall.',
+                mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+        PurgeData();
+  end;
 end;
