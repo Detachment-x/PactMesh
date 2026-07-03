@@ -71,13 +71,11 @@ function CreateFlow({ onBack }) {
   const [pass, setPass] = useState('')
   const [nid, setNid] = useState('')
   const [action, setAction] = useState('accept')
-  const [devPass, setDevPass] = useState('')
-  const [remember, setRemember] = useState(true)
   const [noTun, setNoTun] = useState(false)
   const [busy, setBusy] = useState(false)
 
   const step1Valid = useExisting ? !!existingTd && pass.length >= 8 : label.trim() && pass.length >= 8
-  const step2Valid = nid.trim().length > 0 && devPass.length >= 8
+  const step2Valid = nid.trim().length > 0
 
   const finish = async () => {
     setBusy(true)
@@ -88,11 +86,9 @@ function CreateFlow({ onBack }) {
         network_local_id: nid.trim(),
         default_action: action,
         root_passphrase: pass,
-        device_passphrase: devPass,
-        remember,
         no_tun: noTun,
       })
-      toast.ok(r.remembered ? '网络已上线（已在本机记住）' : '网络已上线')
+      toast.ok('网络已上线')
       refreshDomains()
       refreshInstances()
       selectNetwork(r.trust_domain_id, r.network_local_id)
@@ -187,7 +183,7 @@ function CreateFlow({ onBack }) {
         ) : (
           <>
             <div class="onb-card-title">创建并上线网络</div>
-            <p class="muted">网络是设备加入的对象。先给它一个 ID 和默认放行策略，再为本机设备私钥设置口令——网络创建后会立即挂到后台 daemon 上运行。</p>
+            <p class="muted">网络是设备加入的对象。给它一个 ID 和默认放行策略，网络创建后会立即挂到后台 daemon 上运行。</p>
 
             <label class="form-row">
               <span class="field-label">网络 ID<small>本域内唯一</small></span>
@@ -199,22 +195,6 @@ function CreateFlow({ onBack }) {
                 <option value="accept">放行</option>
                 <option value="drop">丢弃</option>
               </select>
-            </label>
-            <label class="form-row">
-              <span class="field-label">设备私钥口令<small>至少 8 位</small></span>
-              <input
-                class="field"
-                type="password"
-                autocomplete="new-password"
-                value={devPass}
-                placeholder="为本机设备私钥设置口令"
-                onInput={(e) => setDevPass(e.currentTarget.value)}
-              />
-            </label>
-
-            <label class="check-row">
-              <input type="checkbox" checked={remember} onInput={(e) => setRemember(e.currentTarget.checked)} />
-              <span>在本机记住（开机自动重连，推荐）<small class="muted">口令经系统级封装后存于特权文件，绝不明文落盘；不勾选则加网后立即删除封存文件。</small></span>
             </label>
             <label class="check-row">
               <input type="checkbox" checked={noTun} onInput={(e) => setNoTun(e.currentTarget.checked)} />
@@ -240,8 +220,6 @@ function JoinFlow({ onBack, onSubmitted }) {
   const [url, setUrl] = useState('')
   const [preview, setPreview] = useState(null)
   const [checking, setChecking] = useState(false)
-  const [devPass, setDevPass] = useState('')
-  const [remember, setRemember] = useState(true)
   const [noTun, setNoTun] = useState(false)
   const [busy, setBusy] = useState(false)
 
@@ -259,13 +237,11 @@ function JoinFlow({ onBack, onSubmitted }) {
   }
 
   const submit = async () => {
-    if (busy || devPass.length < 8) return
+    if (busy) return
     setBusy(true)
     try {
       await api.join({
         invite_url: url.trim(),
-        device_passphrase: devPass,
-        remember,
         no_tun: noTun,
       })
       toast.ok('已提交加入申请，等待主控批准')
@@ -279,7 +255,7 @@ function JoinFlow({ onBack, onSubmitted }) {
   return (
     <div class="card onb-card">
       <div class="onb-card-title">加入既有网络</div>
-      <p class="muted">粘贴主控给你的邀请链接。核对信任域与网络无误后，为本机设备私钥设置口令并提交申请。</p>
+      <p class="muted">粘贴主控给你的邀请链接。核对信任域与网络无误后提交申请。</p>
 
       <label class="form-row">
         <span class="field-label">邀请链接<small>privatenetwork://join?…</small></span>
@@ -308,23 +284,6 @@ function JoinFlow({ onBack, onSubmitted }) {
             <div class="kv"><span>落脚点</span><b>{preview.seed_count} 个</b></div>
           </div>
 
-          <label class="form-row">
-            <span class="field-label">设备私钥口令<small>至少 8 位</small></span>
-            <input
-              class="field"
-              type="password"
-              autocomplete="new-password"
-              value={devPass}
-              placeholder="为本机设备私钥设置口令"
-              onInput={(e) => setDevPass(e.currentTarget.value)}
-            />
-          </label>
-          <p class="muted small">若本机此前已加入过网络，请使用同一把设备口令（加入复用本机设备身份）。</p>
-
-          <label class="check-row">
-            <input type="checkbox" checked={remember} onInput={(e) => setRemember(e.currentTarget.checked)} />
-            <span>在本机记住（开机自动重连，推荐）<small class="muted">口令经系统级封装后存于特权文件，绝不明文落盘。</small></span>
-          </label>
           <label class="check-row">
             <input type="checkbox" checked={noTun} onInput={(e) => setNoTun(e.currentTarget.checked)} />
             <span>不创建虚拟网卡（无 TUN）<small class="muted">用于无 cap_net_admin 的测试/纯中继场景。</small></span>
@@ -332,7 +291,7 @@ function JoinFlow({ onBack, onSubmitted }) {
 
           <div class="onb-actions">
             <button class="btn" disabled={busy} onClick={() => setPreview(null)}>上一步</button>
-            <button class="btn btn-primary" disabled={busy || devPass.length < 8} onClick={submit}>
+            <button class="btn btn-primary" disabled={busy} onClick={submit}>
               {busy ? '提交中…' : '提交加入申请'}
             </button>
           </div>

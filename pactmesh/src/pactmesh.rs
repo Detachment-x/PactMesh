@@ -420,19 +420,11 @@ fn serve_seal(args: &ServeSealArgs) -> Result<(), Error> {
     };
 
     let device_passphrase =
-        resolve_quickstart_device_passphrase(args.device_passphrase_file.as_ref())?;
-    let sealed = pactmesh::secret_seal::seal(device_passphrase.as_bytes())
-        .context("failed to seal device passphrase")?;
-    // The sealed blob must round-trip on this machine before we trust it at boot.
-    let roundtrip = pactmesh::secret_seal::unseal(&sealed).context("seal self-check failed")?;
-    if roundtrip != device_passphrase.as_bytes() {
-        anyhow::bail!("seal self-check mismatch; refusing to write a bad sealed file");
-    }
+        read_optional_device_passphrase(args.device_passphrase_file.as_ref())?;
 
     let config_dir = pnw_config_dir()?;
     let sealed_path = config_dir.join(SERVE_SEALED_FILE);
     let config_path = config_dir.join(SERVE_CONFIG_FILE);
-    write_private_file(&sealed_path, &sealed)?;
     let config = ServeConfig {
         trust_domain_id: trust_domain_id.clone(),
         network_id: network_id.clone(),
@@ -442,7 +434,25 @@ fn serve_seal(args: &ServeSealArgs) -> Result<(), Error> {
     };
     write_private_file(&config_path, serde_json::to_string_pretty(&config)?.as_bytes())?;
 
-    println!("sealed device passphrase -> {}", sealed_path.display());
+    match device_passphrase {
+        Some(pw) => {
+            let sealed = pactmesh::secret_seal::seal(pw.as_bytes())
+                .context("failed to seal device passphrase")?;
+            // The sealed blob must round-trip on this machine before we trust it at boot.
+            let roundtrip =
+                pactmesh::secret_seal::unseal(&sealed).context("seal self-check failed")?;
+            if roundtrip != pw.as_bytes() {
+                anyhow::bail!("seal self-check mismatch; refusing to write a bad sealed file");
+            }
+            write_private_file(&sealed_path, &sealed)?;
+            println!("sealed device passphrase -> {}", sealed_path.display());
+        }
+        None => {
+            // raw 设备钥：无口令可封存；清掉任何遗留的封存文件，serve run 直接读 sk_self.raw。
+            let _ = std::fs::remove_file(&sealed_path);
+            println!("device key mode: raw (no passphrase to seal)");
+        }
+    }
     println!("serve config            -> {}", config_path.display());
     println!("trust domain: {trust_domain_id}");
     println!("network:      {network_id}");
@@ -481,26 +491,6 @@ fn quickstart_core_path(exe: &std::path::Path) -> Result<PathBuf, Error> {
         );
     }
     Ok(core)
-}
-
-fn resolve_quickstart_device_passphrase(file: Option<&PathBuf>) -> Result<String, Error> {
-    if let Some(passphrase) = read_optional_device_passphrase(file)? {
-        return Ok(passphrase);
-    }
-    if std::io::stdin().is_terminal() {
-        let first = prompt_line("Device key passphrase: ")?;
-        let second = prompt_line("Confirm device key passphrase: ")?;
-        if first != second {
-            anyhow::bail!("device key passphrase confirmation does not match");
-        }
-        if first.len() < 8 {
-            anyhow::bail!("device key passphrase must be at least 8 characters");
-        }
-        return Ok(first);
-    }
-    anyhow::bail!(
-        "PNW_DEVICE_PASSPHRASE is required unless --device-passphrase-file is provided; interactive prompt is only available on a TTY"
-    )
 }
 
 fn spawn_quickstart_daemon(
@@ -2574,14 +2564,16 @@ impl<'a> CommandHandler<'a> {
             .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().to_string());
 
         let root_passphrase = read_root_passphrase(args.passphrase_file.as_ref())?;
+        // 无 env/file → None → 设备钥 raw（免口令）；有则走 age 加密（高级路径）。
         let device_passphrase =
-            resolve_quickstart_device_passphrase(args.device_passphrase_file.as_ref())?;
+            read_optional_device_passphrase(args.device_passphrase_file.as_ref())?;
 
         let run_step = |step_args: &[&str], capture: bool| -> Result<String, Error> {
             let mut cmd = std::process::Command::new(&exe);
-            cmd.args(step_args)
-                .env("PNW_ROOT_PASSPHRASE", &root_passphrase)
-                .env("PNW_DEVICE_PASSPHRASE", &device_passphrase);
+            cmd.args(step_args).env("PNW_ROOT_PASSPHRASE", &root_passphrase);
+            if let Some(pw) = device_passphrase.as_deref() {
+                cmd.env("PNW_DEVICE_PASSPHRASE", pw);
+            }
             if capture {
                 let out = cmd
                     .output()
@@ -2671,7 +2663,8 @@ impl<'a> CommandHandler<'a> {
             "[4/4] Starting pactmesh-core daemon (log: {})...",
             log_path.display()
         );
-        let child = spawn_quickstart_daemon(&core, &log_path, &daemon_args, Some(&device_passphrase))?;
+        let child =
+            spawn_quickstart_daemon(&core, &log_path, &daemon_args, device_passphrase.as_deref())?;
         println!("      daemon pid {}", child.id());
 
         // Let the daemon bind its rpc portal before the console starts serving live panels.
@@ -2769,16 +2762,17 @@ impl<'a> CommandHandler<'a> {
         )
         .context("failed to parse serve config")?;
 
-        let sealed = std::fs::read(&sealed_path).with_context(|| {
-            format!(
-                "sealed device passphrase not found at {} (run `pactmesh serve seal` first)",
-                sealed_path.display()
-            )
-        })?;
-        let device_passphrase = String::from_utf8(
-            pactmesh::secret_seal::unseal(&sealed).context("failed to unseal device passphrase")?,
-        )
-        .context("unsealed device passphrase is not valid UTF-8")?;
+        // 封存文件可选：存在→age 设备钥（解封口令）；缺失→raw 设备钥（daemon 直读 sk_self.raw）。
+        let device_passphrase = match std::fs::read(&sealed_path) {
+            Ok(sealed) => Some(
+                String::from_utf8(
+                    pactmesh::secret_seal::unseal(&sealed)
+                        .context("failed to unseal device passphrase")?,
+                )
+                .context("unsealed device passphrase is not valid UTF-8")?,
+            ),
+            Err(_) => None,
+        };
 
         let exe = std::env::current_exe().context("failed to locate the pactmesh executable")?;
         let core = quickstart_core_path(&exe)?;
@@ -2819,7 +2813,8 @@ impl<'a> CommandHandler<'a> {
             "starting pactmesh-core daemon (log: {})...",
             log_path.display()
         );
-        let child = spawn_quickstart_daemon(&core, &log_path, &daemon_args, Some(&device_passphrase))?;
+        let child =
+            spawn_quickstart_daemon(&core, &log_path, &daemon_args, device_passphrase.as_deref())?;
         println!("daemon pid {}", child.id());
 
         // Let the daemon bind its rpc portal before the console starts serving live panels.

@@ -1030,8 +1030,8 @@ struct LeaveReq {
     network_local_id: String,
 }
 
-/// 离开网络：匹配 (td,nid) 对应的运行实例 → DeleteNetworkInstance（停实例 + 删持久化 toml）
-/// → 删本机 sk_self.seal（避免开机自动重连）。不需 root 签名（纯本机 daemon 操作）。
+/// 离开网络：匹配 (td,nid) 对应的运行实例 → DeleteNetworkInstance（停实例 + 删持久化 toml
+/// → 不再开机自动重连）。不需 root 签名（纯本机 daemon 操作）。
 async fn api_network_leave(State(s): State<AppState>, Json(req): Json<LeaveReq>) -> Response {
     let result = async {
         let client = {
@@ -1072,8 +1072,6 @@ async fn api_network_leave(State(s): State<AppState>, Json(req): Json<LeaveReq>)
                 DeleteNetworkInstanceRequest { inst_ids: matched },
             )
             .await?;
-        let network_dir = domain_dir.join("networks").join(&req.network_local_id);
-        let _ = std::fs::remove_file(network_dir.join("sk_self.seal"));
         Ok::<(), anyhow::Error>(())
     }
     .await;
@@ -1723,21 +1721,16 @@ struct NetworkRunReq {
     default_action: String,
     #[serde(default)]
     device_label: Option<String>,
-    /// true=把设备口令封存到本机（开机自动重连）；false=加网后即删封存文件。
-    #[serde(default)]
-    remember: bool,
     /// 域 root 管理口令（即用即清）。
     root_passphrase: String,
-    /// 设备私钥口令（即用即清；封存或一次性）。
-    device_passphrase: String,
     #[serde(default)]
     listeners: Vec<String>,
     #[serde(default)]
     no_tun: bool,
 }
 
-/// 对**运行中**空载 daemon 挂载信任域网络实例（不重启）。`sk_self.seal` 须已在
-/// `network_dir`（口令通道）。返回 inst_id 串。`!remember` 时载入后删封存文件 + 删持久化 toml。
+/// 对**运行中**空载 daemon 挂载信任域网络实例（不重启）。设备钥为 raw（免口令），
+/// 实例 toml 恒持久化 → 开机自动重连。返回 inst_id 串。
 /// 建网(`api_network_run`)与经邀请加入(`api_join_status`)共用此尾部。
 async fn attach_trust_network(
     s: &AppState,
@@ -1746,11 +1739,8 @@ async fn attach_trust_network(
     listeners: Vec<String>,
     peers: Vec<String>,
     no_tun: bool,
-    remember: bool,
 ) -> anyhow::Result<Option<String>> {
     let domain_dir = crate::common::config_dir::pnw_trust_domains_dir()?.join(trust_domain_id);
-    let network_dir = domain_dir.join("networks").join(network_local_id);
-    let seal_path = network_dir.join("sk_self.seal");
     let domain_dir_str = domain_dir.to_string_lossy().into_owned();
     let listeners = if listeners.is_empty() {
         vec!["tcp://0.0.0.0:11010".to_string()]
@@ -1794,24 +1784,13 @@ async fn attach_trust_network(
         )
         .await?;
     let inst_id_str = resp.inst_id.map(|u| uuid::Uuid::from(u).to_string());
-    if !remember {
-        tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
-        let _ = std::fs::remove_file(&seal_path);
-        if let (Ok(dir), Some(id)) = (
-            crate::common::config_dir::pnw_serve_instances_dir(),
-            inst_id_str.as_ref(),
-        ) {
-            let _ = std::fs::remove_file(dir.join(format!("{id}.toml")));
-        }
-    }
     Ok(inst_id_str)
 }
 
-/// 一站式建网+加网：建域(可选)→建网→自举本机→封存口令→对**运行中**空载 daemon
-/// 调 `RunNetworkInstance`（不重启）。口令经 `sk_self.seal` 送达，绝不进 toml/明文。
+/// 一站式建网+加网：建域(可选)→建网→自举本机（设备钥 raw，免口令）→对**运行中**
+/// 空载 daemon 调 `RunNetworkInstance`（不重启）。root 口令即用即清，绝不进 toml/明文。
 async fn api_network_run(State(s): State<AppState>, Json(req): Json<NetworkRunReq>) -> Response {
     let root_pass = Zeroizing::new(req.root_passphrase.clone());
-    let device_pass = Zeroizing::new(req.device_passphrase.clone());
     let result = async {
         // 1) 既有域 or 新建域
         let trust_domain_id = match req.trust_domain_id.clone() {
@@ -1828,7 +1807,7 @@ async fn api_network_run(State(s): State<AppState>, Json(req): Json<NetworkRunRe
             &req.default_action,
             root_pass.as_str(),
         )?;
-        // 3) 自举本机：自执行 binary（设备身份助手为 binary 私有），口令经 env 即用即清
+        // 3) 自举本机：自执行 binary（设备身份助手为 binary 私有）；无设备口令 → 写 sk_self.raw
         let device_label = req
             .device_label
             .clone()
@@ -1844,25 +1823,12 @@ async fn api_network_run(State(s): State<AppState>, Json(req): Json<NetworkRunRe
                 &device_label,
             ])
             .env("PNW_ROOT_PASSPHRASE", root_pass.as_str())
-            .env("PNW_DEVICE_PASSPHRASE", device_pass.as_str())
             .status()
             .context("failed to run bootstrap-self")?;
         if !status.success() {
             anyhow::bail!("bootstrap-self exited with {status}");
         }
-        // 4) 封存设备口令到 sk_self.seal（运行时加网 + 重启自动重连的口令通道）
-        let domain_dir = crate::common::config_dir::pnw_trust_domains_dir()?.join(&trust_domain_id);
-        let network_dir = domain_dir.join("networks").join(&req.network_local_id);
-        let seal_path = network_dir.join("sk_self.seal");
-        let sealed = crate::secret_seal::seal(device_pass.as_bytes())?;
-        std::fs::write(&seal_path, &sealed)
-            .with_context(|| format!("failed to write {}", seal_path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&seal_path, std::fs::Permissions::from_mode(0o600));
-        }
-        // 5+6) 对运行中空载 daemon 加网（不重启）+「不记住」清理，共用 helper。
+        // 4) 对运行中空载 daemon 加网（不重启）；实例恒持久化 → 开机自动重连。
         let inst_id_str = attach_trust_network(
             &s,
             &trust_domain_id,
@@ -1870,14 +1836,12 @@ async fn api_network_run(State(s): State<AppState>, Json(req): Json<NetworkRunRe
             req.listeners.clone(),
             Vec::new(),
             req.no_tun,
-            req.remember,
         )
         .await?;
         Ok::<_, anyhow::Error>(serde_json::json!({
             "trust_domain_id": trust_domain_id,
             "network_local_id": req.network_local_id,
             "inst_id": inst_id_str,
-            "remembered": req.remember,
         }))
     }
     .await;
@@ -1918,10 +1882,6 @@ struct JoinReq {
     invite_url: String,
     #[serde(default)]
     device_label: Option<String>,
-    /// 设备私钥口令（≥8）：封存到 sk_self.seal 供后台子进程 + 批准后挂载解锁。
-    device_passphrase: String,
-    #[serde(default)]
-    remember: bool,
     #[serde(default)]
     no_tun: bool,
     #[serde(default)]
@@ -1943,24 +1903,12 @@ async fn api_network_join(State(_s): State<AppState>, Json(req): Json<JoinReq>) 
     let td = bootstrap.trust_domain_id.to_string();
     let nid = bootstrap.network_local_id.to_string();
 
-    let device_pass = Zeroizing::new(req.device_passphrase.clone());
     let result = (|| {
-        // 2) 计算 network_dir，封存设备口令到 sk_self.seal（唯一送达通道，绝不明文）
+        // 2) 计算 network_dir（供 meta；设备钥 raw，无口令封存）。accept-invite 会自建该目录。
         let domain_dir = crate::common::config_dir::pnw_trust_domains_dir()?.join(&td);
         let network_dir = domain_dir.join("networks").join(&nid);
-        std::fs::create_dir_all(&network_dir)
-            .with_context(|| format!("failed to create {}", network_dir.display()))?;
-        let seal_path = network_dir.join("sk_self.seal");
-        let sealed = crate::secret_seal::seal(device_pass.as_bytes())?;
-        std::fs::write(&seal_path, &sealed)
-            .with_context(|| format!("failed to write {}", seal_path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&seal_path, std::fs::Permissions::from_mode(0o600));
-        }
 
-        // 3) 脱离会话起后台子进程 accept-invite（online 默认；口令经 env，日志落盘）
+        // 3) 脱离会话起后台子进程 accept-invite（online 默认；无设备口令 → raw，日志落盘）
         let device_label = req
             .device_label
             .clone()
@@ -1986,7 +1934,6 @@ async fn api_network_join(State(_s): State<AppState>, Json(req): Json<JoinReq>) 
                 "--poll-secs",
                 &JOIN_POLL_SECS.to_string(),
             ])
-            .env("PNW_DEVICE_PASSPHRASE", device_pass.as_str())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::from(log))
             .stderr(std::process::Stdio::from(log_err))
@@ -2003,7 +1950,6 @@ async fn api_network_join(State(_s): State<AppState>, Json(req): Json<JoinReq>) 
             "domain_label": bootstrap.trust_domain_label,
             "network_name": bootstrap.network_name,
             "network_dir": network_dir.to_string_lossy(),
-            "remember": req.remember,
             "no_tun": req.no_tun,
             "listeners": req.listeners,
             "seeds": bootstrap.bootstrap_seeds.iter().map(|u| u.as_str().to_string()).collect::<Vec<_>>(),
@@ -2058,7 +2004,6 @@ async fn api_join_status(State(s): State<AppState>) -> Response {
             .unwrap_or_default()
             .to_string();
         let network_dir = std::path::PathBuf::from(meta["network_dir"].as_str().unwrap_or_default());
-        let remember = meta["remember"].as_bool().unwrap_or(false);
         let no_tun = meta["no_tun"].as_bool().unwrap_or(false);
         let listeners: Vec<String> = meta["listeners"]
             .as_array()
@@ -2083,7 +2028,7 @@ async fn api_join_status(State(s): State<AppState>) -> Response {
         let mut item = base.clone();
         if cert_ok {
             // 批准：挂载到运行中空载 daemon（不重启）→ 成功删 meta。
-            match attach_trust_network(&s, &td, &nid, listeners, seeds, no_tun, remember).await {
+            match attach_trust_network(&s, &td, &nid, listeners, seeds, no_tun).await {
                 Ok(inst_id) => {
                     let _ = std::fs::remove_file(&path);
                     item["status"] = serde_json::json!("online");
@@ -2095,8 +2040,7 @@ async fn api_join_status(State(s): State<AppState>) -> Response {
                 }
             }
         } else if started_at > 0 && now_unix().saturating_sub(started_at) > wait_secs {
-            // 超时无 cert：清理封存文件 + meta（子进程已放弃）。
-            let _ = std::fs::remove_file(network_dir.join("sk_self.seal"));
+            // 超时无 cert：清理 meta（子进程已放弃）。
             let _ = std::fs::remove_file(&path);
             item["status"] = serde_json::json!("timeout");
         } else if submitted {
