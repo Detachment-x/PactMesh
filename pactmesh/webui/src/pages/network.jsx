@@ -2,11 +2,13 @@ import { useCallback, useState } from 'preact/hooks'
 import { api } from '../api.js'
 import { usePoll } from '../hooks.js'
 import { useApp } from '../store.jsx'
-import { Skeleton, EmptyState, Dot, CopyId, Toggle, InlineEdit, Modal, useToast } from '../ui.jsx'
-import { ipv4, dnsZone } from '../format.js'
+import { EmptyState, Dot, CopyId, Toggle, InlineEdit, Modal, useToast } from '../ui.jsx'
+import { dnsZone } from '../format.js'
+import { DeviceRoster } from './devices.jsx'
 
-// 网络级设置（ztncui / ZeroTier Central 风）：IP 池自动分配、成员 IP 一览、托管路由（本机通告可编辑）、
-// DNS 只读、访问控制入口（主控）。成员（isRoot=false）降级只读并显示「离开网络」。
+// 单一网络中心页（ztncui / ZeroTier Central 风）：网络信息 + IP 池设置 + 设备名册（治理表）
+// + 托管路由 + DNS（只读）+ 访问控制入口。轮询在此统一持有，向内嵌的设备名册下传（去重）。
+// 成员（isRoot=false）降级只读并显示「离开网络」。
 export function Network({ onNavigate }) {
   const { network, requireUnlock, refreshInstances } = useApp()
   const toast = useToast()
@@ -24,27 +26,24 @@ export function Network({ onNavigate }) {
     [td, nid],
     0,
   )
-  const routes = usePoll(api.routes, [], 5000)
-  const peers = usePoll(api.peers, [], 5000)
-  const node = usePoll(api.node, [], 5000)
+  const routes = usePoll(api.routes, [], 4000)
+  const peers = usePoll(api.peers, [], 4000)
+  const node = usePoll(api.node, [], 4000)
 
   const [leaving, setLeaving] = useState(false)
   const [newRoute, setNewRoute] = useState('')
 
   if (!network) {
-    return <EmptyState icon="◍" title="尚未选择网络" hint="在顶栏选择一个网络后查看其网络设置。" />
+    return <EmptyState icon="◍" title="尚未选择网络" hint="在顶栏选择一个网络后查看其设置与设备。" />
   }
 
-  // 运行时按 hostname 索引（唯一 join 键）：本机取 my_info/node，其余取 routes。
-  const byHost = {}
+  // 在线节点计数（按 hostname，唯一 join 键）：本机 my_info/node + routes 各节点。
   const my = peers.data?.my_info || node.data?.node_info
-  if (my?.hostname) byHost[my.hostname] = { ip: my.ipv4_addr || '—', online: true, self: true }
-  for (const r of routes.data?.routes || []) {
-    if (r.hostname) byHost[r.hostname] = { ip: ipv4(r.ipv4_addr), online: true, self: false }
-  }
+  const onlineHosts = new Set()
+  if (my?.hostname) onlineHosts.add(my.hostname)
+  for (const r of routes.data?.routes || []) if (r.hostname) onlineHosts.add(r.hostname)
 
   const list = Array.isArray(members.data) ? members.data : []
-  const onlineCount = Object.keys(byHost).length
   const runtimeDown = !!routes.error && !!peers.error && !!node.error
   const zone = dnsZone(my?.config)
   const poolData = pool.data || {}
@@ -76,7 +75,7 @@ export function Network({ onNavigate }) {
     }
   }
 
-  // 从池自动为某设备分配空闲 IP（走 assigned-ipv4 签名路径）。
+  // 从池自动为某设备分配空闲 IP（走 assigned-ipv4 签名路径）；设备名册的 IP 单元格调用此项。
   const autoAssign = async (fp) => {
     const ok = await requireUnlock()
     if (!ok) return
@@ -117,11 +116,11 @@ export function Network({ onNavigate }) {
           <dt>网络 ID</dt><dd class="mono">{nid}</dd>
           <dt>信任域</dt><dd><CopyId value={td} chars={12} /></dd>
           <dt>设备数</dt><dd>{members.loading ? '·' : list.length}</dd>
-          <dt>在线节点</dt><dd>{runtimeDown ? '—' : onlineCount}</dd>
+          <dt>在线节点</dt><dd>{runtimeDown ? '—' : onlineHosts.size}</dd>
         </dl>
       </div>
 
-      {/* IP 分配（IP 池 + 自动分配） */}
+      {/* IP 分配（地址池 + 自动分配总开关） */}
       <div class="card">
         <div class="card-title">IP 分配</div>
         <dl class="kv">
@@ -151,51 +150,15 @@ export function Network({ onNavigate }) {
           </dd>
         </dl>
         <p class="muted">
-          未指派的设备默认<strong>自助分配</strong>虚拟 IPv4（DHCP，冲突自动重选）。设置地址池后，可为设备
-          <strong>从池中自动分配</strong>或在「设备」页逐台指派固定 IP，经 root 签名的网络状态实时下发。
+          未指派的设备默认<strong>自助分配</strong>虚拟 IPv4（DHCP，冲突自动重选）。设置地址池后，可在下方设备表逐台
+          <strong>自动分配</strong>或指派固定 IP，经 root 签名的网络状态实时下发。
         </p>
       </div>
 
-      {/* 成员 IP 一览 */}
+      {/* 设备（治理名册，内嵌自 devices.jsx） */}
       <div class="card">
-        <div class="card-title">成员 IP</div>
-        {members.loading && !list.length ? (
-          <Skeleton rows={3} />
-        ) : !list.length ? (
-          <span class="muted">还没有设备。</span>
-        ) : (
-          <div class="table-wrap">
-            <table class="dtable">
-              <thead>
-                <tr><th>设备</th><th>主机名</th><th>指派 IP</th><th>当前虚拟 IP</th><th>状态</th></tr>
-              </thead>
-              <tbody>
-                {list.map((d) => {
-                  const r = d.hostname ? byHost[d.hostname] : null
-                  return (
-                    <tr key={d.device_id}>
-                      <td>{d.device_label || '未命名设备'}</td>
-                      <td class="mono-cell">{d.hostname || <span class="muted">—</span>}</td>
-                      <td class="mono-cell">
-                        {d.assigned_ipv4 ? (
-                          <span class="chip chip-ok"><code>{d.assigned_ipv4}</code></span>
-                        ) : isRoot && d.role !== 'root' ? (
-                          <button class="btn btn-ghost btn-sm" title="从地址池自动分配一个空闲 IP" onClick={() => autoAssign(d.fingerprint)}>自动分配</button>
-                        ) : (
-                          <span class="muted">自分配</span>
-                        )}
-                      </td>
-                      <td class="mono-cell">{r ? r.ip : <span class="muted">—</span>}</td>
-                      <td>
-                        {r ? <Dot kind="ok" label={r.self ? '本机' : '在线'} /> : <Dot kind="muted" label={runtimeDown ? '未知' : '离线'} />}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <div class="card-title">设备</div>
+        <DeviceRoster members={members} peers={peers} routes={routes} node={node} pool={pool} onAutoAssign={autoAssign} />
       </div>
 
       {/* 托管路由（本机通告可编辑） */}

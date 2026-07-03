@@ -1,7 +1,6 @@
 import { Fragment } from 'preact'
 import { useState, useCallback } from 'preact/hooks'
 import { api } from '../api.js'
-import { usePoll } from '../hooks.js'
 import { useApp } from '../store.jsx'
 import { Skeleton, EmptyState, ErrorState, CopyId, Dot, Drawer, Toggle, Modal, InlineEdit, useToast } from '../ui.jsx'
 import { ipv4, ipv6, bytes, latencyUs, ipList as fmtIpList, dnsZone, NAT_TYPE, IDENTITY } from '../format.js'
@@ -89,23 +88,15 @@ function ipCellDisplay(assigned, r) {
   return <span class="muted">自分配</span>
 }
 
-export function Devices() {
+// 网络中心页内嵌的治理名册：轮询与地址池由父页 `network.jsx` 统一持有并下传，
+// 避免双重轮询。onAutoAssign(fp) 走地址池签名分配；pool 提供「是否已设池」判断。
+export function DeviceRoster({ members, peers, routes, node, pool, onAutoAssign }) {
   const { network, requireUnlock } = useApp()
   const toast = useToast()
   const isRoot = !!network?.isRoot
-  const td = network?.td
-  const nid = network?.nid
   const [sel, setSel] = useState(null) // { kind:'member', id:device_id } | { kind:'temp', id:peer_id }
   const [revoking, setRevoking] = useState(null) // 待吊销设备
-
-  const members = usePoll(
-    useCallback(() => (td ? api.members(td, nid) : Promise.resolve([])), [td, nid]),
-    [td, nid],
-    8000,
-  )
-  const peers = usePoll(api.peers, [], 4000)
-  const routes = usePoll(api.routes, [], 4000)
-  const node = usePoll(api.node, [], 4000)
+  const poolReady = !!pool?.data?.ip_pool_cidr
 
   // 单项治理提交：JIT 解锁 → 调用 → 刷新。返回 true/false（false=未解锁/失败，供 InlineEdit 保持编辑）。
   const gov = useCallback(async (fn, okMsg) => {
@@ -240,14 +231,19 @@ export function Devices() {
                     </td>
                     <td class="mono-cell">
                       {isRoot ? (
-                        <InlineEdit
-                          value={d.assigned_ipv4 || ''}
-                          placeholder="10.10.0.2/24"
-                          mono
-                          title={d.assigned_ipv4 ? '点击改派（留空清除回退自分配）' : '点击指派固定 IP'}
-                          onCommit={(v) => gov(() => api.assignedIpv4(fp, v || null), v ? '已指派 IP' : '已清除指派')}
-                          render={(v) => ipCellDisplay(v, r)}
-                        />
+                        <span class="ip-cell">
+                          <InlineEdit
+                            value={d.assigned_ipv4 || ''}
+                            placeholder="10.10.0.2/24"
+                            mono
+                            title={d.assigned_ipv4 ? '点击改派（留空清除回退自分配）' : '点击指派固定 IP'}
+                            onCommit={(v) => gov(() => api.assignedIpv4(fp, v || null), v ? '已指派 IP' : '已清除指派')}
+                            render={(v) => ipCellDisplay(v, r)}
+                          />
+                          {!d.assigned_ipv4 && poolReady && canGov && (
+                            <button class="btn btn-ghost btn-sm" title="从地址池分配一个空闲 IP" onClick={() => onAutoAssign?.(fp)}>自动分配</button>
+                          )}
+                        </span>
                       ) : ipCellDisplay(d.assigned_ipv4, r)}
                     </td>
                     <td>{connCell(r, d.hostname)}</td>

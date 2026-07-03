@@ -62,13 +62,13 @@ export function Overview({ onNavigate }) {
 
       {/* 健康指标 */}
       <div class="metric-grid">
-        <Metric label="设备" value={memberCount} loading={members.loading} onClick={() => onNavigate?.('devices')} />
+        <Metric label="设备" value={memberCount} loading={members.loading} onClick={() => onNavigate?.('network')} />
         <Metric
           label="在线节点"
           value={daemonDown ? '—' : onlineCount}
           loading={peers.loading && !daemonDown}
           sub={daemonDown ? 'daemon 未连接' : undefined}
-          onClick={() => onNavigate?.('devices')}
+          onClick={() => onNavigate?.('network')}
         />
         <Metric
           label="待批"

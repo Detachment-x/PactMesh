@@ -654,6 +654,9 @@ body {
 .inline-edit-box .field-sm { min-width: 130px; }
 .inline-ro { color: inherit; }
 
+/* 设备表 IP 单元格：行内指派 + 地址池自动分配 */
+.ip-cell { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
 /* 行内操作组 + 图标按钮 */
 .row-ops { display: inline-flex; align-items: center; gap: 6px; justify-content: flex-end; }
 .icon-btn {
