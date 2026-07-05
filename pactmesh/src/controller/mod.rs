@@ -29,6 +29,17 @@ pub struct ControllerConfig {
     pub token: Option<String>,
     /// root 口令解锁 TTL（秒）。M2 会话解锁使用，M1 仅保留。
     pub unlock_ttl_secs: u64,
+    /// quickstart / serve run 的主网络：控制器启动后经 `run_network_instance`
+    /// 挂载到空载 daemon（而非烘焙进 CLI），使主网络成为可管理、可热停的实例。
+    pub attach_primary: Option<AttachPrimary>,
+}
+
+/// 待挂载的主网络描述（quickstart/serve 由既有信任域自举后交由控制器挂载）。
+pub struct AttachPrimary {
+    pub trust_domain_id: String,
+    pub network_local_id: String,
+    pub listeners: Vec<String>,
+    pub no_tun: bool,
 }
 
 #[derive(Clone)]
@@ -55,6 +66,24 @@ pub async fn run(
         session: Arc::new(Mutex::new(None)),
         unlock_ttl: Duration::from_secs(config.unlock_ttl_secs),
     };
+
+    // 主网络挂载：quickstart/serve 起空载 daemon 后，在此对运行中 daemon 调
+    // `run_network_instance` 挂主网 → 主网络成为可热停/可删的托管实例（修复烘焙式
+    // 只读实例无法 leave/purge 的问题）。失败不致命：控制台仍拉起以便诊断/重试。
+    if let Some(ap) = config.attach_primary {
+        if let Err(e) = routes::attach_trust_network(
+            &state,
+            &ap.trust_domain_id,
+            &ap.network_local_id,
+            ap.listeners,
+            vec![],
+            ap.no_tun,
+        )
+        .await
+        {
+            eprintln!("warning: failed to attach primary network: {e:#}");
+        }
+    }
 
     let app = routes::router(state);
 

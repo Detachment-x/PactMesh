@@ -31,7 +31,8 @@ use crate::proto::api::instance::{
     CredentialManageRpc, CredentialManageRpcClientFactory, GenerateCredentialRequest,
     GenerateCredentialResponse, GetAclStatsRequest, GetAclStatsResponse, GetStatsRequest,
     GetStatsResponse, GetVpnPortalInfoRequest, GetVpnPortalInfoResponse, GetWhitelistRequest,
-    GetWhitelistResponse, ListConnectorRequest, ListConnectorResponse, ListCredentialsRequest,
+    GetWhitelistResponse, InstanceIdentifier, ListConnectorRequest, ListConnectorResponse,
+    ListCredentialsRequest,
     ListCredentialsResponse, ListMappedListenerRequest, ListMappedListenerResponse,
     ListPeerRequest, ListPeerResponse, ListPortForwardRequest, ListPortForwardResponse,
     ListRouteRequest, ListRouteResponse, ListTcpProxyEntryRequest, ListTcpProxyEntryResponse,
@@ -45,7 +46,7 @@ use std::str::FromStr;
 use anyhow::Context as _;
 use crate::proto::rpc_types::controller::BaseController;
 use crate::proto::api::manage::{
-    DeleteNetworkInstanceRequest, GetNetworkInstanceConfigRequest, ListNetworkInstanceRequest,
+    DeleteNetworkInstanceRequest, ListNetworkInstanceRequest,
     ListNetworkInstanceResponse, NetworkConfig, NetworkingMethod, RunNetworkInstanceRequest,
     TrustDomainLocator, WebClientService, WebClientServiceClientFactory,
 };
@@ -1082,26 +1083,39 @@ async fn stop_network_instances(
         g.scoped_client::<WebClientServiceClientFactory<BaseController>>(String::new())
             .await?
     };
+    let cfg_client = {
+        let mut g = s.client.lock().await;
+        g.scoped_client::<ConfigRpcClientFactory<BaseController>>(String::new())
+            .await?
+    };
     let listed = client
         .list_network_instance(BaseController::default(), ListNetworkInstanceRequest {})
         .await?;
-    let domain_dir = crate::common::config_dir::pnw_trust_domains_dir()?.join(trust_domain_id);
+    // 按覆盖层 network_name=`{td}/{nid}` 匹配（A2 复合名即全局唯一身份）。用 live 配置
+    // `get_config`（launcher 反向映射）而非 `get_network_instance_config`：后者对 quickstart/
+    // serve CLI 起的实例（只读配置，源自环境/命令行）直接报错 → 旧 locator 匹配漏掉主网实例，
+    // 令 leave/purge 停不掉主网络。get_config 对只读实例同样可读，覆盖 CLI + RPC 两类实例。
+    let want_name = overlay_network_name(trust_domain_id, network_local_id);
     let mut matched = Vec::new();
     for inst in listed.inst_ids.iter() {
-        let cfg = client
-            .get_network_instance_config(
+        let Ok(resp) = cfg_client
+            .get_config(
                 BaseController::default(),
-                GetNetworkInstanceConfigRequest { inst_id: Some(inst.clone()) },
+                GetConfigRequest {
+                    instance: Some(InstanceIdentifier {
+                        selector: Some(
+                            crate::proto::api::instance::instance_identifier::Selector::Id(
+                                inst.clone(),
+                            ),
+                        ),
+                    }),
+                },
             )
-            .await;
-        let Ok(cfg) = cfg else { continue };
-        let Some(loc) = cfg.config.and_then(|c| c.trust_domain) else { continue };
-        let dir_match = std::path::Path::new(&loc.trust_domain_dir) == domain_dir
-            || loc
-                .trust_domain_dir
-                .trim_end_matches(|c| c == '/' || c == '\\')
-                .ends_with(trust_domain_id);
-        if dir_match && loc.network_local_id == network_local_id {
+            .await
+        else {
+            continue;
+        };
+        if resp.config.and_then(|c| c.network_name).as_deref() == Some(want_name.as_str()) {
             matched.push(inst.clone());
         }
     }
@@ -1917,7 +1931,7 @@ fn default_listener_url() -> anyhow::Result<String> {
 /// 对**运行中**空载 daemon 挂载信任域网络实例（不重启）。设备钥为 raw（免口令），
 /// 实例 toml 恒持久化 → 开机自动重连。返回 inst_id 串。
 /// 建网(`api_network_run`)与经邀请加入(`api_join_status`)共用此尾部。
-async fn attach_trust_network(
+pub(super) async fn attach_trust_network(
     s: &AppState,
     trust_domain_id: &str,
     network_local_id: &str,

@@ -529,25 +529,6 @@ fn spawn_quickstart_daemon(
         .with_context(|| format!("failed to start {}", core.display()))
 }
 
-/// 由 network_local_id 派生 MagicDNS 顶级区（`<nid>.pm.`），与控制器建网/加入路径
-/// (`controller::routes`) 保持一致，使 CLI 引导的节点默认启用同名区。
-fn magic_dns_zone(network_local_id: &str) -> String {
-    let sanitized: String = network_local_id
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
-        .collect();
-    let base = sanitized.trim_matches('-');
-    let base = if base.is_empty() { "net" } else { base };
-    format!("{base}.pm.")
-}
-
-/// 覆盖层网络身份 `{td}/{nid}`（镜像 controller::routes::overlay_network_name，bin 与
-/// lib 跨 crate 边界故复刻）。全网各节点算出同值 → 同域互通、跨域同 nid 不撞名。
-fn overlay_network_name(trust_domain_id: &str, network_local_id: &str) -> String {
-    format!("{trust_domain_id}/{network_local_id}")
-}
-
 fn quickstart_json_field(text: &str, field: &str) -> Result<String, Error> {
     let value: serde_json::Value = serde_json::from_str(text)
         .with_context(|| format!("failed to parse JSON output: {text}"))?;
@@ -2572,7 +2553,11 @@ impl<'a> CommandHandler<'a> {
         }
     }
 
-    async fn run_controller(&self, args: &ControllerArgs) -> Result<(), Error> {
+    async fn run_controller(
+        &self,
+        args: &ControllerArgs,
+        attach_primary: Option<pactmesh::controller::AttachPrimary>,
+    ) -> Result<(), Error> {
         pactmesh::controller::run(
             self.client.clone(),
             self.instance_selector.clone(),
@@ -2580,6 +2565,7 @@ impl<'a> CommandHandler<'a> {
                 listen: args.listen,
                 token: args.token.clone(),
                 unlock_ttl_secs: args.unlock_ttl_secs,
+                attach_primary,
             },
         )
         .await
@@ -2677,34 +2663,17 @@ impl<'a> CommandHandler<'a> {
             false,
         )?;
 
-        let domain_dir = pnw_trust_domains_dir()?.join(&trust_domain_id);
-        let domain_dir_str = domain_dir
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("trust-domain path is not UTF-8"))?;
         let log_path = pnw_config_dir()?.join("pactmesh-core-quickstart.log");
         let rpc_arg = format!("{}:{}", rpc_portal.ip(), rpc_portal.port());
         let no_tun = if args.no_tun { "true" } else { "false" };
-        let dns_zone = magic_dns_zone(&args.network_id);
-        let overlay_name = overlay_network_name(&trust_domain_id, &args.network_id);
+        // 空载 daemon：主网络不再烘焙进 CLI/env，改由控制台启动后经 run_network_instance
+        // 挂载（见 ControllerConfig::attach_primary），令主网络成为可热停/可删的托管实例。
         let daemon_args = [
-            "--network-name",
-            &overlay_name,
-            "--trust-domain-dir",
-            domain_dir_str,
-            "--network-local-id",
-            &args.network_id,
-            "--accept-dns",
-            "true",
-            "--tld-dns-zone",
-            &dns_zone,
+            "--empty",
             "--rpc-portal",
             &rpc_arg,
-            "--listeners",
-            &args.listeners,
             "--no-tun",
             no_tun,
-            "--disable-ipv6",
-            "true",
             "--instance-name",
             &device_label,
             "--console-log-level",
@@ -2731,7 +2700,16 @@ impl<'a> CommandHandler<'a> {
         println!(
             "Setup complete. Starting the web console (Ctrl-C to stop; the daemon keeps running)."
         );
-        self.run_controller(&controller_args).await
+        self.run_controller(
+            &controller_args,
+            Some(pactmesh::controller::AttachPrimary {
+                trust_domain_id,
+                network_local_id: args.network_id.clone(),
+                listeners: vec![args.listeners.clone()],
+                no_tun: args.no_tun,
+            }),
+        )
+        .await
     }
 
     async fn run_serve(&self, rpc_portal: SocketAddr, args: &ServeArgs) -> Result<(), Error> {
@@ -2797,7 +2775,7 @@ impl<'a> CommandHandler<'a> {
             "starting web console on {} (Ctrl-C to stop; no network attached yet)",
             args.listen
         );
-        self.run_controller(&controller_args).await
+        self.run_controller(&controller_args, None).await
     }
 
     async fn serve_run(&self, rpc_portal: SocketAddr, args: &ServeRunArgs) -> Result<(), Error> {
@@ -2830,34 +2808,17 @@ impl<'a> CommandHandler<'a> {
         let core = quickstart_core_path(&exe)?;
         let instance_name = gethostname::gethostname().to_string_lossy().to_string();
 
-        let domain_dir = pnw_trust_domains_dir()?.join(&config.trust_domain_id);
-        let domain_dir_str = domain_dir
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("trust-domain path is not UTF-8"))?;
         let log_path = config_dir.join("pactmesh-core-serve.log");
         let rpc_arg = format!("{}:{}", rpc_portal.ip(), rpc_portal.port());
         let no_tun = if config.no_tun { "true" } else { "false" };
-        let dns_zone = magic_dns_zone(&config.network_id);
-        let overlay_name = overlay_network_name(&config.trust_domain_id, &config.network_id);
+        // 空载 daemon：主网络由控制台启动后经 run_network_instance 挂载
+        // （见 ControllerConfig::attach_primary），令主网络成为可热停/可删的托管实例。
         let daemon_args = [
-            "--network-name",
-            &overlay_name,
-            "--trust-domain-dir",
-            domain_dir_str,
-            "--network-local-id",
-            &config.network_id,
-            "--accept-dns",
-            "true",
-            "--tld-dns-zone",
-            &dns_zone,
+            "--empty",
             "--rpc-portal",
             &rpc_arg,
-            "--listeners",
-            &config.listeners,
             "--no-tun",
             no_tun,
-            "--disable-ipv6",
-            "true",
             "--instance-name",
             &instance_name,
             "--console-log-level",
@@ -2884,7 +2845,16 @@ impl<'a> CommandHandler<'a> {
             unlock_ttl_secs: args.unlock_ttl_secs,
         };
         println!("starting web console on {listen} (Ctrl-C to stop)");
-        self.run_controller(&controller_args).await
+        self.run_controller(
+            &controller_args,
+            Some(pactmesh::controller::AttachPrimary {
+                trust_domain_id: config.trust_domain_id.clone(),
+                network_local_id: config.network_id.clone(),
+                listeners: vec![config.listeners.clone()],
+                no_tun: config.no_tun,
+            }),
+        )
+        .await
     }
 
     async fn handle_peer_list(&self) -> Result<(), Error> {
@@ -10688,7 +10658,9 @@ async fn main() -> Result<(), Error> {
                     .await?;
             }
         },
-        SubCommand::Controller(controller_args) => handler.run_controller(&controller_args).await?,
+        SubCommand::Controller(controller_args) => {
+            handler.run_controller(&controller_args, None).await?
+        }
         SubCommand::Quickstart(quickstart_args) => {
             handler
                 .run_quickstart(cli.rpc_portal, &quickstart_args)
