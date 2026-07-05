@@ -267,10 +267,14 @@ fn read_sk_self_password_if_needed(
     // 2) Sealed per-network file (runtime attach / reboot auto-reconnect).
     let sealed_path = network_dir.join(SK_SELF_SEAL_FILE);
     if sealed_path.is_file() {
-        let sealed = std::fs::read(&sealed_path)
-            .with_context(|| format!("failed to read sealed sk_self password {}", sealed_path.display()))?;
-        let plain = crate::secret_seal::unseal(&sealed)
-            .context("failed to unseal sk_self password")?;
+        let sealed = std::fs::read(&sealed_path).with_context(|| {
+            format!(
+                "failed to read sealed sk_self password {}",
+                sealed_path.display()
+            )
+        })?;
+        let plain =
+            crate::secret_seal::unseal(&sealed).context("failed to unseal sk_self password")?;
         return String::from_utf8(plain).context("unsealed sk_self password is not valid UTF-8");
     }
     anyhow::bail!(

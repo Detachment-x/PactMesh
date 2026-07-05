@@ -57,8 +57,9 @@ use crate::{
         },
     },
     trust::{
-        AclPolicy, BorrowedRelayProof, Cidr, DeviceFingerprint, MemberCert, MemberCertFingerprint,
-        PacketTuple, PeerMatchContext, RelayGrantTable, TrustDomainPool, decide, from_cbor,
+        AclPolicy, BorrowedRelayProof, Capabilities, Cidr, DeviceFingerprint, MemberCert,
+        MemberCertFingerprint, PacketTuple, PeerMatchContext, RelayGrantTable, TrustDomainPool,
+        decide, effective_capabilities, effective_capabilities_by_fingerprint, from_cbor,
     },
     tunnel::{
         self, Tunnel, TunnelConnector,
@@ -202,9 +203,12 @@ pub struct PeerManager {
 pub(crate) struct TrustAclPeerIdentity {
     pub(crate) device_fingerprint: DeviceFingerprint,
     pub(crate) member_cert_fingerprint: MemberCertFingerprint,
+    /// Effective (state-resolved) view; refreshed on each network_state apply.
     pub(crate) can_relay_data: bool,
     pub(crate) can_relay_control: bool,
     pub(crate) proxy_cidrs: Vec<Cidr>,
+    /// Immutable cert-body baseline; fallback when network_state has no grant.
+    pub(crate) cert_capabilities: Capabilities,
 }
 
 impl Debug for PeerManager {
@@ -484,27 +488,84 @@ impl PeerManager {
         DeviceFingerprint::new(Sha256::digest(cert.details.device_pk.as_bytes()).into())
     }
 
-    fn proxy_cidrs_from_cert(cert: &MemberCert) -> Vec<Cidr> {
-        cert.details
-            .capabilities
+    fn proxy_cidrs_from_caps(capabilities: &Capabilities) -> Vec<Cidr> {
+        capabilities
             .can_proxy_subnet
             .iter()
             .map(|cidr| Cidr::new(cidr.network(), cidr.prefix()))
             .collect()
     }
 
-    fn remember_trust_acl_identity(&self, peer_id: PeerId, peer_conn: &PeerConn) {
+    /// Resolve effective capabilities for `fingerprint` against the current own
+    /// network_state, falling back to the cert-body `baseline` when no grant or
+    /// no state is available.
+    async fn effective_caps_for(
+        &self,
+        fingerprint: &MemberCertFingerprint,
+        baseline: &Capabilities,
+    ) -> Capabilities {
+        let Some(trust_pool) = &self.trust_pool else {
+            return baseline.clone();
+        };
+        let Some(trust_ctx) = self.global_ctx.get_trust_context().await else {
+            return baseline.clone();
+        };
+        let pool = trust_pool.read().await;
+        match pool.network_state(&trust_ctx.trust_domain_id, &trust_ctx.network_local_id) {
+            Some(state) => effective_capabilities_by_fingerprint(fingerprint, baseline, state),
+            None => baseline.clone(),
+        }
+    }
+
+    async fn remember_trust_acl_identity(&self, peer_id: PeerId, peer_conn: &PeerConn) {
         let Some(cert) = peer_conn.peer_member_cert() else {
             return;
         };
+        let cert_capabilities = cert.details.capabilities.clone();
+        let member_cert_fingerprint = cert.fingerprint();
+        let effective = self
+            .effective_caps_for(&member_cert_fingerprint, &cert_capabilities)
+            .await;
         let identity = TrustAclPeerIdentity {
             device_fingerprint: Self::device_fingerprint_from_member_cert(&cert),
-            member_cert_fingerprint: cert.fingerprint(),
-            can_relay_data: cert.details.capabilities.can_relay_data,
-            can_relay_control: cert.details.capabilities.can_relay_control,
-            proxy_cidrs: Self::proxy_cidrs_from_cert(&cert),
+            member_cert_fingerprint,
+            can_relay_data: effective.can_relay_data,
+            can_relay_control: effective.can_relay_control,
+            proxy_cidrs: Self::proxy_cidrs_from_caps(&effective),
+            cert_capabilities,
         };
         self.peer_trust_acl_identities.insert(peer_id, identity);
+    }
+
+    /// Recompute every remembered peer identity + the local node's cached caps
+    /// from the current network_state. Invoked on the same hook as revocation
+    /// enforcement so post-issue capability edits take effect without a
+    /// re-handshake (identity = cert, authorization = state).
+    pub async fn refresh_effective_trust_capabilities(&self) {
+        let Some(trust_pool) = &self.trust_pool else {
+            return;
+        };
+        let Some(trust_ctx) = self.global_ctx.get_trust_context().await else {
+            return;
+        };
+        let pool = trust_pool.read().await;
+        let Some(state) =
+            pool.network_state(&trust_ctx.trust_domain_id, &trust_ctx.network_local_id)
+        else {
+            return;
+        };
+        for mut entry in self.peer_trust_acl_identities.iter_mut() {
+            let effective = effective_capabilities_by_fingerprint(
+                &entry.member_cert_fingerprint,
+                &entry.cert_capabilities,
+                state,
+            );
+            entry.can_relay_data = effective.can_relay_data;
+            entry.can_relay_control = effective.can_relay_control;
+            entry.proxy_cidrs = Self::proxy_cidrs_from_caps(&effective);
+        }
+        let own_effective = effective_capabilities(&trust_ctx.member_cert, state);
+        self.global_ctx.set_effective_local_caps(&own_effective);
     }
 
     async fn peer_identity_allowed_by_current_trust_state(
@@ -726,19 +787,20 @@ impl PeerManager {
             );
             return false;
         }
-        let local = TrustAclPeerIdentity {
-            device_fingerprint: Self::device_fingerprint_from_member_cert(&trust_ctx.member_cert),
-            member_cert_fingerprint: trust_ctx.member_cert.fingerprint(),
-            can_relay_data: trust_ctx.member_cert.details.capabilities.can_relay_data,
-            can_relay_control: trust_ctx.member_cert.details.capabilities.can_relay_control,
-            proxy_cidrs: Self::proxy_cidrs_from_cert(&trust_ctx.member_cert),
-        };
-
         let pool = trust_pool.read().await;
         let Some(state) =
             pool.network_state(&trust_ctx.trust_domain_id, &trust_ctx.network_local_id)
         else {
             return true;
+        };
+        let local_effective = effective_capabilities(&trust_ctx.member_cert, state);
+        let local = TrustAclPeerIdentity {
+            device_fingerprint: Self::device_fingerprint_from_member_cert(&trust_ctx.member_cert),
+            member_cert_fingerprint: trust_ctx.member_cert.fingerprint(),
+            can_relay_data: local_effective.can_relay_data,
+            can_relay_control: local_effective.can_relay_control,
+            proxy_cidrs: Self::proxy_cidrs_from_caps(&local_effective),
+            cert_capabilities: trust_ctx.member_cert.details.capabilities.clone(),
         };
         // fail-closed：信任网络无可用 ACL 策略（未配置或解码失败）时，成员间数据流量默认拒绝。
         // 管理/控制通道（RPC、ConfigSync、握手）为非 Data 包，已在本函数开头豁免。
@@ -876,7 +938,7 @@ impl PeerManager {
             ));
         }
         let peer_id = peer_conn.get_peer_id();
-        self.remember_trust_acl_identity(peer_id, &peer_conn);
+        self.remember_trust_acl_identity(peer_id, &peer_conn).await;
         self.peers.add_new_peer_conn(peer_conn).await?;
         self.clear_recent_traffic(peer_id);
         Ok(())
@@ -2532,6 +2594,12 @@ mod tests {
             can_relay_data: true,
             can_relay_control: true,
             proxy_cidrs,
+            cert_capabilities: crate::trust::Capabilities {
+                can_relay_data: true,
+                can_relay_control: true,
+                can_proxy_subnet: Vec::new(),
+                can_be_exit_node: false,
+            },
         }
     }
 

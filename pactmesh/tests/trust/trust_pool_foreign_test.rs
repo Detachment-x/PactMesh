@@ -74,6 +74,9 @@ fn sample_network_state(root: &TrustDomainRoot, cert: &MemberCert) -> SignedNetw
             acl: Vec::new(),
             routes: Vec::new(),
             peer_hints: Vec::new(),
+            ip_assignments: Vec::new(),
+            capability_grants: Vec::new(),
+            hostname_bindings: Vec::new(),
         },
     }
     .sign(root)

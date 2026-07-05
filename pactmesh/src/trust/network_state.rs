@@ -9,8 +9,9 @@ use minicbor::{Decoder, Encoder};
 use thiserror::Error;
 
 use super::cbor::{ArmorError, from_cbor, to_canonical_cbor, unwrap_armored, wrap_armored};
+use super::hostname::HostnameLabel;
 use super::identity::{TrustDomainRoot, VerifyKey};
-use super::member_cert::SignatureBytes32;
+use super::member_cert::{Capabilities, SignatureBytes32};
 use super::revocation::{DisabledCert, RevokedCert};
 use super::types::{MemberCertFingerprint, NetworkLocalId, TrustDomainId};
 
@@ -127,6 +128,90 @@ mod ip_assignment_vec_cbor {
     }
 }
 
+/// Root-signed capability grant, keyed by the target member-cert fingerprint.
+///
+/// Carries the **full** effective capability set (overwrite, not delta). Applied
+/// at runtime in preference to `MemberCert.capabilities` so editing a device's
+/// capabilities never reissues its cert (identity = cert, authorization = state).
+#[derive(minicbor::Encode, minicbor::Decode, Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityGrant {
+    #[n(0)]
+    pub cert_fingerprint: MemberCertFingerprint,
+    #[n(1)]
+    pub capabilities: Capabilities,
+    #[n(2)]
+    pub granted_at: u64,
+}
+
+mod capability_grant_vec_cbor {
+    use super::*;
+
+    pub fn encode<Ctx, W: minicbor::encode::Write>(
+        value: &[CapabilityGrant],
+        encoder: &mut Encoder<W>,
+        ctx: &mut Ctx,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        minicbor::Encode::encode(value, encoder, ctx)
+    }
+
+    pub fn decode<'b, Ctx>(
+        decoder: &mut Decoder<'b>,
+        ctx: &mut Ctx,
+    ) -> Result<Vec<CapabilityGrant>, minicbor::decode::Error> {
+        minicbor::Decode::decode(decoder, ctx)
+    }
+
+    pub fn nil() -> Option<Vec<CapabilityGrant>> {
+        Some(Vec::new())
+    }
+
+    pub fn is_nil(value: &[CapabilityGrant]) -> bool {
+        value.is_empty()
+    }
+}
+
+/// Root-signed hostname binding, keyed by the target member-cert fingerprint.
+///
+/// `hostname == None` explicitly clears the hostname; the **absence** of a
+/// binding falls back to `MemberCert.hostname`. Applied at runtime in preference
+/// to the cert so editing a hostname never reissues the cert.
+#[derive(minicbor::Encode, minicbor::Decode, Debug, Clone, PartialEq, Eq)]
+pub struct HostnameBinding {
+    #[n(0)]
+    pub cert_fingerprint: MemberCertFingerprint,
+    #[n(1)]
+    pub hostname: Option<HostnameLabel>,
+    #[n(2)]
+    pub bound_at: u64,
+}
+
+mod hostname_binding_vec_cbor {
+    use super::*;
+
+    pub fn encode<Ctx, W: minicbor::encode::Write>(
+        value: &[HostnameBinding],
+        encoder: &mut Encoder<W>,
+        ctx: &mut Ctx,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        minicbor::Encode::encode(value, encoder, ctx)
+    }
+
+    pub fn decode<'b, Ctx>(
+        decoder: &mut Decoder<'b>,
+        ctx: &mut Ctx,
+    ) -> Result<Vec<HostnameBinding>, minicbor::decode::Error> {
+        minicbor::Decode::decode(decoder, ctx)
+    }
+
+    pub fn nil() -> Option<Vec<HostnameBinding>> {
+        Some(Vec::new())
+    }
+
+    pub fn is_nil(value: &[HostnameBinding]) -> bool {
+        value.is_empty()
+    }
+}
+
 /// Opaque ACL bytes (filled by T-035 / T-036).
 pub type AclPlaceholder = Vec<u8>;
 
@@ -154,6 +239,16 @@ pub struct NetworkStatePayload {
     #[n(6)]
     #[cbor(with = "ip_assignment_vec_cbor", has_nil)]
     pub ip_assignments: Vec<IpAssignment>,
+    /// Root-signed capability overrides (keyed by cert fingerprint). Applied in
+    /// preference to `MemberCert.capabilities`; empty → cert body is authoritative.
+    #[n(7)]
+    #[cbor(with = "capability_grant_vec_cbor", has_nil)]
+    pub capability_grants: Vec<CapabilityGrant>,
+    /// Root-signed hostname overrides (keyed by cert fingerprint). Applied in
+    /// preference to `MemberCert.hostname`; empty → cert body is authoritative.
+    #[n(8)]
+    #[cbor(with = "hostname_binding_vec_cbor", has_nil)]
+    pub hostname_bindings: Vec<HostnameBinding>,
 }
 
 /// Header + payload before signing.

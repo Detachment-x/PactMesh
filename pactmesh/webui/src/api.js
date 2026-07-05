@@ -73,7 +73,7 @@ export const api = {
 
   // 已挂载实例（空载 daemon → {inst_ids:[]} 200；daemon 不可达 → 502）
   instances: () => getJson('/api/instances'),
-  // 一站式建网+运行时加网：建域(可选)→建网→自举→封存口令→对运行中空载 daemon 挂实例，不重启
+  // 一站式建网+运行时加网：建根网络(新域时建域→建网)→自举→封存口令→对运行中空载 daemon 挂实例，不重启
   networkRun: (body) => postJson('/api/network/run', body),
   // 复用并上线：把盘上已有但未挂载的网络重新挂到运行中空载 daemon（跳过建网/自举）
   networkMount: (td, nid) => postJson('/api/network/mount', { trust_domain_id: td, network_local_id: nid }),

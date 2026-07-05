@@ -195,23 +195,13 @@ body {
   padding: 6px;
   z-index: 40;
 }
-.net-group + .net-group { margin-top: 4px; border-top: 1px solid var(--border); padding-top: 4px; }
-.net-group-title {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 11px; font-weight: 600; color: var(--muted);
-  padding: 6px 8px 3px;
-}
-.tag-root {
-  font-size: 10px; font-weight: 600; color: var(--primary-strong);
-  background: var(--primary-soft); border-radius: 4px; padding: 1px 5px;
-}
 .net-item {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center; gap: 6px;
   padding: 7px 8px; border-radius: var(--radius-sm); cursor: pointer;
 }
 .net-item:hover { background: var(--card); }
 .net-item.active { background: var(--primary-soft); }
-.net-item code { font-family: var(--mono); font-size: 12px; }
+.net-item code { font-family: var(--mono); font-size: 12px; margin-right: auto; }
 .net-item .check { color: var(--primary-strong); }
 
 /* ---------- 会话锁 pill ---------- */
@@ -669,3 +659,39 @@ body {
 
 /* 网络页：本机通告网段添加 */
 .route-add { margin-top: 10px; }
+
+/* ---------- 服务健康状态条（概览顶部） ---------- */
+.health-bar {
+  display: flex; flex-wrap: wrap; gap: 8px 22px;
+  padding: 10px 14px; margin-bottom: 16px;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.health-item { display: flex; align-items: center; gap: 7px; font-size: 13px; }
+.health-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.health-dot.ok { background: var(--ok); }
+.health-dot.err { background: var(--err); }
+.health-dot.muted { background: var(--muted); opacity: .5; }
+.health-label { color: var(--muted); }
+.health-val { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* onboarding 高级选项折叠 */
+.onb-adv-toggle {
+  align-self: flex-start; background: none; border: none; cursor: pointer;
+  color: var(--muted); font-size: 12px; padding: 4px 0; margin: 2px 0 6px;
+}
+.onb-adv-toggle:hover { color: var(--text); }
+
+/* 提示小字（邀请说明 / 能力实时生效） */
+.invite-note, .cap-hint { font-size: 12px; margin-top: 10px; }
+
+/* ---------- 顶栏常驻服务状态（所有界面可见，含 onboarding） ---------- */
+.svc-status {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px;
+  white-space: nowrap;
+}
+.svc-status.ok { color: var(--ok); background: rgba(31, 157, 87, .1); }
+.svc-status.down { color: var(--err); background: rgba(214, 69, 69, .1); }
+.svc-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.svc-status.down .svc-dot { animation: svc-pulse 1.6s ease-in-out infinite; }
+@keyframes svc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }

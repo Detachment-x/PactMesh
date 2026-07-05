@@ -466,7 +466,6 @@ function DeviceDrawer({ device, rt, zone, canEdit, onClose, onChanged }) {
   const [relayControl, setRelayControl] = useState(!!caps.relay_control)
   const [cidrs, setCidrs] = useState(caps.proxy_subnets || [])
   const [newCidr, setNewCidr] = useState('')
-  const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
 
   const addCidr = () => {
@@ -486,12 +485,11 @@ function DeviceDrawer({ device, rt, zone, canEdit, onClose, onChanged }) {
       if (cidrs.length === 0) body.clear_proxy_subnet = true
       else body.proxy_subnet = cidrs
     }
-    body.note = note || undefined
     setBusy(true)
     try {
       await api.capability(fp, body)
-      toast.ok('能力已更新')
-      await onChanged?.() // reissue 换 fingerprint：刷新后 device prop 指向新证书
+      toast.ok('能力已更新，实时生效')
+      await onChanged?.() // 能力写入签名网络状态，证书指纹不变、设备不掉线；刷新以取最新 effective 视图
     } catch (e) {
       toast.err(e.message)
     } finally {
@@ -550,10 +548,7 @@ function DeviceDrawer({ device, rt, zone, canEdit, onClose, onChanged }) {
                 <button class="btn btn-sm" onClick={addCidr}>添加</button>
               </div>
             </div>
-            <div class="form-row">
-              <label class="field-label">操作备注<small>（可选，记入证书审计）</small></label>
-              <input class="field" value={note} placeholder="变更原因…" onInput={(e) => setNote(e.currentTarget.value)} />
-            </div>
+            <p class="muted cap-hint">保存后立即生效：设备无需重新入网，也不会掉线。</p>
             <button class="btn btn-primary btn-sm" disabled={busy} onClick={saveCaps}>
               {busy ? '保存中…' : '保存能力'}
             </button>

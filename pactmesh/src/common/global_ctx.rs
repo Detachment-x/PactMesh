@@ -695,18 +695,24 @@ impl GlobalCtx {
         &self,
         ctx: Arc<crate::common::trust_context::TrustDomainContext>,
     ) {
-        let allow: Vec<String> = ctx
-            .member_cert
-            .details
-            .capabilities
+        // Seed from the cert body (fallback). Any network_state capability grant
+        // is folded in later via `set_effective_local_caps` on each state apply.
+        self.set_effective_local_caps(&ctx.member_cert.details.capabilities);
+        *self.trust_context.write().await = Some(ctx);
+    }
+
+    /// Store the local node's effective proxy-subnet / exit-node capability
+    /// snapshots. Called with the cert body at trust-context setup and with the
+    /// state-resolved capabilities on each `network_state` apply.
+    pub fn set_effective_local_caps(&self, capabilities: &crate::trust::Capabilities) {
+        let allow: Vec<String> = capabilities
             .can_proxy_subnet
             .iter()
             .map(|net| net.to_string())
             .collect();
         self.cached_cert_proxy_allow.store(Some(Arc::new(allow)));
         self.cached_cert_exit_node
-            .store(Some(ctx.member_cert.details.capabilities.can_be_exit_node));
-        *self.trust_context.write().await = Some(ctx);
+            .store(Some(capabilities.can_be_exit_node));
     }
 
     /// 本地 member cert 授权的 proxy CIDR 快照（字符串）；`None` 表示无信任上下文。
@@ -876,6 +882,8 @@ pub mod tests {
                     routes: Vec::new(),
                     peer_hints: Vec::new(),
                     ip_assignments: Vec::new(),
+                    capability_grants: Vec::new(),
+                    hostname_bindings: Vec::new(),
                 },
             }
             .sign(root)

@@ -2,15 +2,16 @@ import { useCallback, useState } from 'preact/hooks'
 import { api } from '../api.js'
 import { usePoll } from '../hooks.js'
 import { useApp } from '../store.jsx'
-import { EmptyState, Dot, CopyId, Toggle, InlineEdit, Modal, useToast } from '../ui.jsx'
+import { EmptyState, Dot, Toggle, InlineEdit, Modal, useToast } from '../ui.jsx'
 import { dnsZone } from '../format.js'
 import { DeviceRoster } from './devices.jsx'
+import { InviteModal } from '../invite.jsx'
 
 // 单一网络中心页（ztncui / ZeroTier Central 风）：网络信息 + IP 池设置 + 设备名册（治理表）
 // + 托管路由 + DNS（只读）+ 访问控制入口。轮询在此统一持有，向内嵌的设备名册下传（去重）。
 // 成员（isRoot=false）降级只读并显示「离开网络」。
 export function Network({ onNavigate }) {
-  const { network, requireUnlock, refreshInstances } = useApp()
+  const { network, requireUnlock, refreshInstances, refreshDomains, selectNetwork } = useApp()
   const toast = useToast()
   const isRoot = !!network?.isRoot
   const td = network?.td
@@ -32,6 +33,8 @@ export function Network({ onNavigate }) {
 
   const [leaving, setLeaving] = useState(false)
   const [newRoute, setNewRoute] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [inviting, setInviting] = useState(false)
 
   if (!network) {
     return <EmptyState icon="◍" title="尚未选择网络" hint="在顶栏选择一个网络后查看其设置与设备。" />
@@ -110,11 +113,9 @@ export function Network({ onNavigate }) {
     <>
       {/* 网络信息 */}
       <div class="card">
-        <div class="card-title">网络信息{!isRoot && <span class="badge-role role-cred-soft">成员视图</span>}</div>
+        <div class="card-title">网络信息<span class={'badge-role ' + (isRoot ? 'role-root' : 'role-cred-soft')}>{isRoot ? '管理员' : '成员视图'}</span></div>
         <dl class="kv">
-          <dt>网络名</dt><dd>{network.label}</dd>
-          <dt>网络 ID</dt><dd class="mono">{nid}</dd>
-          <dt>信任域</dt><dd><CopyId value={td} chars={12} /></dd>
+          <dt>网络</dt><dd class="mono">{nid}</dd>
           <dt>设备数</dt><dd>{members.loading ? '·' : list.length}</dd>
           <dt>在线节点</dt><dd>{runtimeDown ? '—' : onlineHosts.size}</dd>
         </dl>
@@ -212,7 +213,20 @@ export function Network({ onNavigate }) {
         )}
       </div>
 
-      {/* 访问控制入口（仅主控） */}
+      {/* 网络管理入口（仅管理员）：邀请设备 + 同组新建平级网络 */}
+      {isRoot && (
+        <div class="card">
+          <div class="card-title">网络管理</div>
+          <p class="muted">邀请设备加入本网络，或在你管理的这组网络下再建一个平级网络。</p>
+          <div class="quick-actions">
+            <button class="btn btn-primary" onClick={() => setInviting(true)}>＋ 邀请设备加入</button>
+            <button class="btn" onClick={() => setCreating(true)}>新建网络</button>
+          </div>
+          <p class="muted invite-note">邀请链接：持链接者可发起加入申请，经你在「待批」审批后方可入网。</p>
+        </div>
+      )}
+
+      {/* 访问控制入口（仅管理员） */}
       {isRoot && (
         <div class="card">
           <div class="card-title">访问控制</div>
@@ -259,6 +273,80 @@ export function Network({ onNavigate }) {
           <p class="modal-note">本机将停止连接并移除该网络配置。此操作只影响本机，不影响网络中的其他设备。</p>
         </Modal>
       )}
+
+      {inviting && <InviteModal onClose={() => setInviting(false)} />}
+      {creating && (
+        <NewNetworkModal
+          td={td}
+          onClose={() => setCreating(false)}
+          onCreated={(t, n) => {
+            setCreating(false)
+            refreshDomains()
+            refreshInstances()
+            selectNetwork(t, n)
+          }}
+        />
+      )}
     </>
+  )
+}
+
+// 同组新建平级网络（复用当前根网络的管理域，管理员权限）。后端需管理口令解锁根签名。
+function NewNetworkModal({ td, onClose, onCreated }) {
+  const toast = useToast()
+  const [nid, setNid] = useState('')
+  const [action, setAction] = useState('accept')
+  const [pass, setPass] = useState('')
+  const [busy, setBusy] = useState(false)
+  const valid = nid.trim().length > 0 && pass.length >= 8
+
+  const run = async () => {
+    if (!valid || busy) return
+    setBusy(true)
+    try {
+      const r = await api.networkRun({
+        trust_domain_id: td,
+        network_local_id: nid.trim(),
+        default_action: action,
+        root_passphrase: pass,
+      })
+      toast.ok('网络已创建并上线')
+      onCreated(r.trust_domain_id, r.network_local_id)
+    } catch (e) {
+      toast.err(/already exists/i.test(e.message) ? '同名网络已存在于本机。' : '创建网络失败：' + e.message)
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      title="新建网络"
+      onClose={onClose}
+      footer={
+        <>
+          <button class="btn" onClick={onClose}>取消</button>
+          <button class="btn btn-primary" disabled={!valid || busy} onClick={run}>
+            {busy ? '创建中…' : '创建并上线'}
+          </button>
+        </>
+      }
+    >
+      <p class="modal-note">在你管理的这组网络下再建一个平级网络。你仍是它的管理员，复用同一管理私钥。</p>
+      <label class="form-row">
+        <span class="field-label">网络名称<small>本机内唯一</small></span>
+        <input class="field mono" value={nid} placeholder="team-net" onInput={(e) => setNid(e.currentTarget.value)} />
+      </label>
+      <label class="form-row">
+        <span class="field-label">默认策略<small>未命中规则时</small></span>
+        <select class="field field-sm" value={action} onChange={(e) => setAction(e.currentTarget.value)}>
+          <option value="accept">放行</option>
+          <option value="drop">丢弃</option>
+        </select>
+      </label>
+      <label class="form-row">
+        <span class="field-label">管理口令<small>解锁本组网络的签名</small></span>
+        <input class="field" type="password" autocomplete="off" value={pass} placeholder="管理口令" onInput={(e) => setPass(e.currentTarget.value)} />
+      </label>
+    </Modal>
   )
 }

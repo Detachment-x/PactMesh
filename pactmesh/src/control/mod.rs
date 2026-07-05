@@ -134,6 +134,9 @@ pub struct DomainInfo {
     /// 是否持有 `sk_root.age`（能本地签名 = 能治理）。
     pub is_root_holder: bool,
     pub networks: Vec<String>,
+    /// 主网络（域的承载网络）的 network_local_id；域概念对用户隐藏，前端以此网络代表该域。
+    /// `None` = 未标记（多网络域待管理员选定；单网络域由 `list_domains` 惰性回退）。
+    pub base_network: Option<String>,
 }
 
 /// 枚举磁盘上的信任域及各自的网络（仅读公开元数据，不解锁任何密钥）。
@@ -153,13 +156,13 @@ pub fn list_domains() -> Result<Vec<DomainInfo>> {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let meta = std::fs::read_to_string(path.join("meta.toml")).unwrap_or_default();
-        let label = meta
-            .lines()
-            .find_map(|line| {
+        let meta_value = |key: &str| {
+            meta.lines().find_map(|line| {
                 let (k, v) = line.split_once('=')?;
-                (k.trim() == "label").then(|| v.trim().trim_matches('"').to_owned())
+                (k.trim() == key).then(|| v.trim().trim_matches('"').to_owned())
             })
-            .unwrap_or_default();
+        };
+        let label = meta_value("label").unwrap_or_default();
         let mut networks = Vec::new();
         if let Ok(net_entries) = std::fs::read_dir(path.join("networks")) {
             for net in net_entries.filter_map(std::result::Result::ok) {
@@ -169,11 +172,16 @@ pub fn list_domains() -> Result<Vec<DomainInfo>> {
             }
         }
         networks.sort();
+        // base_network：meta 显式标记优先；缺失且恰有单网络时惰性回退（该网络即主网络）。
+        let base_network = meta_value("base_network")
+            .filter(|nid| !nid.is_empty())
+            .or_else(|| (networks.len() == 1).then(|| networks[0].clone()));
         out.push(DomainInfo {
             trust_domain_id,
             label,
             is_root_holder: path.join("sk_root.age").is_file(),
             networks,
+            base_network,
         });
     }
     out.sort_by(|a, b| a.trust_domain_id.cmp(&b.trust_domain_id));
@@ -336,7 +344,10 @@ pub fn live_hostname_entries(
         .filter(|entry| member_status(&entry.fingerprint, state) != "revoked")
         .filter_map(|entry| {
             let cert = certs.get(&entry.fingerprint)?;
-            Some((entry.fingerprint, cert.details.hostname.clone()))
+            Some((
+                entry.fingerprint,
+                crate::trust::effective_hostname(cert, state),
+            ))
         })
         .collect()
 }
@@ -445,6 +456,37 @@ pub fn create_domain(label: &str, passphrase: &str) -> Result<CreateDomainResult
     })
 }
 
+/// 标记域的主网络（承载网络）到 `meta.toml` 的 `base_network`。存在则原地替换，否则追加。
+/// 供一步建网（`api_network_run`）与单网络域惰性回写复用。
+pub fn set_domain_base_network(trust_domain_id: &str, network_local_id: &str) -> Result<()> {
+    let meta_path = pnw_trust_domains_dir()?
+        .join(trust_domain_id)
+        .join("meta.toml");
+    let existing = std::fs::read_to_string(&meta_path).unwrap_or_default();
+    let mut lines: Vec<String> = Vec::new();
+    let mut replaced = false;
+    for line in existing.lines() {
+        let is_base = line
+            .split_once('=')
+            .map(|(k, _)| k.trim() == "base_network")
+            .unwrap_or(false);
+        if is_base {
+            lines.push(format!("base_network = {network_local_id:?}"));
+            replaced = true;
+        } else {
+            lines.push(line.to_owned());
+        }
+    }
+    if !replaced {
+        lines.push(format!("base_network = {network_local_id:?}"));
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    std::fs::write(&meta_path, out)
+        .with_context(|| format!("failed to write {}", meta_path.display()))?;
+    Ok(())
+}
+
 #[derive(serde::Serialize)]
 pub struct CreateNetworkResult {
     pub trust_domain_id: String,
@@ -495,6 +537,8 @@ pub fn create_network(
             routes: Vec::new(),
             peer_hints: Vec::new(),
             ip_assignments: Vec::new(),
+            capability_grants: Vec::new(),
+            hostname_bindings: Vec::new(),
         },
     }
     .sign(&root);

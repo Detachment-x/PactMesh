@@ -749,7 +749,10 @@ async fn bind_stun_udp(
         return Ok(UdpSocket::bind(format!("0.0.0.0:{}", port)).await?);
     }
     Ok(bind::<UdpSocket>()
-        .addr(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)))
+        .addr(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::UNSPECIFIED,
+            port,
+        )))
         .dev(bind_dev.clone())
         .maybe_net_ns(net_ns.clone())
         .call()?)

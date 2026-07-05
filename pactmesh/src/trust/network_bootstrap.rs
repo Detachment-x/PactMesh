@@ -356,7 +356,8 @@ mod tests {
     #[test]
     fn legacy_url_still_parses() {
         let b = sample(vec![]);
-        let mut url = Url::parse(&format!("{BOOTSTRAP_URL_SCHEME}://{BOOTSTRAP_URL_HOST}")).unwrap();
+        let mut url =
+            Url::parse(&format!("{BOOTSTRAP_URL_SCHEME}://{BOOTSTRAP_URL_HOST}")).unwrap();
         url.query_pairs_mut()
             .append_pair("td", &URL_SAFE_NO_PAD.encode(b.trust_domain_id.0))
             .append_pair("pk", &URL_SAFE_NO_PAD.encode(b.pk_root.as_bytes()))

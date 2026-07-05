@@ -5,7 +5,7 @@ import { useToast } from './ui.jsx'
 
 // 「未加网」空状态（Flow A）：空载常驻 daemon 起着但零实例挂载时接管内容区。
 // 先分叉角色（F-1）：新建网络（成为主控）或经邀请加入既有网络（成为成员设备）。
-//  - 建网 → 一次性 POST /api/network/run（建域?→建网→自举→封存口令→RunNetworkInstance，不重启）。
+//  - 建网 → 一次性 POST /api/network/run（建根网络：建域→建网→自举→封存口令→RunNetworkInstance，不重启）。
 //  - 加入 → 预览邀请确认（F-2）→ POST /api/network/join 起后台 accept-invite（非阻塞）→
 //    等待主控批准（F-3，轮询 join-status，批准后服务端自动挂载）。
 // 有进行中的加入时（含 Console 重开，F-4）直接接管为等待界面。
@@ -29,7 +29,7 @@ export function Onboarding() {
       <div class="onb-hero">
         <div class="onb-mark" />
         <h1>欢迎使用 PactMesh</h1>
-        <p class="onb-lead">服务已在后台常驻，但还没有运行中的网络。你可以新建一个网络成为主控，或用邀请链接加入既有网络。</p>
+        <p class="onb-lead">服务已在后台常驻，但还没有运行中的网络。你可以新建一个根网络成为管理员，或用邀请链接加入既有网络。</p>
       </div>
 
       {role === null && <ReuseBanner />}
@@ -46,13 +46,13 @@ function RolePicker({ onPick }) {
     <div class="onb-roles">
       <button type="button" class="card onb-role" onClick={() => onPick('create')}>
         <div class="onb-role-icon">＋</div>
-        <div class="onb-role-title">新建网络</div>
-        <p class="muted">成为网络主控，持有 root 私钥，审批成员、下发策略。适合第一次搭建自己的网络。</p>
+        <div class="onb-role-title">新建根网络</div>
+        <p class="muted">成为网络管理员，持有管理私钥，审批成员、下发策略。适合第一次搭建自己的根网络。</p>
       </button>
       <button type="button" class="card onb-role" onClick={() => onPick('join')}>
         <div class="onb-role-icon">↳</div>
         <div class="onb-role-title">加入既有网络</div>
-        <p class="muted">用别人给你的邀请链接，作为成员设备加入。提交后等待主控批准，批准后自动上线。</p>
+        <p class="muted">用别人给你的邀请链接，作为成员设备加入。提交后等待管理员批准，批准后自动上线。</p>
       </button>
     </div>
   )
@@ -104,163 +104,98 @@ function ReuseBanner() {
   )
 }
 
-// ---------- 建网（成为主控），沿用原一站式 /api/network/run ----------
+// ---------- 建网（成为管理员），一站式 /api/network/run：建根网络（建域→建网→自举→上线） ----------
 function CreateFlow({ onBack }) {
   const toast = useToast()
   const { domains, refreshDomains, refreshInstances, selectNetwork, daemonReachable } = useApp()
-  const rootDomains = useMemo(() => domains.filter((d) => d.is_root_holder), [domains])
   const hasDiskNetwork = useMemo(() => domains.some((d) => d.networks.length), [domains])
 
-  const [step, setStep] = useState(1)
-  const [useExisting, setUseExisting] = useState(rootDomains.length > 0)
-  const [existingTd, setExistingTd] = useState(rootDomains[0]?.trust_domain_id || '')
-  const [label, setLabel] = useState('')
+  const [name, setName] = useState('')
   const [pass, setPass] = useState('')
-  const [nid, setNid] = useState('')
   const [action, setAction] = useState('accept')
   const [noTun, setNoTun] = useState(false)
+  const [adv, setAdv] = useState(false)
   const [busy, setBusy] = useState(false)
 
-  const step1Valid = useExisting ? !!existingTd && pass.length >= 8 : label.trim() && pass.length >= 8
-  const step2Valid = nid.trim().length > 0
+  const valid = name.trim().length > 0 && pass.length >= 8
 
   const finish = async () => {
+    if (!valid || busy) return
     setBusy(true)
     try {
       const r = await api.networkRun({
-        trust_domain_id: useExisting ? existingTd : undefined,
-        domain_label: useExisting ? undefined : label.trim(),
-        network_local_id: nid.trim(),
+        network_local_id: name.trim(),
         default_action: action,
         root_passphrase: pass,
         no_tun: noTun,
       })
-      toast.ok('网络已上线')
+      toast.ok('根网络已创建并上线')
       refreshDomains()
       refreshInstances()
       selectNetwork(r.trust_domain_id, r.network_local_id)
     } catch (e) {
       const msg = /already exists/i.test(e.message)
-        ? '该网络已存在于本机。请返回首页用「复用并上线」直接挂载；如需重建，先卸载并勾选彻底删除。'
-        : '建网/加网失败：' + e.message
+        ? '同名网络已存在于本机。请返回用「复用并上线」直接挂载；如需重建，先退出并彻底删除。'
+        : '创建根网络失败：' + e.message
       toast.err(msg)
       setBusy(false)
     }
   }
 
   return (
-    <>
+    <div class="card onb-card">
       {!daemonReachable && (
-        <div class="warnbar">后台 daemon 暂不可达——新建网络需要它在运行。请确认服务已启动后再试。</div>
+        <div class="warnbar">后台服务暂不可达——新建根网络需要它在运行。请确认服务已启动后再试。</div>
       )}
       {daemonReachable && hasDiskNetwork && (
-        <div class="onb-note muted">本机已有信任域/网络。若只是想让既有网络重新上线，请返回并用「复用并上线」，无需在此重建。</div>
+        <div class="onb-note muted">本机已有网络。若只是想让它重新上线，请返回并用「复用并上线」，无需在此重建。</div>
       )}
 
-      <ol class="onb-steps" aria-label="引导步骤">
-        <li class={'onb-step' + (step === 1 ? ' active' : step > 1 ? ' done' : '')}>
-          <span class="onb-num">1</span>信任域
-        </li>
-        <li class={'onb-step' + (step === 2 ? ' active' : '')}>
-          <span class="onb-num">2</span>网络
-        </li>
-      </ol>
+      <div class="onb-card-title">新建根网络</div>
+      <p class="muted">给根网络起个名字并设置管理口令。你将成为它的管理员，持有管理私钥、审批成员、下发策略。口令仅驻留内存、即用即清，绝不落盘。</p>
 
-      <div class="card onb-card">
-        {step === 1 ? (
-          <>
-            <div class="onb-card-title">选择或新建信任域</div>
-            <p class="muted">信任域持有该网络的 root 私钥，你将成为它的主控。口令仅驻留内存、即用即清，绝不落盘。</p>
+      <label class="form-row">
+        <span class="field-label">网络名称<small>设备加入的对象，本机内唯一</small></span>
+        <input class="field mono" value={name} placeholder="home-net" onInput={(e) => setName(e.currentTarget.value)} />
+      </label>
+      <label class="form-row">
+        <span class="field-label">管理口令<small>至少 8 位</small></span>
+        <input
+          class="field"
+          type="password"
+          autocomplete="new-password"
+          value={pass}
+          placeholder="设置管理口令"
+          onInput={(e) => setPass(e.currentTarget.value)}
+        />
+      </label>
 
-            {rootDomains.length > 0 && (
-              <div class="onb-choice" role="radiogroup" aria-label="信任域来源">
-                <button
-                  type="button"
-                  class={'onb-opt' + (useExisting ? ' sel' : '')}
-                  role="radio"
-                  aria-checked={useExisting}
-                  onClick={() => setUseExisting(true)}
-                >
-                  使用现有信任域
-                </button>
-                <button
-                  type="button"
-                  class={'onb-opt' + (!useExisting ? ' sel' : '')}
-                  role="radio"
-                  aria-checked={!useExisting}
-                  onClick={() => setUseExisting(false)}
-                >
-                  新建信任域
-                </button>
-              </div>
-            )}
+      <button type="button" class="onb-adv-toggle" onClick={() => setAdv((v) => !v)}>
+        {adv ? '▾ 高级选项' : '▸ 高级选项'}
+      </button>
+      {adv && (
+        <>
+          <label class="form-row">
+            <span class="field-label">默认策略<small>未命中规则时</small></span>
+            <select class="field field-sm" value={action} onChange={(e) => setAction(e.currentTarget.value)}>
+              <option value="accept">放行</option>
+              <option value="drop">丢弃</option>
+            </select>
+          </label>
+          <label class="check-row">
+            <input type="checkbox" checked={noTun} onInput={(e) => setNoTun(e.currentTarget.checked)} />
+            <span>不创建虚拟网卡（无 TUN）<small class="muted">用于无 cap_net_admin 的测试/纯中继场景。</small></span>
+          </label>
+        </>
+      )}
 
-            {useExisting ? (
-              <label class="form-row">
-                <span class="field-label">信任域</span>
-                <select class="field" value={existingTd} onChange={(e) => setExistingTd(e.currentTarget.value)}>
-                  {rootDomains.map((d) => (
-                    <option key={d.trust_domain_id} value={d.trust_domain_id}>
-                      {d.label || d.trust_domain_id.slice(0, 12)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : (
-              <label class="form-row">
-                <span class="field-label">域名称<small>便于识别</small></span>
-                <input class="field" value={label} placeholder="home" onInput={(e) => setLabel(e.currentTarget.value)} />
-              </label>
-            )}
-
-            <label class="form-row">
-              <span class="field-label">管理口令<small>至少 8 位</small></span>
-              <input
-                class="field"
-                type="password"
-                autocomplete="new-password"
-                value={pass}
-                placeholder={useExisting ? '该域的 root 口令' : '为新域设置 root 口令'}
-                onInput={(e) => setPass(e.currentTarget.value)}
-              />
-            </label>
-
-            <div class="onb-actions">
-              <button class="btn" onClick={onBack}>返回</button>
-              <button class="btn btn-primary" disabled={!step1Valid} onClick={() => setStep(2)}>下一步</button>
-            </div>
-          </>
-        ) : (
-          <>
-            <div class="onb-card-title">创建并上线网络</div>
-            <p class="muted">网络是设备加入的对象。给它一个 ID 和默认放行策略，网络创建后会立即挂到后台 daemon 上运行。</p>
-
-            <label class="form-row">
-              <span class="field-label">网络 ID<small>本域内唯一</small></span>
-              <input class="field mono" value={nid} placeholder="home-net" onInput={(e) => setNid(e.currentTarget.value)} />
-            </label>
-            <label class="form-row">
-              <span class="field-label">默认策略<small>未命中规则时</small></span>
-              <select class="field field-sm" value={action} onChange={(e) => setAction(e.currentTarget.value)}>
-                <option value="accept">放行</option>
-                <option value="drop">丢弃</option>
-              </select>
-            </label>
-            <label class="check-row">
-              <input type="checkbox" checked={noTun} onInput={(e) => setNoTun(e.currentTarget.checked)} />
-              <span>不创建虚拟网卡（无 TUN）<small class="muted">用于无 cap_net_admin 的测试/纯中继场景。</small></span>
-            </label>
-
-            <div class="onb-actions">
-              <button class="btn" disabled={busy} onClick={() => setStep(1)}>上一步</button>
-              <button class="btn btn-primary" disabled={busy || !step2Valid || !daemonReachable} onClick={finish}>
-                {busy ? '创建并上线中…' : '创建并上线'}
-              </button>
-            </div>
-          </>
-        )}
+      <div class="onb-actions">
+        <button class="btn" disabled={busy} onClick={onBack}>返回</button>
+        <button class="btn btn-primary" disabled={busy || !valid || !daemonReachable} onClick={finish}>
+          {busy ? '创建并上线中…' : '创建并上线'}
+        </button>
       </div>
-    </>
+    </div>
   )
 }
 
@@ -294,7 +229,7 @@ function JoinFlow({ onBack, onSubmitted }) {
         invite_url: url.trim(),
         no_tun: noTun,
       })
-      toast.ok('已提交加入申请，等待主控批准')
+      toast.ok('已提交加入申请，等待管理员批准')
       onSubmitted()
     } catch (e) {
       toast.err('提交加入失败：' + e.message)
@@ -305,7 +240,7 @@ function JoinFlow({ onBack, onSubmitted }) {
   return (
     <div class="card onb-card">
       <div class="onb-card-title">加入既有网络</div>
-      <p class="muted">粘贴主控给你的邀请链接。核对信任域与网络无误后提交申请。</p>
+      <p class="muted">粘贴管理员给你的邀请链接。核对网络信息无误后提交申请。</p>
 
       <label class="form-row">
         <span class="field-label">邀请链接<small>privatenetwork://join?…</small></span>
@@ -328,7 +263,6 @@ function JoinFlow({ onBack, onSubmitted }) {
       ) : (
         <>
           <div class="onb-note">
-            <div class="kv"><span>信任域</span><b>{preview.domain_label || preview.trust_domain_id.slice(0, 12)}</b></div>
             <div class="kv"><span>网络</span><b>{preview.network_name || preview.network_local_id}</b></div>
             <div class="kv"><span>网络 ID</span><code>{preview.network_local_id}</code></div>
             <div class="kv"><span>落脚点</span><b>{preview.seed_count} 个</b></div>
@@ -353,7 +287,6 @@ function JoinFlow({ onBack, onSubmitted }) {
 
 // ---------- F-3 等待主控批准 ----------
 function JoinWaiting({ join, onRetry }) {
-  const label = join.domain_label || (join.trust_domain_id || '').slice(0, 12)
   const netName = join.network_name || join.network_local_id
   const failed = join.status === 'error' || join.status === 'timeout'
 
@@ -361,9 +294,9 @@ function JoinWaiting({ join, onRetry }) {
     <div class="onb">
       <div class="onb-hero">
         <div class="onb-mark" />
-        <h1>{failed ? '加入未完成' : '等待主控批准'}</h1>
+        <h1>{failed ? '加入未完成' : '等待管理员批准'}</h1>
         <p class="onb-lead">
-          加入网络 <b>{netName}</b>（信任域 {label}）
+          加入网络 <b>{netName}</b>
         </p>
       </div>
 
@@ -372,12 +305,12 @@ function JoinWaiting({ join, onRetry }) {
           <>
             <div class="onb-spinner" aria-hidden="true" />
             <div class="onb-card-title">申请已提交，等待批准…</div>
-            <p class="muted">主控批准后本机会自动上线，无需再操作。可以关闭此页面——稍后重新打开会自动恢复等待。</p>
+            <p class="muted">管理员批准后本机会自动上线，无需再操作。可以关闭此页面——稍后重新打开会自动恢复等待。</p>
           </>
         ) : join.status === 'timeout' ? (
           <>
             <div class="onb-card-title">加入超时</div>
-            <p class="muted">主控未在时限内批准这次申请。你可以重新发起加入。</p>
+            <p class="muted">管理员未在时限内批准这次申请。你可以重新发起加入。</p>
             {onRetry && <div class="onb-actions"><button class="btn btn-primary" onClick={onRetry}>重新加入</button></div>}
           </>
         ) : (

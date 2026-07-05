@@ -3,9 +3,8 @@ use std::{net::IpAddr, path::Path, process::Command, str::FromStr};
 use ed25519_dalek::SigningKey;
 use pactmesh::trust::{
     ACL_SCHEMA_VERSION, AclPolicy, Action, Capabilities, HostnameLabel, MemberCert,
-    MemberCertIndexEntry, NetworkLocalId, NetworkStatePayload, RevocationReason,
-    SignedNetworkState, TrustDomainRoot, UnsignedMemberCert, UnsignedNetworkState,
-    to_canonical_cbor,
+    MemberCertIndexEntry, NetworkLocalId, NetworkStatePayload, SignedNetworkState, TrustDomainRoot,
+    UnsignedMemberCert, UnsignedNetworkState, to_canonical_cbor,
 };
 use pnet::ipnetwork::IpNetwork as IpNet;
 use rand::rngs::OsRng;
@@ -74,6 +73,9 @@ fn build_state(
             acl: to_canonical_cbor(&acl),
             routes: Vec::new(),
             peer_hints: Vec::new(),
+            ip_assignments: Vec::new(),
+            capability_grants: Vec::new(),
+            hostname_bindings: Vec::new(),
         },
     }
     .sign(root)
@@ -154,7 +156,7 @@ fn read_cert(network_dir: &Path, fp: pactmesh::trust::MemberCertFingerprint) -> 
 }
 
 #[test]
-fn test_capability_set_reissues_member_cert() {
+fn test_capability_set_writes_state_grant_no_reissue() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, old_fp, network_dir) = setup_network(dir.path());
 
@@ -185,22 +187,26 @@ fn test_capability_set_reissues_member_cert() {
 
     let state = read_state(dir.path(), &domain_id, &network_id);
     assert_eq!(state.details.version, 2);
-    assert_eq!(
-        state.details.payload.revoked_certs[0].reason_code,
-        RevocationReason::Superseded
+    // 统一模型：能力编辑走 network_state 授予，不重签、不吊销旧证书。
+    assert!(
+        state.details.payload.revoked_certs.is_empty(),
+        "capability edit must not revoke/reissue"
     );
+    let cur_fp = state.details.payload.member_cert_index[0].fingerprint;
+    assert_eq!(cur_fp, old_fp, "member cert fingerprint must be stable");
+
+    let grant = &state.details.payload.capability_grants[0];
+    assert_eq!(grant.cert_fingerprint, old_fp);
+    assert!(grant.capabilities.can_relay_data);
     assert_eq!(
-        state.details.payload.revoked_certs[0].cert_fingerprint,
-        old_fp
-    );
-    let new_fp = state.details.payload.member_cert_index[0].fingerprint;
-    assert_ne!(new_fp, old_fp);
-    let cert = read_cert(&network_dir, new_fp);
-    assert!(cert.details.capabilities.can_relay_data);
-    assert_eq!(
-        cert.details.capabilities.can_proxy_subnet,
+        grant.capabilities.can_proxy_subnet,
         vec![IpNet::new(IpAddr::from_str("10.42.0.0").unwrap(), 24).unwrap()]
     );
+
+    // 证书正文保持原样（能力全 false），生效能力由授予接管。
+    let cert = read_cert(&network_dir, old_fp);
+    assert!(!cert.details.capabilities.can_relay_data);
+    assert!(cert.details.capabilities.can_proxy_subnet.is_empty());
 }
 
 #[test]

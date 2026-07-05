@@ -1181,6 +1181,7 @@ impl Instance {
         global_ctx: &ArcGlobalCtx,
     ) -> Result<(), Error> {
         peer_manager.enforce_current_trust_state().await;
+        peer_manager.refresh_effective_trust_capabilities().await;
         global_ctx
             .get_acl_filter()
             .reload_rules(AclRuleBuilder::build(global_ctx)?.as_ref());
@@ -1335,8 +1336,7 @@ impl Instance {
                         #[cfg(feature = "tun")]
                         Self::clear_nic_ctx(nic_ctx.clone(), _peer_packet_receiver.clone()).await;
                         global_ctx_c.set_ipv4(None);
-                        global_ctx_c
-                            .issue_event(GlobalCtxEvent::DhcpIpv4Conflicted(Some(last_ip)));
+                        global_ctx_c.issue_event(GlobalCtxEvent::DhcpIpv4Conflicted(Some(last_ip)));
                     }
                     next_sleep_time = 1;
                     continue;
@@ -1547,7 +1547,8 @@ impl Instance {
 
         // DHCP 模式或信任域节点都启动本循环：前者自选 IP，后者还负责运行时应用主控指派 IP。
         // 非 DHCP 且无指派时循环自守卫为空操作（见 check_dhcp_ip_conflict 顶部）。
-        if self.global_ctx.config.get_dhcp() || self.global_ctx.config.get_trust_domain().is_some() {
+        if self.global_ctx.config.get_dhcp() || self.global_ctx.config.get_trust_domain().is_some()
+        {
             self.check_dhcp_ip_conflict();
         }
 

@@ -7,7 +7,7 @@ import { ipList as fmtIpList } from '../format.js'
 import { InviteModal } from '../invite.jsx'
 
 export function Overview({ onNavigate }) {
-  const { network } = useApp()
+  const { network, daemonReachable, attached } = useApp()
   const [inviting, setInviting] = useState(false)
 
   const td = network?.td
@@ -50,6 +50,14 @@ export function Overview({ onNavigate }) {
 
   return (
     <>
+      {/* 服务健康状态条：控制器应答 / 后台服务可达 / 网络实例运行 / 在线节点 */}
+      <div class="health-bar">
+        <HealthItem ok label="控制器" text="正常" />
+        <HealthItem ok={daemonReachable} label="后台服务" text={daemonReachable ? '已连接' : '未连接'} />
+        <HealthItem ok={attached} label="网络实例" text={attached ? '运行中' : '未运行'} />
+        <HealthItem neutral ok={!daemonDown && onlineCount > 0} label="在线节点" text={daemonDown ? '—' : (onlineCount ?? '·')} />
+      </div>
+
       {/* 快捷动作 */}
       <div class="quick-actions">
         <button class="btn btn-primary" onClick={() => setInviting(true)}>＋ 邀请设备</button>
@@ -125,6 +133,17 @@ export function Overview({ onNavigate }) {
 
       {inviting && <InviteModal onClose={() => setInviting(false)} />}
     </>
+  )
+}
+
+function HealthItem({ ok, neutral, label, text }) {
+  const kind = neutral ? (ok ? 'ok' : 'muted') : ok ? 'ok' : 'err'
+  return (
+    <div class="health-item">
+      <span class={'health-dot ' + kind} />
+      <span class="health-label">{label}</span>
+      <span class="health-val">{text}</span>
+    </div>
   )
 }
 

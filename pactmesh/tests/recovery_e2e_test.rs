@@ -39,6 +39,9 @@ fn signed_state(
             acl: Vec::new(),
             routes: Vec::new(),
             peer_hints: hints,
+            ip_assignments: Vec::new(),
+            capability_grants: Vec::new(),
+            hostname_bindings: Vec::new(),
         },
     }
     .sign(root)

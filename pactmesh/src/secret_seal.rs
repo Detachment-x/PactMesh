@@ -39,8 +39,7 @@ pub fn seal(plaintext: &[u8]) -> Result<Vec<u8>> {
 pub fn unseal(blob: &[u8]) -> Result<Vec<u8>> {
     let (scheme, payload) = unwrap(blob)?;
     match scheme {
-        SCHEME_DPAPI =>
-        {
+        SCHEME_DPAPI => {
             #[cfg(windows)]
             {
                 dpapi_unprotect(payload)
@@ -50,8 +49,7 @@ pub fn unseal(blob: &[u8]) -> Result<Vec<u8>> {
                 anyhow::bail!("DPAPI-sealed secret cannot be opened on this platform")
             }
         }
-        SCHEME_SYSTEMD_CREDS =>
-        {
+        SCHEME_SYSTEMD_CREDS => {
             #[cfg(not(windows))]
             {
                 systemd_creds_decrypt(payload)
@@ -61,8 +59,7 @@ pub fn unseal(blob: &[u8]) -> Result<Vec<u8>> {
                 anyhow::bail!("systemd-creds-sealed secret cannot be opened on Windows")
             }
         }
-        SCHEME_MACHINE_ID =>
-        {
+        SCHEME_MACHINE_ID => {
             #[cfg(not(windows))]
             {
                 machine_id_unseal(payload)
@@ -125,7 +122,9 @@ fn machine_id_unseal(blob: &[u8]) -> Result<Vec<u8>> {
     let decryptor = age::Decryptor::new(blob).context("invalid sealed blob")?;
     let mut reader = decryptor
         .decrypt(std::iter::once(&identity as &dyn age::Identity))
-        .map_err(|_| anyhow::anyhow!("machine-id unseal failed (machine changed or blob corrupt)"))?;
+        .map_err(|_| {
+            anyhow::anyhow!("machine-id unseal failed (machine changed or blob corrupt)")
+        })?;
     let mut plaintext = Vec::new();
     reader
         .read_to_end(&mut plaintext)

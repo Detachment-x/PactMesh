@@ -234,6 +234,8 @@ mod tests {
                 routes: b"private-routes".to_vec(),
                 peer_hints: Vec::new(),
                 ip_assignments: Vec::new(),
+                capability_grants: Vec::new(),
+                hostname_bindings: Vec::new(),
             },
         }
         .sign(&root);

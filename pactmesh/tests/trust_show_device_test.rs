@@ -121,6 +121,9 @@ fn write_fixture(root_dir: &Path) -> (String, String, Vec<String>) {
             acl: to_canonical_cbor(&acl),
             routes: Vec::new(),
             peer_hints: Vec::new(),
+            ip_assignments: Vec::new(),
+            capability_grants: Vec::new(),
+            hostname_bindings: Vec::new(),
         },
     }
     .sign(&root);

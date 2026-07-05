@@ -267,7 +267,10 @@ pub(crate) fn bind_punch_udp_socket(
 ) -> Result<UdpSocket, anyhow::Error> {
     let dev = punch_bind_dev(&global_ctx.config.get_flags());
     Ok(bind::<UdpSocket>()
-        .addr(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)))
+        .addr(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::UNSPECIFIED,
+            port,
+        )))
         .dev(dev)
         .net_ns(global_ctx.net_ns.clone())
         .call()?)

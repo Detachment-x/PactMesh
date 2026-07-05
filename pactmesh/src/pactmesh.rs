@@ -179,13 +179,17 @@ enum SubCommand {
     Trust(TrustArgs),
     #[command(about = "serve the local web controller (browser admin console)")]
     Controller(ControllerArgs),
-    #[command(about = "first-run setup: create domain+network, bootstrap this device, start daemon and web console")]
+    #[command(
+        about = "first-run setup: create domain+network, bootstrap this device, start daemon and web console"
+    )]
     Quickstart(QuickstartArgs),
     #[command(about = "open the running web controller in the default browser")]
     Web,
     #[command(about = "run the Windows system-tray launcher for the web controller")]
     Tray,
-    #[command(about = "unattended supervisor: unseal device passphrase, run daemon + web console (for boot autostart)")]
+    #[command(
+        about = "unattended supervisor: unseal device passphrase, run daemon + web console (for boot autostart)"
+    )]
     Serve(ServeArgs),
     #[command(about = "interactive ratatui console (Node + Peers v0)")]
     Tui,
@@ -319,7 +323,9 @@ struct ServeArgs {
 enum ServeSubCommand {
     #[command(about = "seal the device passphrase and write serve config for unattended boot")]
     Seal(ServeSealArgs),
-    #[command(about = "run the supervised daemon pinned to a sealed network (legacy; new installs start empty and attach networks at runtime)")]
+    #[command(
+        about = "run the supervised daemon pinned to a sealed network (legacy; new installs start empty and attach networks at runtime)"
+    )]
     Run(ServeRunArgs),
 }
 
@@ -327,7 +333,10 @@ enum ServeSubCommand {
 struct ServeSealArgs {
     #[arg(long, help = "trust domain id (auto-detected if exactly one exists)")]
     trust_domain_id: Option<String>,
-    #[arg(long, help = "network id (auto-detected if the domain has exactly one)")]
+    #[arg(
+        long,
+        help = "network id (auto-detected if the domain has exactly one)"
+    )]
     network_id: Option<String>,
     #[arg(
         long,
@@ -419,8 +428,7 @@ fn serve_seal(args: &ServeSealArgs) -> Result<(), Error> {
         }
     };
 
-    let device_passphrase =
-        read_optional_device_passphrase(args.device_passphrase_file.as_ref())?;
+    let device_passphrase = read_optional_device_passphrase(args.device_passphrase_file.as_ref())?;
 
     let config_dir = pnw_config_dir()?;
     let sealed_path = config_dir.join(SERVE_SEALED_FILE);
@@ -432,7 +440,10 @@ fn serve_seal(args: &ServeSealArgs) -> Result<(), Error> {
         no_tun: args.no_tun,
         listen: args.listen.to_string(),
     };
-    write_private_file(&config_path, serde_json::to_string_pretty(&config)?.as_bytes())?;
+    write_private_file(
+        &config_path,
+        serde_json::to_string_pretty(&config)?.as_bytes(),
+    )?;
 
     match device_passphrase {
         Some(pw) => {
@@ -1428,7 +1439,10 @@ enum TrustSubCommand {
             help = "CIDR to assign (e.g. 10.0.0.7/24); omit or pass --clear to remove"
         )]
         ipv4: Option<String>,
-        #[arg(long, help = "clear the assignment, reverting the device to DHCP/static")]
+        #[arg(
+            long,
+            help = "clear the assignment, reverting the device to DHCP/static"
+        )]
         clear: bool,
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
@@ -2533,7 +2547,9 @@ impl<'a> CommandHandler<'a> {
         }
         #[cfg(not(windows))]
         {
-            anyhow::bail!("the system tray is only available on Windows; use `pactmesh web` instead")
+            anyhow::bail!(
+                "the system tray is only available on Windows; use `pactmesh web` instead"
+            )
         }
     }
 
@@ -2570,7 +2586,8 @@ impl<'a> CommandHandler<'a> {
 
         let run_step = |step_args: &[&str], capture: bool| -> Result<String, Error> {
             let mut cmd = std::process::Command::new(&exe);
-            cmd.args(step_args).env("PNW_ROOT_PASSPHRASE", &root_passphrase);
+            cmd.args(step_args)
+                .env("PNW_ROOT_PASSPHRASE", &root_passphrase);
             if let Some(pw) = device_passphrase.as_deref() {
                 cmd.env("PNW_DEVICE_PASSPHRASE", pw);
             }
@@ -2580,7 +2597,11 @@ impl<'a> CommandHandler<'a> {
                     .with_context(|| format!("failed to run pactmesh {}", step_args.join(" ")))?;
                 if !out.status.success() {
                     std::io::stderr().write_all(&out.stderr).ok();
-                    anyhow::bail!("`pactmesh {}` exited with {}", step_args.join(" "), out.status);
+                    anyhow::bail!(
+                        "`pactmesh {}` exited with {}",
+                        step_args.join(" "),
+                        out.status
+                    );
                 }
                 Ok(String::from_utf8(out.stdout)
                     .context("pactmesh output was not valid UTF-8")?
@@ -2599,7 +2620,13 @@ impl<'a> CommandHandler<'a> {
 
         println!("[1/4] Creating trust domain '{}'...", args.domain_label);
         let domain_json = run_step(
-            &["trust", "create-domain", "--label", &args.domain_label, "--json"],
+            &[
+                "trust",
+                "create-domain",
+                "--label",
+                &args.domain_label,
+                "--json",
+            ],
             true,
         )?;
         let trust_domain_id = quickstart_json_field(&domain_json, "trust_domain_id")?;
@@ -2676,7 +2703,9 @@ impl<'a> CommandHandler<'a> {
             unlock_ttl_secs: args.unlock_ttl_secs,
         };
         println!();
-        println!("Setup complete. Starting the web console (Ctrl-C to stop; the daemon keeps running).");
+        println!(
+            "Setup complete. Starting the web console (Ctrl-C to stop; the daemon keeps running)."
+        );
         self.run_controller(&controller_args).await
     }
 
@@ -2705,9 +2734,8 @@ impl<'a> CommandHandler<'a> {
         // 实例持久化目录：运行时加网的「记住」实例落 toml 于此，重启自动加载并经
         // sk_self.seal 重连（--empty 只跳过自动建默认网，不抑制加载已持久化实例）。
         let instances_dir = pnw_serve_instances_dir()?;
-        std::fs::create_dir_all(&instances_dir).with_context(|| {
-            format!("failed to create {}", instances_dir.display())
-        })?;
+        std::fs::create_dir_all(&instances_dir)
+            .with_context(|| format!("failed to create {}", instances_dir.display()))?;
         let instances_dir_str = instances_dir
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("serve instances path is not UTF-8"))?;
@@ -2752,15 +2780,14 @@ impl<'a> CommandHandler<'a> {
         let config_path = config_dir.join(SERVE_CONFIG_FILE);
         let sealed_path = config_dir.join(SERVE_SEALED_FILE);
 
-        let config: ServeConfig = serde_json::from_str(
-            &std::fs::read_to_string(&config_path).with_context(|| {
+        let config: ServeConfig =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).with_context(|| {
                 format!(
                     "serve config not found at {} (run `pactmesh serve seal` first)",
                     config_path.display()
                 )
-            })?,
-        )
-        .context("failed to parse serve config")?;
+            })?)
+            .context("failed to parse serve config")?;
 
         // 封存文件可选：存在→age 设备钥（解封口令）；缺失→raw 设备钥（daemon 直读 sk_self.raw）。
         let device_passphrase = match std::fs::read(&sealed_path) {
@@ -5535,7 +5562,9 @@ fn remote_fresh_wait_for_peers(
             || b.peer_json.to_ascii_lowercase().contains("win-c");
         let c_sees_b = c.peer_json.to_ascii_lowercase().contains("node-b")
             || (!b_hostname.is_empty()
-                && c.peer_json.to_ascii_lowercase().contains(b_hostname.as_str()));
+                && c.peer_json
+                    .to_ascii_lowercase()
+                    .contains(b_hostname.as_str()));
         let b_direct = remote_run_assert_direct_quiet("B", &b.peer_json, "LAPTOP")
             .or_else(|_| remote_run_assert_direct_quiet("B", &b.peer_json, "win-c"));
         let c_direct = (if b_hostname.is_empty() {
@@ -5820,15 +5849,24 @@ fn remote_fresh_verify_assignment(
         pass_file = sh_quote(&root.root_passphrase_file),
     );
     let out = ssh_capture_sh(&options.a_host, &assign)?;
-    println!("remote-fresh-run: assign node-b {assigned_cidr}: {}", out.trim());
+    println!(
+        "remote-fresh-run: assign node-b {assigned_cidr}: {}",
+        out.trim()
+    );
 
     remote_fresh_wait_for_node_b_ipv4(options, assigned_cidr)?;
     println!("remote-fresh-run: node-b reports assigned IP {assigned_cidr}");
 
     // 不踢断言：指派后 node-b 仍在网、状态 active、证书指纹不变（network_state 路线不重签证书）。
     let after = remote_fresh_node_b_member(options, root)?;
-    let after_fp = after.get("fingerprint").and_then(|v| v.as_str()).unwrap_or_default();
-    let after_status = after.get("status").and_then(|v| v.as_str()).unwrap_or_default();
+    let after_fp = after
+        .get("fingerprint")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let after_status = after
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     anyhow::ensure!(
         after_fp == b_fp,
         "assignment must not reissue node-b cert: fingerprint changed {b_fp} -> {after_fp}"
@@ -6244,8 +6282,20 @@ fn verify_bc_physical_direct(
 ) -> Result<(), Error> {
     let b_events = collect_conn_events_local(&options.b_log)?;
     let c_events = collect_conn_events_windows(&options.c_host, &options.c_log)?;
-    assert_physical_direct_any("B", b_peer_json, &b_events, &["LAPTOP", "win-c"], overlay_cidrs)?;
-    assert_physical_direct_any("C", c_peer_json, &c_events, &["user", "node-b"], overlay_cidrs)?;
+    assert_physical_direct_any(
+        "B",
+        b_peer_json,
+        &b_events,
+        &["LAPTOP", "win-c"],
+        overlay_cidrs,
+    )?;
+    assert_physical_direct_any(
+        "C",
+        c_peer_json,
+        &c_events,
+        &["user", "node-b"],
+        overlay_cidrs,
+    )?;
     Ok(())
 }
 
@@ -6901,21 +6951,21 @@ fn handle_trust_revoke(
         &original_state,
         &root,
         |next, _root| {
-            next.payload.revoked_certs.push(pactmesh::trust::RevokedCert {
-                cert_fingerprint: fingerprint,
-                revoked_at,
-                reason_code: revoke_reason_value(reason),
-                reason_note: note,
-            });
+            next.payload
+                .revoked_certs
+                .push(pactmesh::trust::RevokedCert {
+                    cert_fingerprint: fingerprint,
+                    revoked_at,
+                    reason_code: revoke_reason_value(reason),
+                    reason_note: note,
+                });
             Ok(())
         },
     )?;
 
     println!(
         "revoked {}: version {} -> {}",
-        fingerprint,
-        original_state.details.version,
-        next_version
+        fingerprint, original_state.details.version, next_version
     );
     Ok(())
 }
@@ -7361,7 +7411,9 @@ fn handle_trust_capability_set(options: TrustCapabilitySetOptions) -> Result<(),
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("member cert body not found; cannot update capabilities"))?;
 
-    let mut capabilities = old_cert.details.capabilities.clone();
+    // 以现有生效能力（state grant 优先，否则证书正文）为基线做增量编辑。
+    let baseline = pactmesh::trust::effective_capabilities(&old_cert, &state);
+    let mut capabilities = baseline.clone();
     if let Some(relay_data) = options.relay_data {
         capabilities.can_relay_data = relay_data;
     }
@@ -7378,7 +7430,7 @@ fn handle_trust_capability_set(options: TrustCapabilitySetOptions) -> Result<(),
         capabilities.can_proxy_subnet.dedup();
     }
 
-    if capabilities == old_cert.details.capabilities {
+    if capabilities == baseline {
         if options.json {
             println!(
                 "{}",
@@ -7398,24 +7450,26 @@ fn handle_trust_capability_set(options: TrustCapabilitySetOptions) -> Result<(),
         return Ok(());
     }
 
+    // 写 root 签名的 network_state 授予（键=现有指纹，不重签证书、不踢线）。
+    // 等于证书正文时移除授予，回落证书正文保持状态精简。
     let root = unlock_domain_root(&options.trust_domain_id, options.passphrase_file)?;
-    let mut new_details = old_cert.details.clone();
-    new_details.capabilities = capabilities;
-    new_details.network_state_version_ref = state.details.version.saturating_add(1);
-    let new_cert = new_details.sign(&root);
-    let new_fp = new_cert.fingerprint();
+    let cert_capabilities = old_cert.details.capabilities.clone();
     state
         .details
         .payload
-        .revoked_certs
-        .push(pactmesh::trust::RevokedCert {
-            cert_fingerprint: old_fp,
-            revoked_at: now_unix_secs(),
-            reason_code: RevocationReason::Superseded,
-            reason_note: options.note,
-        });
-    replace_member_index_entry(&mut state, old_fp, &new_cert);
-    write_reissued_member_cert(&network_dir, &new_cert)?;
+        .capability_grants
+        .retain(|g| g.cert_fingerprint != old_fp);
+    if capabilities != cert_capabilities {
+        state
+            .details
+            .payload
+            .capability_grants
+            .push(pactmesh::trust::CapabilityGrant {
+                cert_fingerprint: old_fp,
+                capabilities: capabilities.clone(),
+                granted_at: now_unix_secs(),
+            });
+    }
 
     let old_version = state.details.version;
     let new_version = write_signed_network_state(&network_dir, &state, original_pem, &root)?;
@@ -7423,21 +7477,20 @@ fn handle_trust_capability_set(options: TrustCapabilitySetOptions) -> Result<(),
         println!(
             "{}",
             serde_json::json!({
-                "old_fingerprint": old_fp.to_string(),
-                "new_fingerprint": new_fp.to_string(),
+                "fingerprint": old_fp.to_string(),
                 "old_version": old_version,
                 "new_version": new_version,
                 "status": "capability-updated",
                 "capabilities": {
-                    "relay_data": new_cert.details.capabilities.can_relay_data,
-                    "relay_control": new_cert.details.capabilities.can_relay_control,
-                    "proxy_subnet": new_cert.details.capabilities.can_proxy_subnet.iter().map(|net| net.to_string()).collect::<Vec<_>>(),
+                    "relay_data": capabilities.can_relay_data,
+                    "relay_control": capabilities.can_relay_control,
+                    "proxy_subnet": capabilities.can_proxy_subnet.iter().map(|net| net.to_string()).collect::<Vec<_>>(),
                 }
             })
         );
     } else {
         println!(
-            "Updated capabilities for {}; old cert revoked as superseded. version {} -> {}",
+            "Updated capabilities for {} via network_state (no cert reissue). version {} -> {}",
             old_fp.to_string().chars().take(8).collect::<String>(),
             old_version,
             new_version
@@ -7976,7 +8029,7 @@ fn handle_trust_hostname_update(
     network_local_id: String,
     fingerprint: String,
     hostname: Option<String>,
-    note: Option<String>,
+    _note: Option<String>,
     passphrase_file: Option<PathBuf>,
 ) -> Result<(), Error> {
     let (network_dir, original_pem, mut state) =
@@ -8003,7 +8056,8 @@ fn handle_trust_hostname_update(
     let new_hostname = hostname
         .map(|hostname| HostnameLabel::try_from_str(&hostname))
         .transpose()?;
-    if old_cert.details.hostname == new_hostname {
+    // 现有生效值 = state binding 优先，否则证书正文。相同 → 幂等。
+    if new_hostname == pactmesh::trust::effective_hostname(&old_cert, &state) {
         println!(
             "hostname unchanged for {}",
             old_fp.to_string().chars().take(8).collect::<String>()
@@ -8014,40 +8068,39 @@ fn handle_trust_hostname_update(
         check_hostname_unique(hostname, &live_hostname_entries(&state, &certs, old_fp))?;
     }
 
+    // 写 root 签名的 network_state 绑定（键=现有指纹，不重签证书、不踢线）。
+    // 等于证书正文时移除绑定回落证书正文。
     let root = unlock_domain_root(&trust_domain_id, passphrase_file)?;
-    let mut new_details = old_cert.details.clone();
-    new_details.hostname = new_hostname.clone();
-    new_details.network_state_version_ref = state.details.version.saturating_add(1);
-    let new_cert = new_details.sign(&root);
+    let cert_hostname = old_cert.details.hostname.clone();
     state
         .details
         .payload
-        .revoked_certs
-        .push(pactmesh::trust::RevokedCert {
-            cert_fingerprint: old_fp,
-            revoked_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .context("system clock before unix epoch")?
-                .as_secs(),
-            reason_code: RevocationReason::Superseded,
-            reason_note: note,
-        });
-    replace_member_index_entry(&mut state, old_fp, &new_cert);
-
-    write_reissued_member_cert(&network_dir, &new_cert)?;
+        .hostname_bindings
+        .retain(|b| b.cert_fingerprint != old_fp);
+    if new_hostname != cert_hostname {
+        state
+            .details
+            .payload
+            .hostname_bindings
+            .push(pactmesh::trust::HostnameBinding {
+                cert_fingerprint: old_fp,
+                hostname: new_hostname.clone(),
+                bound_at: now_unix_secs(),
+            });
+    }
 
     let old_version = state.details.version;
     let new_version = write_signed_network_state(&network_dir, &state, original_pem, &root)?;
     match new_hostname {
         Some(hostname) => println!(
-            "Hostname '{}' assigned to {}; old cert revoked as superseded. version {} -> {}",
+            "Hostname '{}' assigned to {} via network_state (no cert reissue). version {} -> {}",
             hostname,
             old_fp.to_string().chars().take(8).collect::<String>(),
             old_version,
             new_version
         ),
         None => println!(
-            "Hostname removed from {}; old cert revoked as superseded. version {} -> {}",
+            "Hostname removed from {} via network_state (no cert reissue). version {} -> {}",
             old_fp.to_string().chars().take(8).collect::<String>(),
             old_version,
             new_version
@@ -8311,8 +8364,8 @@ async fn handle_trust_assigned_ipv4(
 
     let assign = match ipv4.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(cidr) => {
-            let inet = Ipv4Inet::from_str(cidr)
-                .with_context(|| format!("invalid ipv4 cidr '{cidr}'"))?;
+            let inet =
+                Ipv4Inet::from_str(cidr).with_context(|| format!("invalid ipv4 cidr '{cidr}'"))?;
             Some(pactmesh::trust::AssignedIpv4 {
                 addr: u32::from(inet.address()),
                 prefix: inet.network_length(),
@@ -8389,9 +8442,9 @@ async fn handle_trust_assigned_ipv4(
         );
     } else {
         match assigned_str {
-            Some(ip) => println!(
-                "assigned {ip} to {device_id}: version {old_version} -> {new_version}"
-            ),
+            Some(ip) => {
+                println!("assigned {ip} to {device_id}: version {old_version} -> {new_version}")
+            }
             None => println!(
                 "cleared assignment for {device_id}: version {old_version} -> {new_version}"
             ),
@@ -9345,6 +9398,8 @@ fn handle_trust_create_network(
             routes: Vec::new(),
             peer_hints: Vec::new(),
             ip_assignments: Vec::new(),
+            capability_grants: Vec::new(),
+            hostname_bindings: Vec::new(),
         },
     }
     .sign(&root);
@@ -10602,9 +10657,7 @@ async fn main() -> Result<(), Error> {
                     .await?;
             }
         },
-        SubCommand::Controller(controller_args) => {
-            handler.run_controller(&controller_args).await?
-        }
+        SubCommand::Controller(controller_args) => handler.run_controller(&controller_args).await?,
         SubCommand::Quickstart(quickstart_args) => {
             handler
                 .run_quickstart(cli.rpc_portal, &quickstart_args)

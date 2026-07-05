@@ -50,9 +50,9 @@ use crate::proto::api::manage::{
     TrustDomainLocator, WebClientService, WebClientServiceClientFactory,
 };
 use crate::trust::{
-    AssignedIpv4, DeviceFingerprint, DisabledCert, IpAssignment, MemberCertFingerprint,
-    NetworkBootstrap, PeerHint, RevocationReason, RevokedCert, TagName, UnsignedMemberCert,
-    encode_device_id,
+    AssignedIpv4, CapabilityGrant, DeviceFingerprint, DisabledCert, HostnameBinding, IpAssignment,
+    MemberCertFingerprint, NetworkBootstrap, PeerHint, RevocationReason, RevokedCert, TagName,
+    UnsignedMemberCert, effective_capabilities, effective_hostname, encode_device_id,
 };
 
 const INDEX_HTML: &str = include_str!("assets/dist/index.html");
@@ -109,6 +109,7 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/network/ip-pool", get(api_ip_pool_get).post(api_ip_pool_set))
         .route("/api/network/auto-assign", post(api_auto_assign))
         .route("/api/network/leave", post(api_network_leave))
+        .route("/api/network/purge-local", post(api_network_purge_local))
         .route("/api/trust/upgrade-peer-to-root", post(api_trust_upgrade_root))
         .route("/api/trust/arm-root-upgrade", post(api_trust_arm_root_upgrade))
         .route("/api/trust/tags", get(api_trust_tags))
@@ -399,8 +400,6 @@ struct HostnameReq {
     /// `None`/缺省 = 清除主机名；`Some` = 设置（校验唯一）。
     #[serde(default)]
     hostname: Option<String>,
-    #[serde(default)]
-    note: Option<String>,
 }
 
 async fn api_hostname(State(s): State<AppState>, Json(req): Json<HostnameReq>) -> Response {
@@ -412,7 +411,7 @@ async fn api_hostname(State(s): State<AppState>, Json(req): Json<HostnameReq>) -
         Ok(fp) => fp,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
     };
-    let revoked_at = now_unix_secs();
+    let bound_at = now_unix_secs();
     let result = (|| {
         let sess = SigningSession::open(&td, &nid, &pass)?;
         let old_cert = active_member_cert(&sess, fp)?;
@@ -423,7 +422,8 @@ async fn api_hostname(State(s): State<AppState>, Json(req): Json<HostnameReq>) -
             .map(HostnameLabel::try_from_str)
             .transpose()
             .map_err(|e| anyhow::anyhow!("invalid hostname: {e}"))?;
-        if old_cert.details.hostname == new_hostname {
+        // 现有生效值 = state binding 优先，否则证书正文。相同 → 幂等，不动版本。
+        if new_hostname == effective_hostname(&old_cert, &sess.original_state) {
             let v = sess.version();
             return Ok((v, v));
         }
@@ -435,11 +435,30 @@ async fn api_hostname(State(s): State<AppState>, Json(req): Json<HostnameReq>) -
             )
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         }
-        let mut new_details = old_cert.details.clone();
-        new_details.hostname = new_hostname;
-        new_details.network_state_version_ref = sess.version().saturating_add(1);
-        reissue(sess, fp, req.note, revoked_at, new_details)
+        // 写 state 绑定（键=现有指纹，不重签、不踢线）。回落证书正文时移除绑定保持状态精简。
+        let cert_hostname = old_cert.details.hostname.clone();
+        let prev = sess.version();
+        let version = sess.commit(move |next, _root| {
+            next.payload
+                .hostname_bindings
+                .retain(|b| b.cert_fingerprint != fp);
+            if new_hostname != cert_hostname {
+                next.payload.hostname_bindings.push(HostnameBinding {
+                    cert_fingerprint: fp,
+                    hostname: new_hostname,
+                    bound_at,
+                });
+            }
+            Ok(())
+        })?;
+        Ok::<(u64, u64), anyhow::Error>((prev, version))
     })();
+    if let Ok((prev, version)) = &result
+        && version != prev
+        && let Ok((_d, _p, state)) = control::read_network_state(&td, &nid)
+    {
+        push_network_state_to_daemon(&s, crate::trust::to_canonical_cbor(&state)).await;
+    }
     version_response(&req.fingerprint, result)
 }
 
@@ -454,8 +473,6 @@ struct CapabilityReq {
     proxy_subnet: Option<Vec<String>>,
     #[serde(default)]
     clear_proxy_subnet: bool,
-    #[serde(default)]
-    note: Option<String>,
 }
 
 async fn api_capability(State(s): State<AppState>, Json(req): Json<CapabilityReq>) -> Response {
@@ -467,7 +484,7 @@ async fn api_capability(State(s): State<AppState>, Json(req): Json<CapabilityReq
         Ok(fp) => fp,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
     };
-    let revoked_at = now_unix_secs();
+    let granted_at = now_unix_secs();
     let result = (|| {
         let subnets = req.proxy_subnet.unwrap_or_default();
         if req.clear_proxy_subnet && !subnets.is_empty() {
@@ -482,7 +499,9 @@ async fn api_capability(State(s): State<AppState>, Json(req): Json<CapabilityReq
         }
         let sess = SigningSession::open(&td, &nid, &pass)?;
         let old_cert = active_member_cert(&sess, fp)?;
-        let mut capabilities = old_cert.details.capabilities.clone();
+        // 以现有生效能力（state grant 优先，否则证书正文）为基线做增量编辑。
+        let current = effective_capabilities(&old_cert, &sess.original_state);
+        let mut capabilities = current.clone();
         if let Some(relay_data) = req.relay_data {
             capabilities.can_relay_data = relay_data;
         }
@@ -503,15 +522,34 @@ async fn api_capability(State(s): State<AppState>, Json(req): Json<CapabilityReq
             parsed.dedup();
             capabilities.can_proxy_subnet = parsed;
         }
-        if capabilities == old_cert.details.capabilities {
+        if capabilities == current {
             let v = sess.version();
             return Ok((v, v));
         }
-        let mut new_details = old_cert.details.clone();
-        new_details.capabilities = capabilities;
-        new_details.network_state_version_ref = sess.version().saturating_add(1);
-        reissue(sess, fp, req.note, revoked_at, new_details)
+        // 写 state 授予（键=现有指纹，不重签、不踢线）。等于证书正文时移除授予回落基线。
+        let cert_capabilities = old_cert.details.capabilities.clone();
+        let prev = sess.version();
+        let version = sess.commit(move |next, _root| {
+            next.payload
+                .capability_grants
+                .retain(|g| g.cert_fingerprint != fp);
+            if capabilities != cert_capabilities {
+                next.payload.capability_grants.push(CapabilityGrant {
+                    cert_fingerprint: fp,
+                    capabilities,
+                    granted_at,
+                });
+            }
+            Ok(())
+        })?;
+        Ok::<(u64, u64), anyhow::Error>((prev, version))
     })();
+    if let Ok((prev, version)) = &result
+        && version != prev
+        && let Ok((_d, _p, state)) = control::read_network_state(&td, &nid)
+    {
+        push_network_state_to_daemon(&s, crate::trust::to_canonical_cbor(&state)).await;
+    }
     version_response(&req.fingerprint, result)
 }
 
@@ -1031,53 +1069,137 @@ struct LeaveReq {
     network_local_id: String,
 }
 
+/// 停止并删除匹配 (td,nid) 的运行实例（DeleteNetworkInstance = 停实例 + 删持久化 toml
+/// → 不再开机自动重连）。返回停掉的实例数。供 `leave` 与 `purge-local` 复用。
+async fn stop_network_instances(
+    s: &AppState,
+    trust_domain_id: &str,
+    network_local_id: &str,
+) -> anyhow::Result<usize> {
+    let client = {
+        let mut g = s.client.lock().await;
+        g.scoped_client::<WebClientServiceClientFactory<BaseController>>(String::new())
+            .await?
+    };
+    let listed = client
+        .list_network_instance(BaseController::default(), ListNetworkInstanceRequest {})
+        .await?;
+    let domain_dir = crate::common::config_dir::pnw_trust_domains_dir()?.join(trust_domain_id);
+    let mut matched = Vec::new();
+    for inst in listed.inst_ids.iter() {
+        let cfg = client
+            .get_network_instance_config(
+                BaseController::default(),
+                GetNetworkInstanceConfigRequest { inst_id: Some(inst.clone()) },
+            )
+            .await;
+        let Ok(cfg) = cfg else { continue };
+        let Some(loc) = cfg.config.and_then(|c| c.trust_domain) else { continue };
+        let dir_match = std::path::Path::new(&loc.trust_domain_dir) == domain_dir
+            || loc
+                .trust_domain_dir
+                .trim_end_matches(|c| c == '/' || c == '\\')
+                .ends_with(trust_domain_id);
+        if dir_match && loc.network_local_id == network_local_id {
+            matched.push(inst.clone());
+        }
+    }
+    if matched.is_empty() {
+        return Ok(0);
+    }
+    let count = matched.len();
+    client
+        .delete_network_instance(
+            BaseController::default(),
+            DeleteNetworkInstanceRequest { inst_ids: matched },
+        )
+        .await?;
+    Ok(count)
+}
+
 /// 离开网络：匹配 (td,nid) 对应的运行实例 → DeleteNetworkInstance（停实例 + 删持久化 toml
 /// → 不再开机自动重连）。不需 root 签名（纯本机 daemon 操作）。
 async fn api_network_leave(State(s): State<AppState>, Json(req): Json<LeaveReq>) -> Response {
     let result = async {
-        let client = {
-            let mut g = s.client.lock().await;
-            g.scoped_client::<WebClientServiceClientFactory<BaseController>>(String::new())
-                .await?
-        };
-        let listed = client
-            .list_network_instance(BaseController::default(), ListNetworkInstanceRequest {})
-            .await?;
-        let domain_dir =
-            crate::common::config_dir::pnw_trust_domains_dir()?.join(&req.trust_domain_id);
-        let mut matched = Vec::new();
-        for inst in listed.inst_ids.iter() {
-            let cfg = client
-                .get_network_instance_config(
-                    BaseController::default(),
-                    GetNetworkInstanceConfigRequest { inst_id: Some(inst.clone()) },
-                )
-                .await;
-            let Ok(cfg) = cfg else { continue };
-            let Some(loc) = cfg.config.and_then(|c| c.trust_domain) else { continue };
-            let dir_match = std::path::Path::new(&loc.trust_domain_dir) == domain_dir
-                || loc
-                    .trust_domain_dir
-                    .trim_end_matches(|c| c == '/' || c == '\\')
-                    .ends_with(&req.trust_domain_id);
-            if dir_match && loc.network_local_id == req.network_local_id {
-                matched.push(inst.clone());
-            }
-        }
-        if matched.is_empty() {
+        if stop_network_instances(&s, &req.trust_domain_id, &req.network_local_id).await? == 0 {
             anyhow::bail!("no running instance found for this network");
         }
-        client
-            .delete_network_instance(
-                BaseController::default(),
-                DeleteNetworkInstanceRequest { inst_ids: matched },
-            )
-            .await?;
         Ok::<(), anyhow::Error>(())
     }
     .await;
     match result {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({ "status": "left" })),
+        Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct PurgeLocalReq {
+    trust_domain_id: String,
+    network_local_id: String,
+}
+
+/// 纯判定：给定域布局，返回应从本机删除的路径集合。**仅字符串/布尔运算，绝不触碰文件系统**
+/// （purge 事故铁律 [[destructive-test-real-paths-incident]] — 单测只断言这些路径串）。
+/// 铁律：`is_root_holder`（持 `sk_root.age`）→ **绝不**返回域目录（根钥须经卸载器 purge/显式导出）。
+fn purge_local_targets(
+    domain_dir: &std::path::Path,
+    network_local_id: &str,
+    is_root_holder: bool,
+    remaining_networks: usize,
+) -> Vec<std::path::PathBuf> {
+    let mut targets = vec![domain_dir.join("networks").join(network_local_id)];
+    if !is_root_holder && remaining_networks == 0 {
+        targets.push(domain_dir.to_path_buf());
+    }
+    targets
+}
+
+/// 统计域下除 `exclude_nid` 外的网络目录数（= 删除目标网络后将剩余的网络数）。
+fn count_other_networks(domain_dir: &std::path::Path, exclude_nid: &str) -> usize {
+    std::fs::read_dir(domain_dir.join("networks"))
+        .map(|entries| {
+            entries
+                .filter_map(std::result::Result::ok)
+                .filter(|e| e.path().is_dir())
+                .filter(|e| e.file_name().to_string_lossy() != exclude_nid)
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// 退出并清除：先停实例（复用 leave，best-effort，未挂载则忽略）→ 删本机该网络目录；
+/// 若域下已无其它网络且非 root 持有者 → 连域目录一并删。root 持有者的 `sk_root.age` 绝不删。
+async fn api_network_purge_local(
+    State(s): State<AppState>,
+    Json(req): Json<PurgeLocalReq>,
+) -> Response {
+    let result = async {
+        let _ = stop_network_instances(&s, &req.trust_domain_id, &req.network_local_id).await;
+        let domain_dir =
+            crate::common::config_dir::pnw_trust_domains_dir()?.join(&req.trust_domain_id);
+        let is_root_holder = domain_dir.join("sk_root.age").is_file();
+        let remaining = count_other_networks(&domain_dir, &req.network_local_id);
+        let targets =
+            purge_local_targets(&domain_dir, &req.network_local_id, is_root_holder, remaining);
+        let mut domain_removed = false;
+        for target in &targets {
+            if target == &domain_dir {
+                domain_removed = true;
+            }
+            if target.exists() {
+                std::fs::remove_dir_all(target)
+                    .with_context(|| format!("failed to remove {}", target.display()))?;
+            }
+        }
+        Ok::<_, anyhow::Error>(serde_json::json!({
+            "status": "purged",
+            "domain_removed": domain_removed,
+        }))
+    }
+    .await;
+    match result {
+        Ok(v) => json_response(StatusCode::OK, v),
         Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
     }
 }
@@ -1793,12 +1915,16 @@ async fn attach_trust_network(
 async fn api_network_run(State(s): State<AppState>, Json(req): Json<NetworkRunReq>) -> Response {
     let root_pass = Zeroizing::new(req.root_passphrase.clone());
     let result = async {
-        // 1) 既有域 or 新建域
-        let trust_domain_id = match req.trust_domain_id.clone() {
-            Some(td) => td,
+        // 1) 既有域 or 新建域。域概念对用户隐藏：新建域的 label 自动=主网络名（仅供 legacy 展示回退）。
+        let (trust_domain_id, created_domain) = match req.trust_domain_id.clone() {
+            Some(td) => (td, false),
             None => {
-                let label = req.domain_label.clone().unwrap_or_else(|| "home".to_string());
-                control::create_domain(&label, root_pass.as_str())?.trust_domain_id
+                let label = req
+                    .domain_label
+                    .clone()
+                    .unwrap_or_else(|| req.network_local_id.clone());
+                let td = control::create_domain(&label, root_pass.as_str())?.trust_domain_id;
+                (td, true)
             }
         };
         // 2) 建网（root 签 v1 空状态）
@@ -1808,6 +1934,10 @@ async fn api_network_run(State(s): State<AppState>, Json(req): Json<NetworkRunRe
             &req.default_action,
             root_pass.as_str(),
         )?;
+        // 一步建域+建网：此网络即该域的主网络（承载网络），标记 base_network。
+        if created_domain {
+            control::set_domain_base_network(&trust_domain_id, &req.network_local_id)?;
+        }
         // 3) 自举本机：自执行 binary（设备身份助手为 binary 私有）；无设备口令 → 写 sk_self.raw
         let device_label = req
             .device_label
@@ -2544,4 +2674,53 @@ async fn fetch_node_info(s: &AppState) -> anyhow::Result<NodeInfo> {
         .await?;
     resp.node_info
         .ok_or_else(|| anyhow::anyhow!("daemon returned no node_info"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // purge 事故铁律：purge 路径判定单测**只做字符串断言**，绝不喂真实 rm。
+    fn strs(paths: &[std::path::PathBuf]) -> Vec<String> {
+        paths.iter().map(|p| p.display().to_string()).collect()
+    }
+
+    #[test]
+    fn purge_targets_network_only_when_other_networks_remain() {
+        let dir = Path::new("/base/DOMAIN");
+        // 非 root 持有者但域下还有其它网络 → 仅删该网络目录，保留域目录。
+        let targets = purge_local_targets(dir, "office", false, 2);
+        assert_eq!(
+            strs(&targets),
+            vec![Path::new("/base/DOMAIN/networks/office")
+                .display()
+                .to_string()]
+        );
+    }
+
+    #[test]
+    fn purge_targets_domain_when_last_network_and_not_root() {
+        let dir = Path::new("/base/DOMAIN");
+        // 非 root 持有者且这是最后一个网络 → 连域目录一并删。
+        let targets = purge_local_targets(dir, "office", false, 0);
+        assert_eq!(
+            strs(&targets),
+            vec![
+                Path::new("/base/DOMAIN/networks/office")
+                    .display()
+                    .to_string(),
+                dir.display().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn purge_never_targets_domain_dir_for_root_holder() {
+        let dir = Path::new("/base/DOMAIN");
+        // 铁律：root 持有者（持 sk_root.age）即使删最后一个网络也绝不删域目录（根钥须保留）。
+        let targets = purge_local_targets(dir, "office", true, 0);
+        assert!(!targets.iter().any(|t| t == dir), "root domain dir must be preserved");
+        assert_eq!(targets.len(), 1);
+    }
 }

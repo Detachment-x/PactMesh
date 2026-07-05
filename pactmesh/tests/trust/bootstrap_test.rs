@@ -56,7 +56,8 @@ fn test_url_with_unicode_label_url_encoded_correctly() {
     let bootstrap = sample_bootstrap();
 
     let url = bootstrap.to_url().unwrap();
-    assert!(url.as_str().contains("label="));
+    // 不透明 `d` 参数封装整个 bootstrap（CBOR+base64）；原始 unicode 标签绝不明文出现在 URL。
+    assert!(url.as_str().contains("d="));
     assert!(!url.as_str().contains("团队网络🚀"));
 
     let decoded = NetworkBootstrap::from_url(&url).unwrap();

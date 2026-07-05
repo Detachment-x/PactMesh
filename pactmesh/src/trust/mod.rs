@@ -20,6 +20,7 @@ pub mod cbor;
 pub mod config_sync_client;
 pub mod config_sync_service;
 pub mod device_view;
+pub mod effective;
 pub mod hostname;
 pub mod identity;
 pub mod join;
@@ -54,6 +55,10 @@ pub use device_view::{
     DeviceCapabilityView, DeviceRole, DeviceStatus, DeviceView, encode_device_id, role_for_member,
     status_for_member, view_for_member,
 };
+pub use effective::{
+    effective_capabilities, effective_capabilities_by_fingerprint, effective_hostname,
+    effective_hostname_by_fingerprint,
+};
 pub use hostname::{HostnameError, HostnameLabel};
 pub use identity::{SignKey, TrustDomainRoot, VerifyKey};
 pub use join::JoinRequest;
@@ -65,8 +70,8 @@ pub use lan_recovery::{LanRecoveryError, apply_lan_recovered_network_state};
 pub use member_cert::{Capabilities, MemberCert, UnsignedMemberCert};
 pub use network_bootstrap::{BootstrapError, NetworkBootstrap};
 pub use network_state::{
-    AssignedIpv4, IpAssignment, MemberCertIndexEntry, NetworkStatePayload, PeerHint,
-    SignedNetworkState, UnsignedNetworkState,
+    AssignedIpv4, CapabilityGrant, HostnameBinding, IpAssignment, MemberCertIndexEntry,
+    NetworkStatePayload, PeerHint, SignedNetworkState, UnsignedNetworkState,
 };
 pub use network_state_receiver::{
     NetworkStateReceiveError, NetworkStateReceiveReport, receive_network_state,

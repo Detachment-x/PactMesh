@@ -3,7 +3,12 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV
 use pnet::ipnetwork::IpNetwork;
 
 use crate::{
-    common::{error::Error, global_ctx::ArcGlobalCtx, idn, network::{is_usable_interface_ipv4, IPCollector}},
+    common::{
+        error::Error,
+        global_ctx::ArcGlobalCtx,
+        idn,
+        network::{IPCollector, is_usable_interface_ipv4},
+    },
     connector::dns_connector::DnsTunnelConnector,
     proto::common::PeerFeatureFlag,
     tunnel::{
@@ -314,10 +319,7 @@ mod tests {
 
     #[test]
     fn private_ipv4_family_recognizes_rfc1918_ranges() {
-        assert_eq!(
-            private_ipv4_family("10.0.0.100".parse().unwrap()),
-            Some(10)
-        );
+        assert_eq!(private_ipv4_family("10.0.0.100".parse().unwrap()), Some(10));
         assert_eq!(
             private_ipv4_family("172.16.4.8".parse().unwrap()),
             Some(172)

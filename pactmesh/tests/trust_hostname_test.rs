@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, net::IpAddr, path::Path, process::Command, str:
 use ed25519_dalek::SigningKey;
 use pactmesh::trust::{
     ACL_SCHEMA_VERSION, AclPolicy, Action, Capabilities, HostnameLabel, MemberCertIndexEntry,
-    NetworkLocalId, NetworkStatePayload, RevocationReason, SignedNetworkState, TrustDomainRoot,
-    UnsignedMemberCert, UnsignedNetworkState, to_canonical_cbor,
+    NetworkLocalId, NetworkStatePayload, SignedNetworkState, TrustDomainRoot, UnsignedMemberCert,
+    UnsignedNetworkState, to_canonical_cbor,
 };
 use pnet::ipnetwork::IpNetwork as IpNet;
 use rand::rngs::OsRng;
@@ -51,6 +51,9 @@ fn build_state(
             acl: to_canonical_cbor(&acl),
             routes: Vec::new(),
             peer_hints: Vec::new(),
+            ip_assignments: Vec::new(),
+            capability_grants: Vec::new(),
+            hostname_bindings: Vec::new(),
         },
     }
     .sign(root)
@@ -202,27 +205,30 @@ fn test_set_hostname_basic_succeeds() {
     );
     let state = read_state(dir.path(), &domain_id, &network_id);
     assert_eq!(state.details.version, 2);
-    assert_eq!(
-        state.details.payload.revoked_certs[0].reason_code,
-        RevocationReason::Superseded
+    // 统一模型：改主机名走 network_state 绑定，不重签、不吊销。
+    assert!(
+        state.details.payload.revoked_certs.is_empty(),
+        "hostname edit must not revoke/reissue"
     );
-    let reissued = std::fs::read_dir(
-        trust_domains_dir(dir.path())
-            .join(&domain_id)
-            .join("networks")
-            .join(&network_id)
-            .join("member_certs"),
-    )
-    .unwrap()
-    .count();
-    assert_eq!(reissued, 3);
+    // 证书指纹保持稳定（仍在名册中）。
     assert!(
         state
             .details
             .payload
             .member_cert_index
             .iter()
-            .any(|entry| entry.fingerprint != fp_a)
+            .any(|entry| entry.fingerprint == fp_a)
+    );
+    let binding = state
+        .details
+        .payload
+        .hostname_bindings
+        .iter()
+        .find(|b| b.cert_fingerprint == fp_a)
+        .expect("hostname binding present");
+    assert_eq!(
+        binding.hostname.as_ref().map(|h| h.as_str()),
+        Some("macbook")
     );
     let _ = root;
 }
@@ -307,18 +313,25 @@ fn test_unset_hostname_removes_assignment() {
         String::from_utf8_lossy(&output.stderr)
     );
     let state = read_state(dir.path(), &domain_id, &network_id);
+    // 指纹稳定、无吊销。
     assert!(
         state
             .details
             .payload
             .member_cert_index
             .iter()
-            .any(|entry| entry.fingerprint != fp_a)
+            .any(|entry| entry.fingerprint == fp_a)
     );
-    assert_eq!(
-        state.details.payload.revoked_certs[0].reason_code,
-        RevocationReason::Superseded
-    );
+    assert!(state.details.payload.revoked_certs.is_empty());
+    // 清除 = 绑定存在且 hostname 为 None。
+    let binding = state
+        .details
+        .payload
+        .hostname_bindings
+        .iter()
+        .find(|b| b.cert_fingerprint == fp_a)
+        .expect("clear binding present");
+    assert!(binding.hostname.is_none());
 }
 
 #[test]
@@ -352,7 +365,7 @@ fn test_set_after_unset_succeeds() {
 }
 
 #[test]
-fn test_set_writes_revoked_old_cert() {
+fn test_set_writes_state_binding_no_revoke() {
     let dir = tempfile::tempdir().unwrap();
     let (domain_id, network_id, _root, fp_a, _) = setup_network(dir.path());
 
@@ -374,13 +387,14 @@ fn test_set_writes_revoked_old_cert() {
         String::from_utf8_lossy(&output.stderr)
     );
     let state = read_state(dir.path(), &domain_id, &network_id);
+    assert!(state.details.payload.revoked_certs.is_empty());
     assert!(
         state
             .details
             .payload
-            .revoked_certs
+            .hostname_bindings
             .iter()
-            .any(|revoked| revoked.cert_fingerprint == fp_a
-                && revoked.reason_code == RevocationReason::Superseded)
+            .any(|b| b.cert_fingerprint == fp_a
+                && b.hostname.as_ref().map(|h| h.as_str()) == Some("macbook"))
     );
 }

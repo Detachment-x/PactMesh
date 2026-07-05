@@ -51,9 +51,9 @@ const FORMS = [
   },
   {
     key: 'relay-serving', api: 'cfgRelayServing', title: '中继服务', btn: '下发', action: true,
-    desc: '为其他信任域提供中继/打洞协助（按对方 root 公钥授权，限时）。',
+    desc: '为其他网络提供中继/打洞协助（按对方管理公钥授权，限时）。',
     fields: [
-      { name: 'foreign_root_pk_hex', label: '对方 root 公钥', ph: 'hex…', mono: true },
+      { name: 'foreign_root_pk_hex', label: '对方管理公钥', ph: 'hex…', mono: true },
       { name: 'can_relay_data', label: '中继数据', type: 'check' },
       { name: 'can_assist_holepunch', label: '协助打洞', type: 'check' },
       { name: 'ttl_secs', label: '有效期（秒）', type: 'num', def: '3600' },

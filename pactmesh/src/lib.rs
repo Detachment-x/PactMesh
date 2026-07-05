@@ -23,9 +23,9 @@ pub mod proto;
 pub mod rpc_service;
 pub mod secret_seal;
 pub mod service_manager;
-pub mod trust;
 #[cfg(windows)]
 pub mod tray;
+pub mod trust;
 pub mod tui;
 pub mod tunnel;
 pub mod utils;

@@ -32,6 +32,9 @@ fn state(
                 updated_at: 100,
                 expires_at: Some(2_000_000_000),
             }],
+            ip_assignments: Vec::new(),
+            capability_grants: Vec::new(),
+            hostname_bindings: Vec::new(),
         },
     }
     .sign(root)

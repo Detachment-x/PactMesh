@@ -52,6 +52,9 @@ fn network_state(root: &TrustDomainRoot) -> SignedNetworkState {
             acl: Vec::new(),
             routes: Vec::new(),
             peer_hints: Vec::new(),
+            ip_assignments: Vec::new(),
+            capability_grants: Vec::new(),
+            hostname_bindings: Vec::new(),
         },
     }
     .sign(root)

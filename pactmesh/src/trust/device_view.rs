@@ -178,14 +178,18 @@ pub fn view_for_member(
         expires_at: entry.expires_at,
         status: status_for_member(&entry.fingerprint, state, entry.expires_at, now),
         capabilities: cert
-            .map(|cert| DeviceCapabilityView::from_capabilities(&cert.details.capabilities))
+            .map(|cert| {
+                DeviceCapabilityView::from_capabilities(&super::effective::effective_capabilities(
+                    cert, state,
+                ))
+            })
             .unwrap_or_else(|| DeviceCapabilityView {
                 relay_data: false,
                 relay_control: false,
                 proxy_subnets: Vec::new(),
             }),
         hostname: cert
-            .and_then(|cert| cert.details.hostname.as_ref())
+            .and_then(|cert| super::effective::effective_hostname(cert, state))
             .map(|hostname| hostname.as_str().to_owned())
             .unwrap_or_default(),
         assigned_ipv4,

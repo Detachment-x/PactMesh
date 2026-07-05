@@ -116,8 +116,23 @@ function TopBar() {
       </div>
       <NetworkPicker />
       <div class="topbar-spacer" />
+      <ServiceStatus />
       <LockPill />
     </header>
+  )
+}
+
+// 常驻服务状态：后台 daemon 是否可达（instances 轮询成败）。所有界面可见，含初始 onboarding。
+function ServiceStatus() {
+  const { daemonReachable } = useApp()
+  return (
+    <span
+      class={'svc-status' + (daemonReachable ? ' ok' : ' down')}
+      title={daemonReachable ? '后台服务已连接' : '后台服务未连接——请启动 PactMesh 服务'}
+    >
+      <span class="svc-dot" />
+      {daemonReachable ? '服务正常' : '服务未连接'}
+    </span>
   )
 }
 
@@ -131,44 +146,39 @@ function NetworkPicker() {
     return () => document.removeEventListener('click', onDoc)
   }, [])
 
-  const hasAny = domains.some((d) => d.networks.length)
+  // 扁平化切换器：直接列出所有网络（域分组隐藏），各带「管理员/成员」角色徽标。
+  const nets = domains.flatMap((d) =>
+    d.networks.map((nid) => ({ td: d.trust_domain_id, nid, isRoot: !!d.is_root_holder })),
+  )
+  const hasAny = nets.length > 0
   return (
     <div class="net-picker" ref={ref}>
       <button class="net-trigger" onClick={() => setOpen((o) => !o)} disabled={!hasAny}>
         <span class="net-dot" />
         <span class="net-name">
-          {network ? network.label : domainsLoading ? '加载中…' : hasAny ? '选择网络' : '暂无网络'}
+          {network ? network.nid : domainsLoading ? '加载中…' : hasAny ? '选择网络' : '暂无网络'}
         </span>
         <span class="caret">▾</span>
       </button>
       {open && hasAny && (
         <div class="net-menu">
-          {domains
-            .filter((d) => d.networks.length)
-            .map((d) => (
-              <div key={d.trust_domain_id} class="net-group">
-                <div class="net-group-title">
-                  {d.label || d.trust_domain_id.slice(0, 8)}
-                  {d.is_root_holder && <span class="tag-root">主控</span>}
-                </div>
-                {d.networks.map((nid) => {
-                  const sel = network && network.td === d.trust_domain_id && network.nid === nid
-                  return (
-                    <div
-                      key={nid}
-                      class={'net-item' + (sel ? ' active' : '')}
-                      onClick={() => {
-                        selectNetwork(d.trust_domain_id, nid)
-                        setOpen(false)
-                      }}
-                    >
-                      <code>{nid}</code>
-                      {sel && <span class="check">✓</span>}
-                    </div>
-                  )
-                })}
+          {nets.map(({ td, nid, isRoot }) => {
+            const sel = network && network.td === td && network.nid === nid
+            return (
+              <div
+                key={td + ' ' + nid}
+                class={'net-item' + (sel ? ' active' : '')}
+                onClick={() => {
+                  selectNetwork(td, nid)
+                  setOpen(false)
+                }}
+              >
+                <code>{nid}</code>
+                <span class={'badge-role ' + (isRoot ? 'role-root' : 'role-cred-soft')}>{isRoot ? '管理员' : '成员'}</span>
+                {sel && <span class="check">✓</span>}
               </div>
-            ))}
+            )
+          })}
         </div>
       )}
     </div>
@@ -199,7 +209,12 @@ function Page({ id, title, onNavigate }) {
     <div class="page">
       <div class="page-head">
         <h1>{title}</h1>
-        {network && <div class="page-sub">网络 {network.label} · <code>{network.nid}</code></div>}
+        {network && (
+          <div class="page-sub">
+            网络 <code>{network.nid}</code>
+            <span class={'badge-role ' + (network.isRoot ? 'role-root' : 'role-cred-soft')}>{network.isRoot ? '管理员' : '成员'}</span>
+          </div>
+        )}
       </div>
       {id === 'overview' ? (
         <Overview onNavigate={onNavigate} />
@@ -216,7 +231,7 @@ function Page({ id, title, onNavigate }) {
       ) : id === 'config' ? (
         <Config />
       ) : id === 'advanced' ? (
-        // 设置>高级：信任治理危险区（建域/建网/升根）+ 临时设备密钥（R2 落位）。
+        // 设置>高级：信任治理危险区（新建网络/升级管理员）+ 临时设备密钥（R2 落位）。
         <Advanced />
       ) : (
         <div class="placeholder">
