@@ -95,7 +95,7 @@ export function Network({ onNavigate }) {
   const routeOp = async (action, cidr) => {
     try {
       await api.cfgProxyNetwork({ action, cidr })
-      toast.ok(action === 'add' ? '已添加本机通告网段' : '已移除')
+      toast.ok(action === 'add' ? '已添加本机子网路由' : '已移除')
       routes.refresh(); node.refresh()
       return true
     } catch (e) {
@@ -151,8 +151,8 @@ export function Network({ onNavigate }) {
           </dd>
         </dl>
         <p class="muted">
-          未指派的设备默认<strong>自助分配</strong>虚拟 IPv4（DHCP，冲突自动重选）。设置地址池后，可在下方设备表逐台
-          <strong>自动分配</strong>或指派固定 IP，经 root 签名的网络状态实时下发。
+          未指派的设备使用<strong>动态 IP</strong>（节点自行获取，可能变化）。设置<strong>地址池</strong>后，可在下方设备表逐台点
+          <strong>自动分配</strong>从池中取一个空闲的固定 IP，或手动填写固定 IP——经签名网络状态实时下发、稳定不变。
         </p>
       </div>
 
@@ -164,10 +164,10 @@ export function Network({ onNavigate }) {
 
       {/* 托管路由（本机通告可编辑） */}
       <div class="card">
-        <div class="card-title">托管路由</div>
-        <p class="muted">网络内各设备对外通告、经其可达的网段。<strong>本机</strong>通告的网段可在此增删（作用于本机、经数据面下发）。</p>
+        <div class="card-title">子网路由</div>
+        <p class="muted">如果这台设备连着一个别人也想访问的局域网（比如家里的 NAS、公司内网），把那个网段填进来，网络里其他设备就能经这台设备访问它——不必给每台内网设备都装 PactMesh。下表是全网各设备共享出来的网段；带「本机」的是你这台，可增删。</p>
         {runtimeDown ? (
-          <div class="card-degrade"><Dot kind="err" label="daemon 未连接" /><span class="muted">启动 daemon 后显示并可编辑托管路由。</span></div>
+          <div class="card-degrade"><Dot kind="err" label="daemon 未连接" /><span class="muted">启动 daemon 后显示并可编辑子网路由。</span></div>
         ) : (
           <>
             {managed.length > 0 && (
@@ -180,7 +180,7 @@ export function Network({ onNavigate }) {
                         <td class="mono-cell">{m.cidr}</td>
                         <td>{m.via}{m.self && <span class="badge-role role-root">本机</span>}</td>
                         <td class="ta-right">
-                          {m.self && <button class="icon-btn danger" title="移除本机通告" onClick={() => routeOp('remove', m.cidr)}>✕</button>}
+                          {m.self && <button class="icon-btn danger" title="移除本机子网路由" onClick={() => routeOp('remove', m.cidr)}>✕</button>}
                         </td>
                       </tr>
                     ))}
@@ -188,7 +188,7 @@ export function Network({ onNavigate }) {
                 </table>
               </div>
             )}
-            {!managed.length && <p class="muted">暂无对外通告的网段。</p>}
+            {!managed.length && <p class="muted">暂无共享的网段。</p>}
             <div class="inline-field route-add">
               <input
                 class="field mono"
@@ -197,7 +197,7 @@ export function Network({ onNavigate }) {
                 onInput={(e) => setNewRoute(e.currentTarget.value)}
                 onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addRoute())}
               />
-              <button class="btn btn-sm" onClick={addRoute}>添加本机通告</button>
+              <button class="btn btn-sm" onClick={addRoute}>添加本机子网</button>
             </div>
           </>
         )}

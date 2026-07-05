@@ -25,6 +25,9 @@ message InstanceConfigPatch {
   repeated UrlPatch mapped_listeners = 9;
   repeated UrlPatch connectors = 10;
   repeated RelayServingPatch relay_serving = 11;
+  // MagicDNS 运行时热切：开关 + 顶级区。两者任一有值即触发 NIC ctx 重建。
+  optional bool accept_dns = 12;
+  optional string tld_dns_zone = 13;
 }
 
 message PortForwardPatch {

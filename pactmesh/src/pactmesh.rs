@@ -529,6 +529,25 @@ fn spawn_quickstart_daemon(
         .with_context(|| format!("failed to start {}", core.display()))
 }
 
+/// 由 network_local_id 派生 MagicDNS 顶级区（`<nid>.pm.`），与控制器建网/加入路径
+/// (`controller::routes`) 保持一致，使 CLI 引导的节点默认启用同名区。
+fn magic_dns_zone(network_local_id: &str) -> String {
+    let sanitized: String = network_local_id
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .collect();
+    let base = sanitized.trim_matches('-');
+    let base = if base.is_empty() { "net" } else { base };
+    format!("{base}.pm.")
+}
+
+/// 覆盖层网络身份 `{td}/{nid}`（镜像 controller::routes::overlay_network_name，bin 与
+/// lib 跨 crate 边界故复刻）。全网各节点算出同值 → 同域互通、跨域同 nid 不撞名。
+fn overlay_network_name(trust_domain_id: &str, network_local_id: &str) -> String {
+    format!("{trust_domain_id}/{network_local_id}")
+}
+
 fn quickstart_json_field(text: &str, field: &str) -> Result<String, Error> {
     let value: serde_json::Value = serde_json::from_str(text)
         .with_context(|| format!("failed to parse JSON output: {text}"))?;
@@ -2665,13 +2684,19 @@ impl<'a> CommandHandler<'a> {
         let log_path = pnw_config_dir()?.join("pactmesh-core-quickstart.log");
         let rpc_arg = format!("{}:{}", rpc_portal.ip(), rpc_portal.port());
         let no_tun = if args.no_tun { "true" } else { "false" };
+        let dns_zone = magic_dns_zone(&args.network_id);
+        let overlay_name = overlay_network_name(&trust_domain_id, &args.network_id);
         let daemon_args = [
             "--network-name",
-            &args.network_id,
+            &overlay_name,
             "--trust-domain-dir",
             domain_dir_str,
             "--network-local-id",
             &args.network_id,
+            "--accept-dns",
+            "true",
+            "--tld-dns-zone",
+            &dns_zone,
             "--rpc-portal",
             &rpc_arg,
             "--listeners",
@@ -2812,13 +2837,19 @@ impl<'a> CommandHandler<'a> {
         let log_path = config_dir.join("pactmesh-core-serve.log");
         let rpc_arg = format!("{}:{}", rpc_portal.ip(), rpc_portal.port());
         let no_tun = if config.no_tun { "true" } else { "false" };
+        let dns_zone = magic_dns_zone(&config.network_id);
+        let overlay_name = overlay_network_name(&config.trust_domain_id, &config.network_id);
         let daemon_args = [
             "--network-name",
-            &config.network_id,
+            &overlay_name,
             "--trust-domain-dir",
             domain_dir_str,
             "--network-local-id",
             &config.network_id,
+            "--accept-dns",
+            "true",
+            "--tld-dns-zone",
+            &dns_zone,
             "--rpc-portal",
             &rpc_arg,
             "--listeners",

@@ -100,6 +100,7 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/config/relay-serving", post(api_cfg_relay_serving))
         .route("/api/config/hostname", post(api_cfg_hostname))
         .route("/api/config/ipv4", post(api_cfg_ipv4))
+        .route("/api/config/dns", post(api_cfg_dns))
         .route("/api/config/whitelist", post(api_cfg_whitelist))
         .route("/api/config/acl", post(api_cfg_acl))
         .route("/api/trust/create-domain", post(api_trust_create_domain))
@@ -1713,6 +1714,33 @@ async fn api_cfg_ipv4(State(s): State<AppState>, Json(req): Json<Ipv4CfgReq>) ->
 }
 
 #[derive(Deserialize)]
+struct DnsCfgReq {
+    /// MagicDNS 开关。
+    enable: bool,
+    /// 顶级区（如 "home.pm."）；空则沿用当前区。
+    #[serde(default)]
+    zone: String,
+}
+
+async fn api_cfg_dns(State(s): State<AppState>, Json(req): Json<DnsCfgReq>) -> Response {
+    patch_response(
+        apply_patch(
+            &s,
+            InstanceConfigPatch {
+                accept_dns: Some(req.enable),
+                tld_dns_zone: if req.zone.is_empty() {
+                    None
+                } else {
+                    Some(req.zone)
+                },
+                ..Default::default()
+            },
+        )
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
 struct WhitelistCfgReq {
     /// "tcp" 或 "udp"。
     kind: String,
@@ -1852,6 +1880,40 @@ struct NetworkRunReq {
     no_tun: bool,
 }
 
+/// 由 network_local_id 派生 MagicDNS 顶级区（`<nid>.pm.`）。nid 消毒为 DNS 标签：
+/// 小写、非 [a-z0-9-] → '-'、去首尾 '-'，空则回退 "net"。全网各节点同 nid → 同区。
+fn magic_dns_zone(network_local_id: &str) -> String {
+    let sanitized: String = network_local_id
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .collect();
+    let base = sanitized.trim_matches('-');
+    let base = if base.is_empty() { "net" } else { base };
+    format!("{base}.pm.")
+}
+
+/// 覆盖层网络身份：`{td}/{nid}`。td 为 URL-safe base64（不含 '/'）→ 分隔无歧义；
+/// 全网各节点由共享 (td,nid) 算出同值 → 同域互通，跨域同 nid 不再撞名。
+fn overlay_network_name(trust_domain_id: &str, network_local_id: &str) -> String {
+    format!("{trust_domain_id}/{network_local_id}")
+}
+
+/// 同一 daemon 可挂多个网络实例，监听端口不能撞（tunnel 未启 SO_REUSEPORT）。每实例实占
+/// 两口：peer 口 `P` + 入网准入 RPC 口 `P+1`（instance.rs `derive_join_admission_url`）。
+/// 用试绑探测——唯一可靠信号：不依赖各实例配置回读（quickstart CLI 起的首实例经
+/// `get_network_instance_config` 不含 listener_urls，回读会漏占）。从 11010 起按 2 步长
+/// 找首个 `[P,P+1]` 全空块：首网得 11010（旧 seed/邀请仍命中），后续网络顺延；额外网 seed
+/// 由 peer_hints/手填承担，不依赖固定口。探测 socket 即绑即释 → daemon 随后可绑同口。
+fn default_listener_url() -> anyhow::Result<String> {
+    let free = |p: u16| std::net::TcpListener::bind(("0.0.0.0", p)).is_ok();
+    (11010..u16::MAX)
+        .step_by(2)
+        .find(|&p| free(p) && free(p + 1))
+        .map(|p| format!("tcp://0.0.0.0:{p}"))
+        .ok_or_else(|| anyhow::anyhow!("no free listener port block ≥11010"))
+}
+
 /// 对**运行中**空载 daemon 挂载信任域网络实例（不重启）。设备钥为 raw（免口令），
 /// 实例 toml 恒持久化 → 开机自动重连。返回 inst_id 串。
 /// 建网(`api_network_run`)与经邀请加入(`api_join_status`)共用此尾部。
@@ -1866,7 +1928,7 @@ async fn attach_trust_network(
     let domain_dir = crate::common::config_dir::pnw_trust_domains_dir()?.join(trust_domain_id);
     let domain_dir_str = domain_dir.to_string_lossy().into_owned();
     let listeners = if listeners.is_empty() {
-        vec!["tcp://0.0.0.0:11010".to_string()]
+        vec![default_listener_url()?]
     } else {
         listeners
     };
@@ -1878,11 +1940,13 @@ async fn attach_trust_network(
         NetworkingMethod::Manual
     };
     let nc = NetworkConfig {
-        network_name: Some(network_local_id.to_string()),
+        network_name: Some(overlay_network_name(trust_domain_id, network_local_id)),
         networking_method: Some(networking_method as i32),
         listener_urls: listeners,
         peer_urls: peers,
         no_tun: Some(no_tun),
+        enable_magic_dns: Some(true),
+        tld_dns_zone: Some(magic_dns_zone(network_local_id)),
         trust_domain: Some(TrustDomainLocator {
             trust_domain_dir: domain_dir_str,
             network_local_id: network_local_id.to_string(),

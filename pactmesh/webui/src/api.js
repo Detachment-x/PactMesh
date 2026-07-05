@@ -116,6 +116,7 @@ export const api = {
   cfgExitNode: (body) => postJson('/api/config/exit-node', body),
   cfgRelayServing: (body) => postJson('/api/config/relay-serving', body),
   cfgHostname: (hostname) => postJson('/api/config/hostname', { hostname }),
+  cfgDns: (enable, zone) => postJson('/api/config/dns', { enable, zone: zone || '' }),
   cfgIpv4: (ipv4) => postJson('/api/config/ipv4', { ipv4 }),
   cfgWhitelist: (body) => postJson('/api/config/whitelist', body),
 

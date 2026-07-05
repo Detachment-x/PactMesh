@@ -84,8 +84,8 @@ function runtimeIndex(peers, routes, selfNode) {
 // 指派/虚拟 IP 单元格显示：已指派 → 绿色 chip；否则运行时自分配地址（灰）或「自分配」。
 function ipCellDisplay(assigned, r) {
   if (assigned) return <span class="chip chip-ok"><code>{assigned}</code></span>
-  if (r && r.overlayV4 && r.overlayV4 !== '—') return <span class="mono muted" title="运行时自分配">{r.overlayV4}</span>
-  return <span class="muted">自分配</span>
+  if (r && r.overlayV4 && r.overlayV4 !== '—') return <span class="mono muted" title="动态 IP（节点自行获取）">{r.overlayV4}</span>
+  return <span class="muted">动态</span>
 }
 
 // 网络中心页内嵌的治理名册：轮询与地址池由父页 `network.jsx` 统一持有并下传，
@@ -174,7 +174,7 @@ export function DeviceRoster({ members, peers, routes, node, pool, onAutoAssign 
               <tr>
                 <th>设备</th>
                 <th>{isRoot ? '启用' : '状态'}</th>
-                <th>主机名</th>
+                <th>hostname</th>
                 <th>指派 / 虚拟 IP</th>
                 <th>连接</th>
                 <th>延迟</th>
@@ -223,9 +223,9 @@ export function DeviceRoster({ members, peers, routes, node, pool, onAutoAssign 
                         <InlineEdit
                           value={d.hostname || ''}
                           mono
-                          title={d.hostname ? '点击编辑（留空清除）' : '点击设置主机名'}
-                          onCommit={(v) => gov(() => api.hostname(fp, v || undefined), v ? '主机名已更新' : '主机名已清除')}
-                          render={(v) => v ? <span class="mono">{v}</span> : <span class="muted" title="设主机名后可显示在线状态与虚拟 IP">—</span>}
+                          title={d.hostname ? '点击编辑（留空清除）' : '点击设置 hostname'}
+                          onCommit={(v) => gov(() => api.hostname(fp, v || undefined), v ? 'hostname 已更新' : 'hostname 已清除')}
+                          render={(v) => v ? <span class="mono">{v}</span> : <span class="muted" title="设 hostname 后可显示在线状态与虚拟 IP">—</span>}
                         />
                       ) : (d.hostname || <span class="muted">—</span>)}
                     </td>
@@ -236,7 +236,7 @@ export function DeviceRoster({ members, peers, routes, node, pool, onAutoAssign 
                             value={d.assigned_ipv4 || ''}
                             placeholder="10.10.0.2/24"
                             mono
-                            title={d.assigned_ipv4 ? '点击改派（留空清除回退自分配）' : '点击指派固定 IP'}
+                            title={d.assigned_ipv4 ? '点击改派（留空清除回退动态 IP）' : '点击指派固定 IP'}
                             onCommit={(v) => gov(() => api.assignedIpv4(fp, v || null), v ? '已指派 IP' : '已清除指派')}
                             render={(v) => ipCellDisplay(v, r)}
                           />
@@ -360,7 +360,7 @@ function RevokeDialog({ device, onCancel, onConfirm }) {
 // 连接列：无主机名 → —（带提示）；有主机名未上线 → 离线；在线 → 直连/中继 + 隧道；本机 → 本机。
 function connCell(r, hostname) {
   if (!r) {
-    if (!hostname) return <span class="muted" title="设主机名后可显示在线/IP">—</span>
+    if (!hostname) return <span class="muted" title="设 hostname 后可显示在线/IP">—</span>
     return <Dot kind="muted" label="离线" />
   }
   if (r.isSelf) return <span class="chip chip-ok">本机</span>

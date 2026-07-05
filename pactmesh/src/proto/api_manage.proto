@@ -102,6 +102,9 @@ message NetworkConfig {
   // passphrase itself is NEVER sent here (delivered via the sealed sk_self.seal
   // file or the daemon environment).
   optional TrustDomainLocator trust_domain = 62;
+
+  // MagicDNS 顶级区（如 "home.pm."）；空 → daemon 默认。建网时设定，全网各节点共用一个区。
+  optional string tld_dns_zone = 63;
 }
 
 message TrustDomainLocator {

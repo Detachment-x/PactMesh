@@ -269,6 +269,10 @@ pub struct InstanceConfigPatcher {
     socks5_server: Weak<Socks5Server>,
     peer_manager: Weak<PeerManager>,
     conn_manager: Weak<ManualConnectorManager>,
+    #[cfg(feature = "tun")]
+    nic_ctx: ArcNicCtx,
+    #[cfg(feature = "tun")]
+    peer_packet_receiver: Arc<Mutex<PacketRecvChanReceiver>>,
 }
 
 impl InstanceConfigPatcher {
@@ -303,8 +307,66 @@ impl InstanceConfigPatcher {
             global_ctx.config.set_ipv6(Some(ipv6.into()));
         }
 
+        #[cfg(all(not(mobile), feature = "tun", feature = "magic-dns"))]
+        self.patch_magic_dns(patch.accept_dns, patch.tld_dns_zone)
+            .await?;
+
         global_ctx.issue_event(GlobalCtxEvent::ConfigPatched(patch_for_event));
 
+        Ok(())
+    }
+
+    /// MagicDNS 运行时热切：改 accept_dns / tld_dns_zone 后一次性重建 NIC ctx，
+    /// 让 DnsRunner 随新区或开关重新拉起 / 撤下。仅在 tun、非 no_tun 且本机已有 IP 时
+    /// 就地重建；否则只落 flags，交由 static-ip / dhcp 循环首建 NIC 时读取。
+    #[cfg(all(not(mobile), feature = "tun", feature = "magic-dns"))]
+    async fn patch_magic_dns(
+        &self,
+        accept_dns: Option<bool>,
+        tld_dns_zone: Option<String>,
+    ) -> Result<(), anyhow::Error> {
+        if accept_dns.is_none() && tld_dns_zone.is_none() {
+            return Ok(());
+        }
+        let global_ctx = weak_upgrade(&self.global_ctx)?;
+
+        let mut flags = global_ctx.get_flags();
+        if let Some(accept) = accept_dns {
+            flags.accept_dns = accept;
+        }
+        if let Some(zone) = tld_dns_zone
+            && !zone.is_empty()
+        {
+            flags.tld_dns_zone = zone;
+        }
+        let no_tun = flags.no_tun;
+        global_ctx.set_flags(flags);
+
+        let ipv4_addr = global_ctx.get_ipv4();
+        let ipv6_addr = global_ctx.get_ipv6();
+        if no_tun || (ipv4_addr.is_none() && ipv6_addr.is_none()) {
+            return Ok(());
+        }
+
+        let Some(peer_mgr) = self.peer_manager.upgrade() else {
+            return Err(anyhow::anyhow!("peer manager not available"));
+        };
+
+        let mut new_nic_ctx = NicCtx::new(
+            peer_mgr.get_global_ctx(),
+            &peer_mgr,
+            self.peer_packet_receiver.clone(),
+            Arc::new(Notify::new()),
+        );
+        new_nic_ctx.run(ipv4_addr, ipv6_addr).await?;
+
+        let ifname = new_nic_ctx.ifname().await;
+        let dns_runner = if let Some(ipv4) = ipv4_addr {
+            Instance::create_magic_dns_runner(peer_mgr, ifname, ipv4)
+        } else {
+            None
+        };
+        Instance::use_new_nic_ctx(self.nic_ctx.clone(), new_nic_ctx, dns_runner).await;
         Ok(())
     }
 
@@ -1835,6 +1897,10 @@ impl Instance {
             socks5_server: Arc::downgrade(&self.socks5_server),
             peer_manager: Arc::downgrade(&self.peer_manager),
             conn_manager: Arc::downgrade(&self.conn_manager),
+            #[cfg(feature = "tun")]
+            nic_ctx: self.nic_ctx.clone(),
+            #[cfg(feature = "tun")]
+            peer_packet_receiver: self.peer_packet_receiver.clone(),
         }
     }
 
