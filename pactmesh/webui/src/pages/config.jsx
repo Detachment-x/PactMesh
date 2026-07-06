@@ -1,8 +1,6 @@
 import { useState } from 'preact/hooks'
 import { api } from '../api.js'
-import { usePoll } from '../hooks.js'
-import { Toggle, Dot, useToast } from '../ui.jsx'
-import { dnsZone } from '../format.js'
+import { Toggle, useToast } from '../ui.jsx'
 
 // 配置下发动作（人话下拉，对齐后端 add|remove|clear）。
 const ACTION_OPTS = [['add', '添加'], ['remove', '移除'], ['clear', '清空']]
@@ -30,11 +28,6 @@ const FORMS = [
       { name: 'bind_addr', label: '本地绑定', ph: '127.0.0.1:8080', mono: true },
       { name: 'dst_addr', label: '目标地址', ph: '10.0.0.5:80', mono: true, optional: true },
     ],
-  },
-  {
-    key: 'route', api: 'cfgRoute', title: '路由', btn: '下发', action: true,
-    desc: '声明本机可达的网段，使其经本节点在网络内可路由。',
-    fields: [{ name: 'cidr', label: '网段', ph: '10.0.0.0/24', mono: true }],
   },
   {
     key: 'exit-node', api: 'cfgExitNode', title: '出口节点', btn: '下发', action: true,
@@ -139,86 +132,21 @@ function PatchCard({ form }) {
   )
 }
 
-// MagicDNS 可热切：开关走 InstanceConfigPatch.accept_dns，网络域走 tld_dns_zone；
-// 下发后 daemon 就地重建 TUN NIC 使 DnsRunner 随之拉起/撤下。状态取自 NetworkConfig
-// / NodeInfo（TOML），需 daemon 运行。
-function DnsCard() {
-  const toast = useToast()
-  const cfg = usePoll(api.config, [], 8000)
-  const node = usePoll(api.node, [], 8000)
-  const down = !!cfg.error || !!node.error
-  const curEnabled = cfg.data?.enable_magic_dns
-  const curZone = dnsZone(node.data?.node_info?.config)
-  const myHost = node.data?.node_info?.hostname
-
-  const [enable, setEnable] = useState(null)
-  const [zone, setZone] = useState('')
-  const [busy, setBusy] = useState(false)
-  // 未触碰开关时跟随当前状态；一旦用户改动即以本地值为准。
-  const eff = enable == null ? !!curEnabled : enable
-
-  const apply = async () => {
-    setBusy(true)
-    try {
-      await api.cfgDns(eff, zone.trim())
-      toast.ok('MagicDNS 已下发')
-      setZone('')
-    } catch (e) {
-      toast.err(`MagicDNS 下发失败：${e.message}`)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div class="card cfg-card">
-      <div class="card-title">MagicDNS</div>
-      <p class="muted cfg-desc">用 hostname 访问网络内设备（FQDN = hostname.网络域）。下发后本机 TUN 会短暂重建以生效。</p>
-      {down ? (
-        <div class="card-degrade"><Dot kind="err" label="daemon 未连接" /><span class="muted">启动 daemon 后可开关 MagicDNS。</span></div>
-      ) : (
-        <>
-          <dl class="kv">
-            <dt>当前状态</dt>
-            <dd>{curEnabled == null ? '—' : <Dot kind={curEnabled ? 'ok' : 'muted'} label={curEnabled ? '已启用' : '未启用'} />}</dd>
-            <dt>网络域</dt><dd class="mono">{curZone || '—'}</dd>
-            {curZone && myHost && (<><dt>本机 FQDN</dt><dd class="mono">{myHost}.{curZone}</dd></>)}
-          </dl>
-          <div class="cfg-row">
-            <Toggle label="启用 MagicDNS" checked={eff} onChange={setEnable} />
-            <label class="cfg-field">
-              <span class="cfg-label">网络域<small>留空保持</small></span>
-              <input
-                class="field field-sm mono"
-                type="text"
-                value={zone}
-                placeholder={curZone || 'home.pm.'}
-                onInput={(e) => setZone(e.currentTarget.value)}
-              />
-            </label>
-            <button class="btn btn-primary" disabled={busy} onClick={apply}>{busy ? '下发中…' : '下发'}</button>
-          </div>
-        </>
-      )}
-    </div>
-  )
-}
-
 // 按用途分区，避免一屏并列十张同质表单。
 const SECTIONS = [
   { key: 'access', title: '接入与监听', desc: '本机如何接入网络，以及对外暴露的端口。' },
-  { key: 'routing', title: '路由与网段', desc: '经本机可达的网段、出口节点与中继服务。' },
+  { key: 'routing', title: '出口与中继', desc: '经本机的全流量出口与为他人提供的中继服务。' },
 ]
 const SEC_OF = {
   connector: 'access', 'mapped-listener': 'access', 'port-forward': 'access', whitelist: 'access',
-  route: 'routing', 'exit-node': 'routing', 'relay-serving': 'routing',
+  'exit-node': 'routing', 'relay-serving': 'routing',
 }
 
 export function Config() {
   return (
     <>
       <div class="card card-degrade cfg-note">
-        <span class="muted">以下配置仅作用于<strong>本机节点</strong>，经本机 daemon 热重载下发（<strong>需 daemon 运行中</strong>）；下发后在「设备 / 诊断」查看生效结果。网络级设置（成员 IP、子网路由概览）见「网络」页。</span>
+        <span class="muted">以下均为<strong>本机节点</strong>的运行时配置，经本机 daemon 热重载下发（<strong>需 daemon 运行中</strong>），与具体网络无关；下发后在「诊断」查看生效结果。设备 IP、代理网段、名称解析等网络级设置见「网络」页。</span>
       </div>
       {SECTIONS.map((s) => (
         <section key={s.key} class="cfg-section">
@@ -229,13 +157,6 @@ export function Config() {
           {FORMS.filter((f) => SEC_OF[f.key] === s.key).map((f) => <PatchCard key={f.key} form={f} />)}
         </section>
       ))}
-      <section class="cfg-section">
-        <div class="cfg-section-head">
-          <h2>名称解析</h2>
-          <span class="muted">用 hostname 访问网络内设备（MagicDNS）。</span>
-        </div>
-        <DnsCard />
-      </section>
     </>
   )
 }

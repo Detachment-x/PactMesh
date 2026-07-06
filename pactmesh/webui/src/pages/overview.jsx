@@ -43,7 +43,9 @@ export function Overview({ onNavigate }) {
   }
 
   const info = node.data?.node_info
-  const onlineCount = peers.data?.peer_infos?.length
+  // peer_infos 不含本机；实例在跑时本机自身也在线，计数 +1。
+  const peerCount = peers.data?.peer_infos?.length
+  const onlineCount = peerCount === undefined ? undefined : peerCount + (attached ? 1 : 0)
   const memberCount = Array.isArray(members.data) ? members.data.length : undefined
   const pendingCount = Array.isArray(pending.data) ? pending.data.length : undefined
   const daemonDown = !!node.error

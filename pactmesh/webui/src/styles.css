@@ -53,7 +53,7 @@ body {
 /* ---------- 应用骨架（D0 空壳，D1 充实） ---------- */
 .app-shell {
   display: grid;
-  grid-template-rows: var(--topbar-h) 1fr;
+  grid-template-rows: auto 1fr;
   height: 100%;
 }
 
@@ -85,6 +85,54 @@ body {
 }
 
 .topbar-spacer { flex: 1; }
+
+/* ---------- 顶部两级导航（无左栏） ---------- */
+.topbar-stack {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.topbar-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 20px;
+}
+.topbar-row.primary { height: var(--topbar-h); }
+.topbar-row.tabs {
+  height: 42px;
+  gap: 2px;
+  padding: 0 14px;
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+}
+.nav-global { display: flex; gap: 4px; align-items: center; }
+.nav-pill {
+  padding: 5px 11px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.nav-pill:hover { background: var(--card); color: var(--text); }
+.nav-pill.active { background: var(--primary-soft); color: var(--primary-strong); font-weight: 600; }
+.nav-tabs { display: flex; gap: 2px; align-items: stretch; height: 100%; }
+.nav-tab {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  font-size: 13.5px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+}
+.nav-tab:hover { color: var(--text); }
+.nav-tab.active { color: var(--primary-strong); font-weight: 600; border-bottom-color: var(--primary); }
 
 .lock-pill {
   display: inline-flex;
@@ -625,7 +673,8 @@ body {
 .muted.small, p.small { font-size: 12px; }
 
 /* D7 a11y：键盘焦点环（仅键盘可见） */
-.nav-item:focus-visible, .metric.clickable:focus-visible, .onb-opt:focus-visible,
+.nav-item:focus-visible, .nav-pill:focus-visible, .nav-tab:focus-visible,
+.metric.clickable:focus-visible, .onb-opt:focus-visible,
 .btn:focus-visible, .field:focus-visible, .switch:focus-visible {
   outline: 2px solid var(--primary); outline-offset: 2px;
 }

@@ -64,10 +64,12 @@ export function ipList(il) {
 }
 
 // MagicDNS 网络域：从 NodeInfo.config（TOML 串）提取 tld_dns_zone（网络级常量，只读）。
+// 展示用：抹掉 FQDN 根点尾缀（home.pm. → home.pm），内部实际值仍是合法 FQDN。
 export function dnsZone(configStr) {
   if (!configStr || typeof configStr !== 'string') return null
   const m = configStr.match(/tld_dns_zone\s*=\s*"([^"]*)"/)
-  return (m && m[1].trim()) || null
+  const z = (m && m[1].trim().replace(/\.+$/, '')) || null
+  return z || null
 }
 
 export function sockAddr(sa) {

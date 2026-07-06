@@ -10,58 +10,43 @@ import { Config } from './pages/config.jsx'
 import { Advanced } from './pages/advanced.jsx'
 import { Onboarding } from './onboarding.jsx'
 
-// 锁定的信息架构（4 组导航，应用最终术语）。D2 起逐页充实。
-const NAV = [
-  { group: null, items: [{ id: 'overview', label: '概览' }] },
-  {
-    group: '网络',
-    items: [
-      { id: 'network', label: '网络' },
-      { id: 'pending', label: '待批' },
-    ],
-  },
-  {
-    group: '访问控制',
-    items: [
-      { id: 'policy', label: '访问策略' },
-      { id: 'groups', label: '分组' },
-    ],
-  },
-  {
-    group: '设置',
-    items: [
-      { id: 'config', label: '本机配置' },
-      { id: 'diagnostics', label: '诊断' },
-      { id: 'advanced', label: '高级' },
-    ],
-  },
+// 两级顶部导航（无左栏）。
+// 行2 — 网络级标签：随顶部切换器选中的网络而变（概览/网络/访问控制）。
+// 行1 — 全局项：与网络无关（全局待批 / 本机配置 / 诊断 / 高级）。
+// gov=true 的项仅对持根者可见：网络级按「选中网络」判定，全局项按「是否持有任一根网络」判定。
+const NET_TABS = [
+  { id: 'overview', label: '概览' },
+  { id: 'network', label: '网络' },
+  { id: 'policy', label: '访问策略', gov: true },
+  { id: 'groups', label: '分组', gov: true },
 ]
-
-const LABELS = Object.fromEntries(NAV.flatMap((g) => g.items).map((i) => [i.id, i.label]))
-
-// 治理专属页面：仅主控（持 root）可见；成员降级为精简只读 Console。
-const GOV_ONLY = new Set(['pending', 'policy', 'groups', 'advanced'])
+const GLOBAL_ITEMS = [
+  { id: 'pending', label: '待批', gov: true },
+  { id: 'config', label: '本机配置' },
+  { id: 'diagnostics', label: '诊断' },
+  { id: 'advanced', label: '高级', gov: true },
+]
+const LABELS = Object.fromEntries([...NET_TABS, ...GLOBAL_ITEMS].map((i) => [i.id, i.label]))
+const NET_IDS = new Set(NET_TABS.map((i) => i.id))
 
 export function App() {
   const [active, setActive] = useState('overview')
-  const { attached, instancesLoading, network } = useApp()
+  const { attached, instancesLoading, domains, network } = useApp()
   const isRoot = !!network?.isRoot
+  const anyRoot = domains.some((d) => d.is_root_holder && d.networks.length)
   // 「未加网」空状态（以 ListNetworkInstance 为键）：空载常驻 daemon 起着但零实例挂载
   // → 接管内容区，引导用户建网并运行时加网（不重启 daemon）。
   const onboarding = !instancesLoading && !attached
 
-  // 角色感知导航：成员隐藏治理页并剔除空分组。
-  const nav = NAV
-    .map((section) => ({
-      ...section,
-      items: section.items.filter((item) => isRoot || !GOV_ONLY.has(item.id)),
-    }))
-    .filter((section) => section.items.length)
+  const netTabs = NET_TABS.filter((t) => isRoot || !t.gov)
+  const globalItems = GLOBAL_ITEMS.filter((t) => anyRoot || !t.gov)
 
-  // 切到成员网络后若当前停在被隐藏的治理页 → 回落到概览。
+  // 当前页因角色变化被隐藏时回落到概览：网络级治理页按选中网络 isRoot，全局治理页按 anyRoot。
   useEffect(() => {
-    if (!isRoot && GOV_ONLY.has(active)) setActive('overview')
-  }, [isRoot, active])
+    const netTab = NET_TABS.find((t) => t.id === active)
+    const globItem = GLOBAL_ITEMS.find((t) => t.id === active)
+    if ((netTab?.gov && !isRoot) || (globItem?.gov && !anyRoot)) setActive('overview')
+  }, [isRoot, anyRoot, active])
 
   const go = (id) => (e) => {
     if (e && e.type === 'keydown') {
@@ -71,54 +56,51 @@ export function App() {
     setActive(id)
   }
 
-  return (
-    <div class="app-shell">
-      <TopBar />
-      <div class="body-grid">
-        <nav class="sidebar" aria-label="主导航">
-          {nav.map((section) => (
-            <div key={section.group ?? '_'}>
-              {section.group && <div class="nav-group-title">{section.group}</div>}
-              {section.items.map((item) => (
-                <div
-                  key={item.id}
-                  class={'nav-item' + (active === item.id ? ' active' : '')}
-                  role="button"
-                  tabIndex={0}
-                  aria-current={active === item.id ? 'page' : undefined}
-                  onClick={go(item.id)}
-                  onKeyDown={go(item.id)}
-                >
-                  <span>{item.label}</span>
-                </div>
-              ))}
-            </div>
-          ))}
-        </nav>
-        <main class="content">
-          {onboarding ? (
-            <Onboarding />
-          ) : (
-            <Page id={active} title={LABELS[active]} onNavigate={setActive} />
-          )}
-        </main>
-      </div>
+  const Tab = ({ id, label, kind }) => (
+    <div
+      class={kind + (active === id ? ' active' : '')}
+      role="button"
+      tabIndex={0}
+      aria-current={active === id ? 'page' : undefined}
+      onClick={go(id)}
+      onKeyDown={go(id)}
+    >
+      {label}
     </div>
   )
-}
 
-function TopBar() {
   return (
-    <header class="topbar">
-      <div class="brand">
-        <span class="brand-mark" />
-        PactMesh
-      </div>
-      <NetworkPicker />
-      <div class="topbar-spacer" />
-      <ServiceStatus />
-      <LockPill />
-    </header>
+    <div class="app-shell">
+      <header class="topbar-stack">
+        <div class="topbar-row primary">
+          <div class="brand">
+            <span class="brand-mark" />
+            PactMesh
+          </div>
+          <NetworkPicker />
+          <nav class="nav-global" aria-label="全局导航">
+            {globalItems.map((i) => <Tab key={i.id} id={i.id} label={i.label} kind="nav-pill" />)}
+          </nav>
+          <div class="topbar-spacer" />
+          <ServiceStatus />
+          <LockPill />
+        </div>
+        {network && (
+          <div class="topbar-row tabs">
+            <nav class="nav-tabs" aria-label="网络导航">
+              {netTabs.map((t) => <Tab key={t.id} id={t.id} label={t.label} kind="nav-tab" />)}
+            </nav>
+          </div>
+        )}
+      </header>
+      <main class="content">
+        {onboarding ? (
+          <Onboarding />
+        ) : (
+          <Page id={active} title={LABELS[active]} onNavigate={setActive} />
+        )}
+      </main>
+    </div>
   )
 }
 
@@ -202,14 +184,15 @@ function LockPill() {
   )
 }
 
-// 页面路由：已实现页直接渲染，其余 D3+ 逐步替换占位。
+// 页面路由：网络级页带网络副标；全局页仅标题。
 function Page({ id, title, onNavigate }) {
   const { network } = useApp()
+  const isNet = NET_IDS.has(id)
   return (
     <div class="page">
       <div class="page-head">
         <h1>{title}</h1>
-        {network && (
+        {isNet && network && (
           <div class="page-sub">
             网络 <code>{network.nid}</code>
             <span class={'badge-role ' + (network.isRoot ? 'role-root' : 'role-cred-soft')}>{network.isRoot ? '管理员' : '成员'}</span>

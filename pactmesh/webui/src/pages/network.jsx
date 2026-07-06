@@ -32,7 +32,6 @@ export function Network({ onNavigate }) {
   const node = usePoll(api.node, [], 4000)
 
   const [leaving, setLeaving] = useState(false)
-  const [newRoute, setNewRoute] = useState('')
   const [creating, setCreating] = useState(false)
   const [inviting, setInviting] = useState(false)
 
@@ -48,15 +47,7 @@ export function Network({ onNavigate }) {
 
   const list = Array.isArray(members.data) ? members.data : []
   const runtimeDown = !!routes.error && !!peers.error && !!node.error
-  const zone = dnsZone(my?.config)
   const poolData = pool.data || {}
-
-  // 托管路由：各节点对外通告、经其可达的网段（hostname/peer 维度）；本机行可增删。
-  const managed = []
-  if (my?.proxy_cidrs?.length) for (const c of my.proxy_cidrs) managed.push({ cidr: c, via: my.hostname || `节点 ${my.peer_id}`, self: true })
-  for (const r of routes.data?.routes || []) {
-    for (const c of r.proxy_cidrs || []) managed.push({ cidr: c, via: r.hostname || `节点 ${r.peer_id}`, self: false })
-  }
 
   // IP 池设置（控制器元数据，需主控解锁；非签名态）。
   const savePool = async (patch) => {
@@ -89,24 +80,6 @@ export function Network({ onNavigate }) {
     } catch (e) {
       toast.err(e.message)
     }
-  }
-
-  // 本机托管路由增删（daemon RPC，无需签名）。
-  const routeOp = async (action, cidr) => {
-    try {
-      await api.cfgProxyNetwork({ action, cidr })
-      toast.ok(action === 'add' ? '已添加本机子网路由' : '已移除')
-      routes.refresh(); node.refresh()
-      return true
-    } catch (e) {
-      toast.err(e.message)
-      return false
-    }
-  }
-  const addRoute = async () => {
-    const v = newRoute.trim()
-    if (!v) return
-    if (await routeOp('add', v)) setNewRoute('')
   }
 
   return (
@@ -162,56 +135,8 @@ export function Network({ onNavigate }) {
         <DeviceRoster members={members} peers={peers} routes={routes} node={node} pool={pool} onAutoAssign={autoAssign} />
       </div>
 
-      {/* 托管路由（本机通告可编辑） */}
-      <div class="card">
-        <div class="card-title">子网路由</div>
-        <p class="muted">如果这台设备连着一个别人也想访问的局域网（比如家里的 NAS、公司内网），把那个网段填进来，网络里其他设备就能经这台设备访问它——不必给每台内网设备都装 PactMesh。下表是全网各设备共享出来的网段；带「本机」的是你这台，可增删。</p>
-        {runtimeDown ? (
-          <div class="card-degrade"><Dot kind="err" label="daemon 未连接" /><span class="muted">启动 daemon 后显示并可编辑子网路由。</span></div>
-        ) : (
-          <>
-            {managed.length > 0 && (
-              <div class="table-wrap">
-                <table class="dtable">
-                  <thead><tr><th>网段</th><th>经由</th><th></th></tr></thead>
-                  <tbody>
-                    {managed.map((m, i) => (
-                      <tr key={i}>
-                        <td class="mono-cell">{m.cidr}</td>
-                        <td>{m.via}{m.self && <span class="badge-role role-root">本机</span>}</td>
-                        <td class="ta-right">
-                          {m.self && <button class="icon-btn danger" title="移除本机子网路由" onClick={() => routeOp('remove', m.cidr)}>✕</button>}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-            {!managed.length && <p class="muted">暂无共享的网段。</p>}
-            <div class="inline-field route-add">
-              <input
-                class="field mono"
-                value={newRoute}
-                placeholder="192.168.9.0/24"
-                onInput={(e) => setNewRoute(e.currentTarget.value)}
-                onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addRoute())}
-              />
-              <button class="btn btn-sm" onClick={addRoute}>添加本机子网</button>
-            </div>
-          </>
-        )}
-      </div>
-
-      {/* DNS（只读） */}
-      <div class="card">
-        <div class="card-title">名称解析<span class="badge-role role-cred-soft">只读</span></div>
-        {zone ? (
-          <dl class="kv"><dt>网络域</dt><dd class="mono">{zone}</dd></dl>
-        ) : (
-          <p class="muted">未启用 MagicDNS，或 daemon 未连接。详见「本机配置 › 名称解析」。</p>
-        )}
-      </div>
+      {/* 名称解析（MagicDNS，可开关 / 设网络域） */}
+      <DnsCard />
 
       {/* 网络管理入口（仅管理员）：邀请设备 + 同组新建平级网络 */}
       {isRoot && (
@@ -348,5 +273,70 @@ function NewNetworkModal({ td, onClose, onCreated }) {
         <input class="field" type="password" autocomplete="off" value={pass} placeholder="管理口令" onInput={(e) => setPass(e.currentTarget.value)} />
       </label>
     </Modal>
+  )
+}
+
+// 名称解析（MagicDNS）：属网络级设置。开关走 InstanceConfigPatch.accept_dns，网络域走
+// tld_dns_zone；下发后 daemon 就地重建 TUN NIC 使 DnsRunner 随之拉起/撤下。状态取自
+// NetworkConfig / NodeInfo（TOML），需 daemon 运行。展示层已抹掉 FQDN 根点尾缀。
+function DnsCard() {
+  const toast = useToast()
+  const cfg = usePoll(api.config, [], 8000)
+  const node = usePoll(api.node, [], 8000)
+  const down = !!cfg.error || !!node.error
+  const curEnabled = cfg.data?.enable_magic_dns
+  const curZone = dnsZone(node.data?.node_info?.config)
+  const myHost = node.data?.node_info?.hostname
+
+  const [enable, setEnable] = useState(null)
+  const [zone, setZone] = useState('')
+  const [busy, setBusy] = useState(false)
+  // 未触碰开关时跟随当前状态；一旦用户改动即以本地值为准。
+  const eff = enable == null ? !!curEnabled : enable
+
+  const apply = async () => {
+    setBusy(true)
+    try {
+      await api.cfgDns(eff, zone.trim())
+      toast.ok('MagicDNS 已下发')
+      setZone('')
+    } catch (e) {
+      toast.err(`MagicDNS 下发失败：${e.message}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div class="card cfg-card">
+      <div class="card-title">名称解析<span class="badge-role role-cred-soft">MagicDNS</span></div>
+      <p class="muted cfg-desc">用 hostname 访问网络内设备（FQDN = hostname.网络域）。下发后本机 TUN 会短暂重建以生效。</p>
+      {down ? (
+        <div class="card-degrade"><Dot kind="err" label="daemon 未连接" /><span class="muted">启动 daemon 后可开关 MagicDNS。</span></div>
+      ) : (
+        <>
+          <dl class="kv">
+            <dt>当前状态</dt>
+            <dd>{curEnabled == null ? '—' : <Dot kind={curEnabled ? 'ok' : 'muted'} label={curEnabled ? '已启用' : '未启用'} />}</dd>
+            <dt>网络域</dt><dd class="mono">{curZone || '—'}</dd>
+            {curZone && myHost && (<><dt>本机 FQDN</dt><dd class="mono">{myHost}.{curZone}</dd></>)}
+          </dl>
+          <div class="cfg-row">
+            <Toggle label="启用 MagicDNS" checked={eff} onChange={setEnable} />
+            <label class="cfg-field">
+              <span class="cfg-label">网络域<small>留空保持</small></span>
+              <input
+                class="field field-sm mono"
+                type="text"
+                value={zone}
+                placeholder={curZone || 'home.pm'}
+                onInput={(e) => setZone(e.currentTarget.value)}
+              />
+            </label>
+            <button class="btn btn-primary" disabled={busy} onClick={apply}>{busy ? '下发中…' : '下发'}</button>
+          </div>
+        </>
+      )}
+    </div>
   )
 }

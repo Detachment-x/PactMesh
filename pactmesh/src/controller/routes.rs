@@ -906,6 +906,10 @@ fn controller_meta_path(td: &str, nid: &str) -> anyhow::Result<std::path::PathBu
         .join("controller_meta.json"))
 }
 
+/// 建网时若未配 IP 池，默认采用此网段：使本机 root 设备能自动获派固定 IP，
+/// 实例带 virtual_ipv4 起 → 生成 TUN 网卡（否则 EasyTier 无 IP 不建卡）。用户可在网络页改。
+const DEFAULT_IP_POOL_CIDR: &str = "10.126.126.0/24";
+
 fn read_controller_meta(td: &str, nid: &str) -> ControllerMeta {
     controller_meta_path(td, nid)
         .ok()
@@ -1061,6 +1065,47 @@ async fn api_auto_assign(State(s): State<AppState>, Json(req): Json<AutoAssignRe
         ),
         Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
     }
+}
+
+/// 给本机（root 自身设备，device_id 取自 network_dir/device_id）从池派一个空闲固定 IP，
+/// 签进 network_state.ip_assignments。已指派则返回 false（不改状态）。供建网流程调用，
+/// 使新建网络的实例带 virtual_ipv4 起 → 生成 TUN 网卡。失败由调用方降级处理，不阻断建网。
+fn ensure_self_ip_assigned(td: &str, nid: &str, pass: &str, cidr: &str) -> anyhow::Result<bool> {
+    let cidr = cidr.trim();
+    if cidr.is_empty() {
+        anyhow::bail!("no IP pool cidr");
+    }
+    let pool =
+        Ipv4Inet::from_str(cidr).map_err(|e| anyhow::anyhow!("invalid pool cidr '{cidr}': {e}"))?;
+    let (network_dir, _pem, _state) = control::read_network_state(td, nid)?;
+    let device_id = std::fs::read_to_string(network_dir.join("device_id"))
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_default();
+    if device_id.is_empty() {
+        anyhow::bail!("self device_id not found");
+    }
+    let sess = SigningSession::open(td, nid, pass)?;
+    if sess
+        .original_state
+        .details
+        .payload
+        .ip_assignments
+        .iter()
+        .any(|a| a.device_id == device_id)
+    {
+        return Ok(false);
+    }
+    let free = pick_free_ip(&pool, &sess.original_state.details.payload.ip_assignments)?;
+    let assign = AssignedIpv4 { addr: free, prefix: pool.network_length as u8 };
+    let prev = sess.version();
+    let version = sess.commit(move |next, _root| {
+        next.payload.ip_assignments.retain(|a| a.device_id != device_id);
+        next.payload
+            .ip_assignments
+            .push(IpAssignment { device_id: device_id.clone(), ipv4: assign });
+        Ok(())
+    })?;
+    Ok(version != prev)
 }
 
 // ---------- 成员离开网络（停本机实例 + 清封存口令；本机 daemon 操作、不签名） ----------
@@ -2037,6 +2082,33 @@ async fn api_network_run(State(s): State<AppState>, Json(req): Json<NetworkRunRe
         if !status.success() {
             anyhow::bail!("bootstrap-self exited with {status}");
         }
+        // 3.5) 建网即给本机（root 设备）从默认池派固定 IP，使实例带 virtual_ipv4 起 → 生成
+        //      TUN 网卡。默认池空则写入 DEFAULT_IP_POOL_CIDR（用户后续可在网络页改）。
+        //      先落盘 network_state（attach 前）→ 实例启动即读到 effective_ipv4；失败仅告警、
+        //      不阻断建网（退化为无 IP/无网卡，同旧行为）。
+        let self_ip_assigned = {
+            let mut meta = read_controller_meta(&trust_domain_id, &req.network_local_id);
+            if meta.ip_pool_cidr.trim().is_empty() {
+                meta.ip_pool_cidr = DEFAULT_IP_POOL_CIDR.to_string();
+                if let Ok(path) = controller_meta_path(&trust_domain_id, &req.network_local_id)
+                    && let Ok(json) = serde_json::to_string(&meta)
+                {
+                    let _ = write_private_file(&path, json.as_bytes());
+                }
+            }
+            match ensure_self_ip_assigned(
+                &trust_domain_id,
+                &req.network_local_id,
+                root_pass.as_str(),
+                &meta.ip_pool_cidr,
+            ) {
+                Ok(changed) => changed,
+                Err(e) => {
+                    tracing::warn!("self IP auto-assign skipped (network created without NIC): {e}");
+                    false
+                }
+            }
+        };
         // 4) 对运行中空载 daemon 加网（不重启）；实例恒持久化 → 开机自动重连。
         let inst_id_str = attach_trust_network(
             &s,
@@ -2047,6 +2119,13 @@ async fn api_network_run(State(s): State<AppState>, Json(req): Json<NetworkRunRe
             req.no_tun,
         )
         .await?;
+        // 4.5) 推最新 network_state → 运行实例热应用 effective_ipv4（覆盖启动未即建卡的情况）。
+        if self_ip_assigned
+            && let Ok((_d, _p, state)) =
+                control::read_network_state(&trust_domain_id, &req.network_local_id)
+        {
+            push_network_state_to_daemon(&s, crate::trust::to_canonical_cbor(&state)).await;
+        }
         Ok::<_, anyhow::Error>(serde_json::json!({
             "trust_domain_id": trust_domain_id,
             "network_local_id": req.network_local_id,
