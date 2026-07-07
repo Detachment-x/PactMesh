@@ -3,7 +3,7 @@ name = "pactmesh"
 description = "Self-managed mesh VPN with signed trust domains and configuration; connect your private devices with one command."
 homepage = "https://github.com/Detachment-x/PactMesh"
 repository = "https://github.com/Detachment-x/PactMesh"
-version = "0.5.0-beta.5"
+version = "0.5.0-beta.6"
 edition.workspace = true
 rust-version.workspace = true
 authors = ["PactMesh Project"]
@@ -114,6 +114,7 @@ nix = { version = "0.29.0", features = [
     "net",
     "fs",
     "signal",
+    "resource",
 ] }
 
 uuid = { version = "1.5.0", features = [

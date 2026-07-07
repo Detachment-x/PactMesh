@@ -1637,10 +1637,25 @@ fn memory_monitor(_force_dump: Arc<AtomicBool>) {
     }
 }
 
+#[cfg(unix)]
+fn raise_nofile_limit() {
+    use nix::sys::resource::{getrlimit, setrlimit, Resource};
+    // Manual `serve` inherits the shell soft limit (often 1024); the NAT hole-punch
+    // socket bursts blow past it and wedge the daemon (EMFILE). The systemd unit sets
+    // LimitNOFILE=infinity; mirror that for the non-service path by raising soft to hard.
+    if let Ok((soft, hard)) = getrlimit(Resource::RLIMIT_NOFILE) {
+        if soft < hard {
+            let _ = setrlimit(Resource::RLIMIT_NOFILE, hard, hard);
+        }
+    }
+}
+
 pub async fn main() -> ExitCode {
     let locale = sys_locale::get_locale().unwrap_or_else(|| String::from("en-US"));
     rust_i18n::set_locale(&locale);
     setup_panic_handler();
+    #[cfg(unix)]
+    raise_nofile_limit();
 
     #[cfg(target_os = "windows")]
     match windows_service::service_dispatcher::start(String::new(), ffi_service_main) {
