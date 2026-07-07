@@ -1958,6 +1958,17 @@ fn overlay_network_name(trust_domain_id: &str, network_local_id: &str) -> String
     format!("{trust_domain_id}/{network_local_id}")
 }
 
+/// TUN 设备名（Windows wintun 卡名 / Linux 接口名）。留空则底层 tun crate 自动生成
+/// `et_<hash>`——EasyTier 前缀，既是品牌泄漏又不可辨识。显式命名 `PactMesh-<5hex>`：
+/// 拼全产品名一眼可认（仿 ZeroTier「产品名+短 ID」），5 位 hex 取自 {td}/{nid} 稳定哈希
+/// → 每网唯一、重启不变、纯 ASCII；共 14 字符安全落在 Linux IFNAMSIZ(15) 内，两平台同名不分叉。
+fn branded_dev_name(trust_domain_id: &str, network_local_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(overlay_network_name(trust_domain_id, network_local_id).as_bytes());
+    let hex: String = digest.iter().take(3).map(|b| format!("{b:02x}")).collect();
+    format!("PactMesh-{}", &hex[..5])
+}
+
 /// 同一 daemon 可挂多个网络实例，监听端口不能撞（tunnel 未启 SO_REUSEPORT）。每实例实占
 /// 两口：peer 口 `P` + 入网准入 RPC 口 `P+1`（instance.rs `derive_join_admission_url`）。
 /// 用试绑探测——唯一可靠信号：不依赖各实例配置回读（quickstart CLI 起的首实例经
@@ -2000,6 +2011,7 @@ pub(super) async fn attach_trust_network(
     };
     let nc = NetworkConfig {
         network_name: Some(overlay_network_name(trust_domain_id, network_local_id)),
+        dev_name: Some(branded_dev_name(trust_domain_id, network_local_id)),
         networking_method: Some(networking_method as i32),
         listener_urls: listeners,
         peer_urls: peers,
