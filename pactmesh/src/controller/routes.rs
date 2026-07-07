@@ -17,7 +17,8 @@ use crate::control::{self, SigningSession};
 use crate::proto::acl::Acl;
 use crate::proto::api::config::{
     AclPatch, ConfigPatchAction, ConfigRpc, ConfigRpcClientFactory, ExitNodePatch,
-    GetConfigRequest, GetConfigResponse, InstanceConfigPatch, ListPendingJoinRequestsRequest,
+    GetConfigRequest, GetConfigResponse, InstanceConfigPatch, ListPeerTrustIdentitiesRequest,
+    ListPendingJoinRequestsRequest,
     PatchConfigRequest, PortForwardPatch, ProxyNetworkPatch, RejectJoinRequestRequest,
     RelayServingPatch, RoutePatch, StringPatch, TrustJoinManageRpc,
     TrustJoinManageRpcClientFactory, UpgradePeerToRootRequest, UrlPatch,
@@ -52,8 +53,8 @@ use crate::proto::api::manage::{
 };
 use crate::trust::{
     AssignedIpv4, CapabilityGrant, DeviceFingerprint, DisabledCert, HostnameBinding, IpAssignment,
-    MemberCertFingerprint, NetworkBootstrap, PeerHint, RevocationReason, RevokedCert, TagName,
-    UnsignedMemberCert, effective_capabilities, effective_hostname, encode_device_id,
+    LabelBinding, MemberCertFingerprint, NetworkBootstrap, PeerHint, RevocationReason, RevokedCert,
+    TagName, effective_capabilities, effective_hostname, effective_label, encode_device_id,
 };
 
 const INDEX_HTML: &str = include_str!("assets/dist/index.html");
@@ -79,6 +80,7 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/instances", get(api_instances))
         .route("/api/node", get(api_node))
         .route("/api/peers", get(api_peers))
+        .route("/api/peer-identities", get(api_peer_identities))
         .route("/api/routes", get(api_routes))
         .route("/api/stats", get(api_stats))
         .route("/api/connectors", get(api_connectors))
@@ -373,26 +375,47 @@ async fn api_rename(State(s): State<AppState>, Json(req): Json<RenameReq>) -> Re
         Ok(v) => v,
         Err(r) => return r,
     };
-    if req.label.trim().is_empty() {
+    let label = req.label.trim().to_owned();
+    if label.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "device label cannot be empty");
     }
     let fp = match control::parse_member_cert_fingerprint(&req.fingerprint) {
         Ok(fp) => fp,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
     };
-    let revoked_at = now_unix_secs();
+    let bound_at = now_unix_secs();
     let result = (|| {
         let sess = SigningSession::open(&td, &nid, &pass)?;
         let old_cert = active_member_cert(&sess, fp)?;
-        if old_cert.details.device_label == req.label {
+        // 现有生效名 = state binding 优先，否则证书正文。相同 → 幂等，不动版本。
+        if label == effective_label(&old_cert, &sess.original_state) {
             let v = sess.version();
             return Ok((v, v));
         }
-        let mut new_details = old_cert.details.clone();
-        new_details.device_label = req.label.clone();
-        new_details.network_state_version_ref = sess.version().saturating_add(1);
-        reissue(sess, fp, req.note, revoked_at, new_details)
+        // 写 state 绑定（键=现有指纹，不重签、不踢线）；等于证书正文名时移除绑定保持状态精简。
+        let cert_label = old_cert.details.device_label.clone();
+        let prev = sess.version();
+        let version = sess.commit(move |next, _root| {
+            next.payload
+                .label_bindings
+                .retain(|b| b.cert_fingerprint != fp);
+            if label != cert_label {
+                next.payload.label_bindings.push(LabelBinding {
+                    cert_fingerprint: fp,
+                    label,
+                    bound_at,
+                });
+            }
+            Ok(())
+        })?;
+        Ok::<(u64, u64), anyhow::Error>((prev, version))
     })();
+    if let Ok((prev, version)) = &result
+        && version != prev
+        && let Ok((_d, _p, state)) = control::read_network_state(&td, &nid)
+    {
+        push_network_state_to_daemon(&s, crate::trust::to_canonical_cbor(&state)).await;
+    }
     version_response(&req.fingerprint, result)
 }
 
@@ -829,31 +852,6 @@ fn active_member_cert(
         .get(&fp)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("member cert body not found; cannot reissue"))
-}
-
-/// 重签发改签的通用尾部：版本+1 → 签新证书 → 旧证书记为 superseded → 替换 index → 落盘。
-fn reissue(
-    sess: SigningSession,
-    old_fp: MemberCertFingerprint,
-    note: Option<String>,
-    revoked_at: u64,
-    new_details: UnsignedMemberCert,
-) -> anyhow::Result<(u64, u64)> {
-    let network_dir = sess.network_dir.clone();
-    let prev = sess.version();
-    let version = sess.commit(move |next, root| {
-        let new_cert = new_details.sign(root);
-        next.payload.revoked_certs.push(RevokedCert {
-            cert_fingerprint: old_fp,
-            revoked_at,
-            reason_code: RevocationReason::Superseded,
-            reason_note: note,
-        });
-        control::replace_member_index_entry(&mut next.payload.member_cert_index, old_fp, &new_cert);
-        control::write_reissued_member_cert(&network_dir, &new_cert)?;
-        Ok(())
-    })?;
-    Ok((prev, version))
 }
 
 /// `{fingerprint, previous_version, version}` 成功响应 / 502 错误响应。
@@ -1314,6 +1312,42 @@ async fn api_peers(State(s): State<AppState>) -> Result<Json<ListPeerResponse>, 
         )
         .await?;
     Ok(Json(resp))
+}
+
+/// 运行时直连对端的信任身份（peer_id → 成员证书指纹）。供前端把运行时连接按稳定
+/// 指纹关联到治理名册成员，避免 hostname 不匹配时把同一设备拆成「成员+临时设备」两行。
+async fn api_peer_identities(State(s): State<AppState>) -> Response {
+    let result = async {
+        let client = {
+            let mut g = s.client.lock().await;
+            g.scoped_client::<TrustJoinManageRpcClientFactory<BaseController>>(String::new())
+                .await?
+        };
+        let resp = client
+            .list_peer_trust_identities(
+                BaseController::default(),
+                ListPeerTrustIdentitiesRequest {
+                    instance: Some(s.instance.clone()),
+                },
+            )
+            .await?;
+        let items = resp
+            .identities
+            .into_iter()
+            .map(|i| {
+                serde_json::json!({
+                    "peer_id": i.peer_id,
+                    "fingerprint": i.member_cert_fingerprint,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok::<_, anyhow::Error>(items)
+    }
+    .await;
+    match result {
+        Ok(items) => json_response(StatusCode::OK, serde_json::Value::Array(items)),
+        Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
+    }
 }
 
 async fn api_routes(State(s): State<AppState>) -> Result<Json<ListRouteResponse>, ApiError> {

@@ -537,6 +537,16 @@ impl PeerManager {
         self.peer_trust_acl_identities.insert(peer_id, identity);
     }
 
+    /// 直连对端的信任身份快照：peer_id → 成员证书指纹（base64，与名册成员
+    /// `DeviceView.fingerprint` 同格式）。供控制台把运行时连接按稳定指纹关联到
+    /// 治理名册成员；多跳对端无认证身份、不在其列。
+    pub fn peer_trust_identities(&self) -> Vec<(PeerId, String)> {
+        self.peer_trust_acl_identities
+            .iter()
+            .map(|entry| (*entry.key(), entry.member_cert_fingerprint.to_string()))
+            .collect()
+    }
+
     /// Recompute every remembered peer identity + the local node's cached caps
     /// from the current network_state. Invoked on the same hook as revocation
     /// enforcement so post-issue capability edits take effect without a

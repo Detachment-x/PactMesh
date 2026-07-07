@@ -180,6 +180,23 @@ message ArmRootUpgradeAcceptanceRequest {
 
 message ArmRootUpgradeAcceptanceResponse { uint32 ttl_secs = 1; }
 
+// 运行时对端的信任身份：把 daemon 认证过的直连对端 peer_id 映射到其成员证书
+// 指纹，供控制台把「运行时连接」与「治理名册成员」按稳定指纹关联（而非易变的
+// hostname）。仅直连对端有身份；多跳对端不在其列。
+message PeerTrustIdentity {
+  uint32 peer_id = 1;
+  // 成员证书指纹（base64，与名册成员 DeviceView.fingerprint 一致）。
+  string member_cert_fingerprint = 2;
+}
+
+message ListPeerTrustIdentitiesRequest {
+  api.instance.InstanceIdentifier instance = 1;
+}
+
+message ListPeerTrustIdentitiesResponse {
+  repeated PeerTrustIdentity identities = 1;
+}
+
 service TrustJoinManageRpc {
   rpc SubmitJoinRequest(SubmitJoinRequestRequest) returns (SubmitJoinRequestResponse);
   rpc FetchPendingMemberCert(FetchPendingMemberCertRequest) returns (FetchPendingMemberCertResponse);
@@ -188,4 +205,5 @@ service TrustJoinManageRpc {
   rpc UpgradePeerToRoot(UpgradePeerToRootRequest) returns (UpgradePeerToRootResponse);
   rpc ListPendingJoinRequests(ListPendingJoinRequestsRequest) returns (ListPendingJoinRequestsResponse);
   rpc ArmRootUpgradeAcceptance(ArmRootUpgradeAcceptanceRequest) returns (ArmRootUpgradeAcceptanceResponse);
+  rpc ListPeerTrustIdentities(ListPeerTrustIdentitiesRequest) returns (ListPeerTrustIdentitiesResponse);
 }

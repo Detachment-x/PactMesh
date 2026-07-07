@@ -47,8 +47,9 @@ use crate::proto::api::config::{
     ApproveJoinRequestRequest, ApproveJoinRequestResponse, ArmRootUpgradeAcceptanceRequest,
     ArmRootUpgradeAcceptanceResponse, ConfigPatchAction, ConfigRpc, FetchPendingMemberCertRequest,
     FetchPendingMemberCertResponse, GetConfigRequest, GetConfigResponse,
-    ListPendingJoinRequestsRequest, ListPendingJoinRequestsResponse, PatchConfigRequest,
-    PatchConfigResponse, PendingJoinRequestSummary, PortForwardPatch, RejectJoinRequestRequest,
+    ListPeerTrustIdentitiesRequest, ListPeerTrustIdentitiesResponse, ListPendingJoinRequestsRequest,
+    ListPendingJoinRequestsResponse, PatchConfigRequest, PatchConfigResponse,
+    PeerTrustIdentity, PendingJoinRequestSummary, PortForwardPatch, RejectJoinRequestRequest,
     RejectJoinRequestResponse, SubmitJoinRequestRequest, SubmitJoinRequestResponse,
     TrustJoinManageRpc, TrustJoinManageRpcServer, UpgradePeerToRootRequest,
     UpgradePeerToRootResponse,
@@ -995,6 +996,18 @@ impl Instance {
                 Err(rpc_types::error::Error::ExecutionError(anyhow::anyhow!(
                     "join admission endpoint does not allow pending-list access"
                 )))
+            }
+
+            async fn list_peer_trust_identities(
+                &self,
+                _ctrl: Self::Controller,
+                _request: ListPeerTrustIdentitiesRequest,
+            ) -> crate::proto::rpc_types::error::Result<ListPeerTrustIdentitiesResponse>
+            {
+                // 加入接入端点无 peer_manager，不承载运行时对端身份。
+                Ok(ListPeerTrustIdentitiesResponse {
+                    identities: Vec::new(),
+                })
             }
         }
 
@@ -2368,6 +2381,24 @@ impl Instance {
                     })
                     .collect();
                 Ok(ListPendingJoinRequestsResponse { requests })
+            }
+
+            async fn list_peer_trust_identities(
+                &self,
+                _ctrl: Self::Controller,
+                _request: ListPeerTrustIdentitiesRequest,
+            ) -> crate::proto::rpc_types::error::Result<ListPeerTrustIdentitiesResponse>
+            {
+                let identities = self
+                    .peer_manager
+                    .peer_trust_identities()
+                    .into_iter()
+                    .map(|(peer_id, member_cert_fingerprint)| PeerTrustIdentity {
+                        peer_id,
+                        member_cert_fingerprint,
+                    })
+                    .collect();
+                Ok(ListPeerTrustIdentitiesResponse { identities })
             }
         }
 

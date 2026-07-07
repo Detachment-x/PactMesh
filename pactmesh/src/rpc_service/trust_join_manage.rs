@@ -6,7 +6,8 @@ use crate::{
         api::config::{
             ApproveJoinRequestRequest, ApproveJoinRequestResponse, ArmRootUpgradeAcceptanceRequest,
             ArmRootUpgradeAcceptanceResponse, FetchPendingMemberCertRequest,
-            FetchPendingMemberCertResponse, ListPendingJoinRequestsRequest,
+            FetchPendingMemberCertResponse, ListPeerTrustIdentitiesRequest,
+            ListPeerTrustIdentitiesResponse, ListPendingJoinRequestsRequest,
             ListPendingJoinRequestsResponse, RejectJoinRequestRequest, RejectJoinRequestResponse,
             SubmitJoinRequestRequest, SubmitJoinRequestResponse, TrustJoinManageRpc,
             UpgradePeerToRootRequest, UpgradePeerToRootResponse,
@@ -104,6 +105,17 @@ impl TrustJoinManageRpc for TrustJoinManageRpcService {
         super::get_instance_service(&self.instance_manager, &input.instance)?
             .get_trust_join_manage_service()
             .arm_root_upgrade_acceptance(ctrl, input)
+            .await
+    }
+
+    async fn list_peer_trust_identities(
+        &self,
+        ctrl: Self::Controller,
+        input: ListPeerTrustIdentitiesRequest,
+    ) -> Result<ListPeerTrustIdentitiesResponse, rpc_types::error::Error> {
+        super::get_instance_service(&self.instance_manager, &input.instance)?
+            .get_trust_join_manage_service()
+            .list_peer_trust_identities(ctrl, input)
             .await
     }
 }

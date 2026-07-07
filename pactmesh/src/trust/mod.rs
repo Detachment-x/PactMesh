@@ -57,7 +57,7 @@ pub use device_view::{
 };
 pub use effective::{
     effective_capabilities, effective_capabilities_by_fingerprint, effective_hostname,
-    effective_hostname_by_fingerprint,
+    effective_hostname_by_fingerprint, effective_label, effective_label_by_fingerprint,
 };
 pub use hostname::{HostnameError, HostnameLabel};
 pub use identity::{SignKey, TrustDomainRoot, VerifyKey};
@@ -70,8 +70,8 @@ pub use lan_recovery::{LanRecoveryError, apply_lan_recovered_network_state};
 pub use member_cert::{Capabilities, MemberCert, UnsignedMemberCert};
 pub use network_bootstrap::{BootstrapError, NetworkBootstrap};
 pub use network_state::{
-    AssignedIpv4, CapabilityGrant, HostnameBinding, IpAssignment, MemberCertIndexEntry,
-    NetworkStatePayload, PeerHint, SignedNetworkState, UnsignedNetworkState,
+    AssignedIpv4, CapabilityGrant, HostnameBinding, IpAssignment, LabelBinding,
+    MemberCertIndexEntry, NetworkStatePayload, PeerHint, SignedNetworkState, UnsignedNetworkState,
 };
 pub use network_state_receiver::{
     NetworkStateReceiveError, NetworkStateReceiveReport, receive_network_state,

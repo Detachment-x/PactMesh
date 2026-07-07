@@ -212,6 +212,49 @@ mod hostname_binding_vec_cbor {
     }
 }
 
+/// Root-signed device-label binding, keyed by the target member-cert fingerprint.
+///
+/// Applied at runtime in preference to `MemberCert.device_label`; the **absence**
+/// of a binding falls back to the cert body. Editing a label never reissues the
+/// cert (identity = cert, presentation = state), so it propagates network-wide
+/// without kicking the device offline.
+#[derive(minicbor::Encode, minicbor::Decode, Debug, Clone, PartialEq, Eq)]
+pub struct LabelBinding {
+    #[n(0)]
+    pub cert_fingerprint: MemberCertFingerprint,
+    #[n(1)]
+    pub label: String,
+    #[n(2)]
+    pub bound_at: u64,
+}
+
+mod label_binding_vec_cbor {
+    use super::*;
+
+    pub fn encode<Ctx, W: minicbor::encode::Write>(
+        value: &[LabelBinding],
+        encoder: &mut Encoder<W>,
+        ctx: &mut Ctx,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        minicbor::Encode::encode(value, encoder, ctx)
+    }
+
+    pub fn decode<'b, Ctx>(
+        decoder: &mut Decoder<'b>,
+        ctx: &mut Ctx,
+    ) -> Result<Vec<LabelBinding>, minicbor::decode::Error> {
+        minicbor::Decode::decode(decoder, ctx)
+    }
+
+    pub fn nil() -> Option<Vec<LabelBinding>> {
+        Some(Vec::new())
+    }
+
+    pub fn is_nil(value: &[LabelBinding]) -> bool {
+        value.is_empty()
+    }
+}
+
 /// Opaque ACL bytes (filled by T-035 / T-036).
 pub type AclPlaceholder = Vec<u8>;
 
@@ -249,6 +292,11 @@ pub struct NetworkStatePayload {
     #[n(8)]
     #[cbor(with = "hostname_binding_vec_cbor", has_nil)]
     pub hostname_bindings: Vec<HostnameBinding>,
+    /// Root-signed device-label overrides (keyed by cert fingerprint). Applied in
+    /// preference to `MemberCert.device_label`; empty → cert body is authoritative.
+    #[n(9)]
+    #[cbor(with = "label_binding_vec_cbor", has_nil)]
+    pub label_bindings: Vec<LabelBinding>,
 }
 
 /// Header + payload before signing.

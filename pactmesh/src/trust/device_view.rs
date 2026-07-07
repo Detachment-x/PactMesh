@@ -171,7 +171,11 @@ pub fn view_for_member(
     DeviceView {
         fingerprint: entry.fingerprint.to_string(),
         device_id: device_id.clone(),
-        device_label: entry.device_label.clone(),
+        device_label: super::effective::effective_label_by_fingerprint(
+            &entry.fingerprint,
+            &entry.device_label,
+            state,
+        ),
         role: role_for_member(cert, local_device_id, has_root_key),
         network_local_id: network_local_id.to_owned(),
         issued_at: entry.issued_at,

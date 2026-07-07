@@ -67,6 +67,31 @@ pub fn effective_hostname_by_fingerprint(
     }
 }
 
+/// Effective device label for `cert` under the current `state`.
+pub fn effective_label(cert: &MemberCert, state: &SignedNetworkState) -> String {
+    effective_label_by_fingerprint(&cert.fingerprint(), &cert.details.device_label, state)
+}
+
+/// Effective device label given a precomputed fingerprint + cert-body fallback.
+///
+/// A present binding wins; an absent binding falls back to the cert body. Unlike
+/// hostname the label is a required non-empty string, so there is no "clear"
+/// state — removing a binding simply reverts to the cert label.
+pub fn effective_label_by_fingerprint(
+    fingerprint: &MemberCertFingerprint,
+    cert_fallback: &str,
+    state: &SignedNetworkState,
+) -> String {
+    state
+        .details
+        .payload
+        .label_bindings
+        .iter()
+        .find(|binding| binding.cert_fingerprint == *fingerprint)
+        .map(|binding| binding.label.clone())
+        .unwrap_or_else(|| cert_fallback.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,6 +147,7 @@ mod tests {
                 ip_assignments: Vec::new(),
                 capability_grants: grants,
                 hostname_bindings: bindings,
+                label_bindings: Vec::new(),
             },
         }
         .sign(root)
