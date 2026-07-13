@@ -12,7 +12,7 @@ use axum::{
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
-use super::{auth, session, AppState};
+use super::{access, auth, session, AppState};
 use crate::control::{self, SigningSession};
 use crate::proto::acl::Acl;
 use crate::proto::api::config::{
@@ -124,6 +124,10 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/network/invite-preview", post(api_invite_preview))
         .route("/api/network/join", post(api_network_join))
         .route("/api/network/join-status", get(api_join_status))
+        .route(
+            "/api/console/access",
+            get(api_console_access_get).post(api_console_access_set),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::guard))
         .with_state(state)
 }
@@ -883,6 +887,41 @@ fn parse_reason(value: Option<&str>) -> RevocationReason {
         "removed" => RevocationReason::Removed,
         "superseded" => RevocationReason::Superseded,
         _ => RevocationReason::Unspecified,
+    }
+}
+
+// ---------- Web UI 访问来源（console.json） ----------
+// 只决定控制台的可见范围，不实施网络控制（治理操作仍由网络管理员口令保护），故不需解锁，
+// console token 即足。绑定地址无法热改：写盘后重启服务生效。
+
+#[derive(Deserialize)]
+struct ConsoleAccessReq {
+    mode: access::WebuiAccess,
+}
+
+/// 读访问来源：`mode` = 盘上已保存的（重启后生效的），`active_mode` = 本进程正生效的。
+async fn api_console_access_get(State(s): State<AppState>) -> Response {
+    let saved = access::load();
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "mode": saved,
+            "active_mode": s.access,
+            "needs_restart": saved != s.access,
+        }),
+    )
+}
+
+async fn api_console_access_set(
+    State(s): State<AppState>,
+    Json(req): Json<ConsoleAccessReq>,
+) -> Response {
+    match access::save(req.mode) {
+        Ok(()) => json_response(
+            StatusCode::OK,
+            serde_json::json!({ "ok": true, "needs_restart": req.mode != s.access }),
+        ),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 

@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks'
+import { useEffect, useState } from 'preact/hooks'
 import { api } from '../api.js'
 import { Toggle, useToast } from '../ui.jsx'
 
@@ -132,6 +132,54 @@ function PatchCard({ form }) {
   )
 }
 
+// 管理控制台自身的可见范围：不是 daemon 配置，走 console.json，重启服务后生效。
+const ACCESS_OPTS = [
+  ['localhost', '只有本地主机才能访问 WebUI'],
+  ['lan', '仅局域网中的设备可以访问 WebUI'],
+  ['public', '任何人都可以访问 WebUI'],
+]
+const ACCESS_WARN = {
+  lan: '控制台将对同一局域网内的所有设备开放，仅由控制台令牌保护。',
+  public: '控制台将对任何能连到本机的来源开放（含公网），仅由控制台令牌保护。',
+}
+
+function WebuiAccessCard() {
+  const toast = useToast()
+  const [mode, setMode] = useState(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    api.consoleAccess().then((r) => setMode(r.mode)).catch(() => setMode('localhost'))
+  }, [])
+
+  const save = async () => {
+    setBusy(true)
+    try {
+      const r = await api.consoleAccessSet(mode)
+      toast.ok(r.needs_restart ? '已保存，重启服务后生效' : '已保存')
+    } catch (e) {
+      toast.err(`保存失败：${e.message}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (mode == null) return null
+  return (
+    <div class="card cfg-card">
+      <div class="card-title">允许的 Web UI 访问来源</div>
+      <p class="muted cfg-desc">
+        谁能连到这个管理控制台。仅决定可见范围——网络的治理操作本身始终由网络管理员口令保护。<strong>重启服务后生效。</strong>
+      </p>
+      <div class="cfg-row">
+        <Sel value={mode} opts={ACCESS_OPTS} onChange={setMode} />
+        <button class="btn btn-primary" disabled={busy} onClick={save}>{busy ? '保存中…' : '保存'}</button>
+      </div>
+      {ACCESS_WARN[mode] && <p class="muted cfg-desc">注意：{ACCESS_WARN[mode]}</p>}
+    </div>
+  )
+}
+
 // 按用途分区，避免一屏并列十张同质表单。
 const SECTIONS = [
   { key: 'access', title: '接入与监听', desc: '本机如何接入网络，以及对外暴露的端口。' },
@@ -146,7 +194,7 @@ export function Config() {
   return (
     <>
       <div class="card card-degrade cfg-note">
-        <span class="muted">以下均为<strong>本机节点</strong>的运行时配置，经本机 daemon 热重载下发（<strong>需 daemon 运行中</strong>），与具体网络无关；下发后在「诊断」查看生效结果。设备 IP、代理网段、名称解析等网络级设置见「网络」页。</span>
+        <span class="muted">下列前两区均为<strong>本机节点</strong>的运行时配置，经本机 daemon 热重载下发（<strong>需 daemon 运行中</strong>），与具体网络无关；下发后在「诊断」查看生效结果。设备 IP、代理网段、名称解析等网络级设置见「网络」页。</span>
       </div>
       {SECTIONS.map((s) => (
         <section key={s.key} class="cfg-section">
@@ -157,6 +205,13 @@ export function Config() {
           {FORMS.filter((f) => SEC_OF[f.key] === s.key).map((f) => <PatchCard key={f.key} form={f} />)}
         </section>
       ))}
+      <section class="cfg-section">
+        <div class="cfg-section-head">
+          <h2>管理控制台</h2>
+          <span class="muted">控制台自身的可见范围，不经 daemon，改后重启服务生效。</span>
+        </div>
+        <WebuiAccessCard />
+      </section>
     </>
   )
 }

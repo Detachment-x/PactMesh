@@ -230,7 +230,7 @@ struct ControllerArgs {
     #[arg(
         long,
         default_value = "127.0.0.1:15810",
-        help = "address for the web controller to listen on (loopback only)"
+        help = "port for the web controller (bind address follows the Web UI access setting)"
     )]
     listen: SocketAddr,
     #[arg(
@@ -275,7 +275,7 @@ struct QuickstartArgs {
     #[arg(
         long,
         default_value = "127.0.0.1:15810",
-        help = "web console listen address (loopback only)"
+        help = "web console port (bind address follows the Web UI access setting)"
     )]
     listen: SocketAddr,
     #[arg(
@@ -301,7 +301,7 @@ struct ServeArgs {
     #[arg(
         long,
         default_value = "127.0.0.1:15810",
-        help = "web console listen address (loopback only)"
+        help = "web console port (bind address follows the Web UI access setting)"
     )]
     listen: SocketAddr,
     #[arg(
@@ -352,7 +352,7 @@ struct ServeSealArgs {
     #[arg(
         long,
         default_value = "127.0.0.1:15810",
-        help = "web console listen address (loopback only)"
+        help = "web console port (bind address follows the Web UI access setting)"
     )]
     listen: SocketAddr,
     #[arg(long, help = "file containing the device key passphrase")]

@@ -6,11 +6,12 @@
 //! 设计同 `tui`：本模块是 lib 侧实现，bin 仅加一个 `controller` 子命令并转调
 //! [`run`]，复用 CLI 已建立的 daemon RPC 客户端。
 
+mod access;
 mod auth;
 mod routes;
 mod session;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,6 +51,8 @@ struct AppState {
     /// 解锁会话（root 口令 + TTL），治理写操作前需先 `/api/unlock`。
     session: Arc<Mutex<Option<session::Session>>>,
     unlock_ttl: Duration,
+    /// 本次进程生效的 Web UI 访问来源。改设置只落盘，重启后才换绑定，故此处为启动快照。
+    access: access::WebuiAccess,
 }
 
 /// 启动控制器 HTTP 服务并阻塞至退出。
@@ -59,12 +62,14 @@ pub async fn run(
     config: ControllerConfig,
 ) -> Result<()> {
     let token = config.token.unwrap_or_else(auth::generate_token);
+    let access = access::load();
     let state = AppState {
         client,
         instance,
         token: Arc::new(token.clone()),
         session: Arc::new(Mutex::new(None)),
         unlock_ttl: Duration::from_secs(config.unlock_ttl_secs),
+        access,
     };
 
     // 主网络挂载：quickstart/serve 起空载 daemon 后，在此对运行中 daemon 调
@@ -87,17 +92,25 @@ pub async fn run(
 
     let app = routes::router(state);
 
-    let listener = tokio::net::TcpListener::bind(config.listen)
+    // 绑定地址由「Web UI 访问来源」决定，只沿用 `--listen` 的端口；来源过滤在 auth::guard。
+    let listen = access.bind(config.listen.port());
+    let listener = tokio::net::TcpListener::bind(listen)
         .await
-        .with_context(|| format!("failed to bind controller on {}", config.listen))?;
-    let local = listener.local_addr().unwrap_or(config.listen);
+        .with_context(|| format!("failed to bind controller on {listen}"))?;
+    let local = listener.local_addr().unwrap_or(listen);
+    // 绑 0.0.0.0 时浏览器/端点文件不能用 0.0.0.0 作目标，改用回环呈现。
+    let url = if local.ip().is_unspecified() {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local.port())
+    } else {
+        local
+    };
 
     // 运行时端点文件（Jupyter 式）：存活期间落 {listen,token} 0600，退出删除，
     // 供 `pactmesh web` / Windows 托盘读取后免 token 直达浏览器。
-    let _endpoint = EndpointFileGuard::write(local, &token);
+    let _endpoint = EndpointFileGuard::write(url, &token);
 
-    println!("pactmesh controller serving at http://{local}");
-    println!("open in browser: http://{local}/?token={token}");
+    println!("pactmesh controller serving at http://{url}");
+    println!("open in browser: http://{url}/?token={token}");
 
     axum::serve(
         listener,

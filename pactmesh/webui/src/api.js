@@ -120,6 +120,10 @@ export const api = {
   cfgIpv4: (ipv4) => postJson('/api/config/ipv4', { ipv4 }),
   cfgWhitelist: (body) => postJson('/api/config/whitelist', body),
 
+  // 管理控制台自身的可见范围（console.json，非 daemon 配置）：只需 console token，重启服务后生效
+  consoleAccess: () => getJson('/api/console/access'),
+  consoleAccessSet: (mode) => postJson('/api/console/access', { mode }),
+
   // 高危治理（D6 危险区）
   createDomain: (label, passphrase) => postJson('/api/trust/create-domain', { label, passphrase }),
   createNetwork: (body) => postJson('/api/trust/create-network', body),

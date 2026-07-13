@@ -1,11 +1,11 @@
-//! 控制器鉴权：loopback-only + 本地随机 token（jupyter 式）。
+//! 控制器鉴权：来源过滤（见 `access`，默认 loopback-only）+ 本地随机 token（jupyter 式）。
 //! token 经 `?token=`（首屏）→ Set-Cookie 持久化 → 后续请求经 Cookie/Bearer 校验。
 
 use std::net::SocketAddr;
 
 use axum::{
     extract::{ConnectInfo, Request, State},
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -54,14 +54,14 @@ fn token_from_request(req: &Request) -> Option<String> {
     None
 }
 
-/// 中间件：非环回来源直接拒；token 不符返回 401。
+/// 中间件：来源不在「Web UI 访问来源」允许范围内直接拒；token 不符返回 401。
 pub async fn guard(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if !peer.ip().is_loopback() {
+    if !state.access.allows(peer.ip()) {
         return Err(StatusCode::FORBIDDEN);
     }
     match token_from_request(&req) {
