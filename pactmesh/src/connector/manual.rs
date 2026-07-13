@@ -921,6 +921,7 @@ mod tests {
                 ip_assignments: Vec::new(),
                 capability_grants: Vec::new(),
                 hostname_bindings: Vec::new(),
+                label_bindings: Vec::new(),
             },
         }
         .sign(&root)
