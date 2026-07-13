@@ -159,6 +159,21 @@ struct MagicDnsContainer {
     dns_runner_cancel_token: CancellationToken,
 }
 
+#[cfg(feature = "magic-dns")]
+impl MagicDnsContainer {
+    fn start(mut dns_runner: DnsRunner) -> Self {
+        let token = CancellationToken::new();
+        let token_clone = token.clone();
+        let task = tokio::spawn(async move {
+            let _ = dns_runner.run(token_clone).await;
+        });
+        Self {
+            dns_runner_task: AbortOnDropHandle::new(task),
+            dns_runner_cancel_token: token,
+        }
+    }
+}
+
 // nic container will be cleared when dhcp ip changed
 #[cfg(feature = "tun")]
 pub struct NicCtxContainer {
@@ -178,24 +193,9 @@ impl NicCtxContainer {
 
     #[cfg(feature = "magic-dns")]
     fn new(nic_ctx: NicCtx, dns_runner: Option<DnsRunner>) -> Self {
-        if let Some(mut dns_runner) = dns_runner {
-            let token = CancellationToken::new();
-            let token_clone = token.clone();
-            let task = tokio::spawn(async move {
-                let _ = dns_runner.run(token_clone).await;
-            });
-            Self {
-                nic_ctx: Some(Box::new(nic_ctx)),
-                magic_dns: Some(MagicDnsContainer {
-                    dns_runner_task: AbortOnDropHandle::new(task),
-                    dns_runner_cancel_token: token,
-                }),
-            }
-        } else {
-            Self {
-                nic_ctx: Some(Box::new(nic_ctx)),
-                magic_dns: None,
-            }
+        Self {
+            nic_ctx: Some(Box::new(nic_ctx)),
+            magic_dns: dns_runner.map(MagicDnsContainer::start),
         }
     }
 
@@ -205,6 +205,16 @@ impl NicCtxContainer {
             #[cfg(feature = "magic-dns")]
             magic_dns: None,
         }
+    }
+
+    /// 就地启停 DnsRunner，不触碰 NIC/wintun 适配器。旧 runner 经 cancel 触发 clean_env
+    /// 卸下路由与系统 DNS 后再拉起新 runner（None 即纯停用）。
+    #[cfg(feature = "magic-dns")]
+    fn set_magic_dns_runner(&mut self, dns_runner: Option<DnsRunner>) {
+        if let Some(old) = self.magic_dns.take() {
+            old.dns_runner_cancel_token.cancel();
+        }
+        self.magic_dns = dns_runner.map(MagicDnsContainer::start);
     }
 }
 
@@ -353,21 +363,19 @@ impl InstanceConfigPatcher {
             return Err(anyhow::anyhow!("peer manager not available"));
         };
 
-        let mut new_nic_ctx = NicCtx::new(
-            peer_mgr.get_global_ctx(),
-            &peer_mgr,
-            self.peer_packet_receiver.clone(),
-            Arc::new(Notify::new()),
-        );
-        new_nic_ctx.run(ipv4_addr, ipv6_addr).await?;
-
-        let ifname = new_nic_ctx.ifname().await;
-        let dns_runner = if let Some(ipv4) = ipv4_addr {
-            Instance::create_magic_dns_runner(peer_mgr, ifname, ipv4)
-        } else {
-            None
+        // 就地切换 DnsRunner，复用现有 NIC。切勿重建 NIC：Windows 上 wintun 每卡仅允一个
+        // session，旧卡未释放前对同名卡再开 session 会 `WintunStartSession failed`。
+        let mut g = self.nic_ctx.lock().await;
+        let Some(container) = g.as_mut() else {
+            // 尚无 NIC，flags 已落，交由 static-ip / dhcp 首建 NIC 时按 accept_dns 自行拉起
+            return Ok(());
         };
-        Instance::use_new_nic_ctx(self.nic_ctx.clone(), new_nic_ctx, dns_runner).await;
+        // NIC 以 flags.dev_name(= branded 名)建卡，直接取之，避免借用非 Sync 的容器跨 await
+        let dev_name = global_ctx.get_flags().dev_name;
+        let ifname = (!dev_name.is_empty()).then_some(dev_name);
+        let dns_runner =
+            ipv4_addr.and_then(|ipv4| Instance::create_magic_dns_runner(peer_mgr, ifname, ipv4));
+        container.set_magic_dns_runner(dns_runner);
         Ok(())
     }
 
