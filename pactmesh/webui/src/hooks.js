@@ -3,7 +3,8 @@ import { useState, useEffect, useRef, useCallback } from 'preact/hooks'
 // 轮询数据层：拉取 + 定时刷新（页面隐藏时暂停），返回 diff 友好的状态。
 // fn 必须稳定（用 useCallback 包裹）或经 deps 重建。
 export function usePoll(fn, deps = [], intervalMs = 2000) {
-  const [state, setState] = useState({ data: null, error: null, loading: true })
+  // fails = 连续失败次数（成功清零）。调用方据此容忍瞬时闪断，不因单次失败就判定服务下线。
+  const [state, setState] = useState({ data: null, error: null, loading: true, fails: 0 })
   const fnRef = useRef(fn)
   fnRef.current = fn
   const alive = useRef(true)
@@ -12,9 +13,9 @@ export function usePoll(fn, deps = [], intervalMs = 2000) {
     if (!quiet) setState((s) => ({ ...s, loading: true }))
     try {
       const data = await fnRef.current()
-      if (alive.current) setState({ data, error: null, loading: false })
+      if (alive.current) setState({ data, error: null, loading: false, fails: 0 })
     } catch (error) {
-      if (alive.current) setState((s) => ({ ...s, error, loading: false }))
+      if (alive.current) setState((s) => ({ ...s, error, loading: false, fails: s.fails + 1 }))
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

@@ -47,38 +47,45 @@ function connSummary(conns) {
   }
 }
 
-// 把 peers(my_info + conns) 与 routes 归一为「运行时条目」，按 hostname 建索引（唯一 join 键）。
+// 把 peers(my_info + conns) 与 routes 归一为「运行时条目」，同时按指纹与 hostname 建索引。
+// 指纹是唯一可靠的 join 键（hostname 可重名、可改名，会把同一台设备拆成成员行 + 临时设备行两条）。
 // 本机运行时优先取 peers.my_info；孤立节点（无对端）时 daemon 返回 my_info=null，回退到 /api/node 的 node_info。
-function runtimeIndex(peers, routes, selfNode) {
+function runtimeIndex(peers, routes, peerIds, selfNode) {
   const connByPeer = {}
   for (const p of peers?.peer_infos || []) connByPeer[p.peer_id] = p.conns
+  const fpByPeer = {}
+  for (const p of peerIds || []) if (p.fingerprint) fpByPeer[p.peer_id] = p.fingerprint
+
   const byHost = {}
+  const byFp = {}
   const entries = []
+  const add = (e) => {
+    entries.push(e)
+    if (e.hostname) byHost[e.hostname] = e
+    if (e.fingerprint) byFp[e.fingerprint] = e
+  }
+
   const my = peers?.my_info || selfNode || null
   if (my) {
-    const e = {
-      peer_id: my.peer_id, hostname: my.hostname || '', isSelf: true,
+    add({
+      peer_id: my.peer_id, hostname: my.hostname || '', fingerprint: fpByPeer[my.peer_id] || '', isSelf: true,
       overlayV4: my.ipv4_addr || '—', overlayV6: '—',
       ipList: my.ip_list, version: my.version, instId: my.inst_id,
       proxyCidrs: my.proxy_cidrs || [], nat: my.stun_info?.udp_nat_type,
       nextHop: my.peer_id, cost: 0, conns: [], sum: { online: true, self: true },
-    }
-    entries.push(e)
-    if (e.hostname) byHost[e.hostname] = e
+    })
   }
   for (const r of routes?.routes || []) {
     const conns = connByPeer[r.peer_id]
-    const e = {
-      peer_id: r.peer_id, hostname: r.hostname || '', isSelf: false,
+    add({
+      peer_id: r.peer_id, hostname: r.hostname || '', fingerprint: fpByPeer[r.peer_id] || '', isSelf: false,
       overlayV4: ipv4(r.ipv4_addr), overlayV6: ipv6(r.ipv6_addr),
       ipList: null, version: r.version, instId: r.inst_id,
       proxyCidrs: r.proxy_cidrs || [], nat: r.stun_info?.udp_nat_type,
       nextHop: r.next_hop_peer_id, cost: r.cost, conns: conns || [], sum: connSummary(conns),
-    }
-    entries.push(e)
-    if (e.hostname) byHost[e.hostname] = e
+    })
   }
-  return { byHost, entries, my }
+  return { byHost, byFp, entries, my }
 }
 
 // 指派/虚拟 IP 单元格显示：已指派 → 绿色 chip；否则运行时自分配地址（灰）或「自分配」。
@@ -90,7 +97,7 @@ function ipCellDisplay(assigned, r) {
 
 // 网络中心页内嵌的治理名册：轮询与地址池由父页 `network.jsx` 统一持有并下传，
 // 避免双重轮询。onAutoAssign(fp) 走地址池签名分配；pool 提供「是否已设池」判断。
-export function DeviceRoster({ members, peers, routes, node, pool, onAutoAssign }) {
+export function DeviceRoster({ members, peers, routes, peerIds, node, pool, onAutoAssign }) {
   const { network, requireUnlock } = useApp()
   const toast = useToast()
   const isRoot = !!network?.isRoot
@@ -124,20 +131,21 @@ export function DeviceRoster({ members, peers, routes, node, pool, onAutoAssign 
   const rt = runtimeIndex(
     runtimeDown ? null : peers.data,
     runtimeDown ? null : routes.data,
+    runtimeDown ? null : peerIds?.data,
     runtimeDown ? null : node.data?.node_info,
   )
   const zone = dnsZone(rt.my?.config)
 
-  // 名册行：每台成员按 hostname 左连运行时（无主机名/未上线 → rt=null）。
-  const usedHosts = new Set()
+  // 名册行：每台成员先按指纹左连运行时，指纹缺失才回退 hostname（未上线 → rt=null）。
+  const usedPeers = new Set()
   const memberRows = list.map((d) => {
-    const r = d.hostname ? rt.byHost[d.hostname] : null
-    if (r) usedHosts.add(d.hostname)
+    const r = (d.fingerprint && rt.byFp[d.fingerprint]) || (d.hostname && rt.byHost[d.hostname]) || null
+    if (r) usedPeers.add(r.peer_id)
     return { dev: d, rt: r }
   })
-  // 在线但不在名册（临时设备）：非本机、且 hostname 不匹配任何成员。
+  // 在线但不在名册（临时设备）：非本机、且未被任何成员行认领。
   const tempRows = rt.entries
-    .filter((e) => !e.isSelf && (!e.hostname || !usedHosts.has(e.hostname)))
+    .filter((e) => !e.isSelf && !usedPeers.has(e.peer_id))
     .map((e) => ({ rt: e }))
 
   const hasRows = memberRows.length || tempRows.length
@@ -145,7 +153,7 @@ export function DeviceRoster({ members, peers, routes, node, pool, onAutoAssign 
     sel?.kind === 'member' ? memberRows.find((r) => r.dev.device_id === sel.id) :
     sel?.kind === 'temp' ? tempRows.find((r) => r.rt.peer_id === sel.id) : null
 
-  const refreshAll = () => { members.refresh(); peers.refresh(); routes.refresh(); node.refresh() }
+  const refreshAll = () => { members.refresh(); peers.refresh(); routes.refresh(); peerIds?.refresh(); node.refresh() }
 
   return (
     <>

@@ -29,6 +29,7 @@ export function Network({ onNavigate }) {
   )
   const routes = usePoll(api.routes, [], 4000)
   const peers = usePoll(api.peers, [], 4000)
+  const peerIds = usePoll(api.peerIdentities, [], 4000)
   const node = usePoll(api.node, [], 4000)
 
   const [leaving, setLeaving] = useState(false)
@@ -132,7 +133,7 @@ export function Network({ onNavigate }) {
       {/* 设备（治理名册，内嵌自 devices.jsx） */}
       <div class="card">
         <div class="card-title">设备</div>
-        <DeviceRoster members={members} peers={peers} routes={routes} node={node} pool={pool} onAutoAssign={autoAssign} />
+        <DeviceRoster members={members} peers={peers} routes={routes} peerIds={peerIds} node={node} pool={pool} onAutoAssign={autoAssign} />
       </div>
 
       {/* 名称解析（MagicDNS，可开关 / 设网络域） */}

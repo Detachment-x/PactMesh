@@ -79,22 +79,18 @@ export function ErrorState({ error, onRetry }) {
 
 // ---------------- 模态 ----------------
 export function Modal({ title, onClose, children, footer, width = 420 }) {
-  const ref = useRef(null)
+  // onClose 每次渲染都是新函数，若入依赖数组则 effect 每渲染重跑；重跑时把焦点抢回弹窗容器，
+  // 会导致口令输入框每敲一个字符就掉焦。故经 ref 取最新 onClose、依赖置空，且不抢焦点。
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
   useEffect(() => {
-    const onKey = (e) => e.key === 'Escape' && onClose?.()
+    const onKey = (e) => e.key === 'Escape' && onCloseRef.current?.()
     document.addEventListener('keydown', onKey)
-    ref.current?.focus()
     return () => document.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [])
   return (
     <div class="modal-backdrop" onClick={onClose}>
-      <div
-        class="modal"
-        style={{ width: `${width}px` }}
-        ref={ref}
-        tabIndex={-1}
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div class="modal" style={{ width: `${width}px` }} onClick={(e) => e.stopPropagation()}>
         <div class="modal-head">
           <span>{title}</span>
           <button class="modal-x" onClick={onClose} aria-label="关闭">✕</button>

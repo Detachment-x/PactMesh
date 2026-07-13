@@ -94,6 +94,8 @@ export const api = {
   // 连通 / 诊断（均为 daemon RPC 透传，无 daemon → 502）
   node: () => getJson('/api/node'),
   peers: () => getJson('/api/peers'),
+  // peer_id → 证书指纹：设备名册据此把运行时 peer 与名册成员对上（hostname 会重名/改名）
+  peerIdentities: () => getJson('/api/peer-identities'),
   routes: () => getJson('/api/routes'),
   stats: () => getJson('/api/stats'),
   aclStats: () => getJson('/api/acl-stats'),
