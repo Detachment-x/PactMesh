@@ -1,0 +1,27 @@
+[package]
+name = "pactmesh-android"
+version = "0.5.0-beta.8"
+edition.workspace = true
+rust-version.workspace = true
+license = "LGPL-3.0-only"
+publish = false
+
+[lib]
+name = "pactmesh_android"
+crate-type = ["cdylib"]
+
+[dependencies]
+pactmesh = { path = "../pactmesh", default-features = false, features = [
+    "tun",
+    "smoltcp",
+    "magic-dns",
+    "wireguard",
+    "websocket",
+    "quic",
+    "zstd",
+] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+uuid = "1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"

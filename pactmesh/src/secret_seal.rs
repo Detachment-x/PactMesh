@@ -90,12 +90,37 @@ fn unwrap(blob: &[u8]) -> Result<(u8, &[u8])> {
 
 // ---- Linux / Unix ----------------------------------------------------------
 
+/// Android exposes no app-readable OS machine id, so the host app installs a
+/// Keystore-wrapped, install-scoped secret at startup and we key off that instead.
+#[cfg(target_os = "android")]
+static DEVICE_SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Install the device-bound secret backing [`seal`]/[`unseal`]. Must be called
+/// before either, and must yield the same value across app restarts.
+#[cfg(target_os = "android")]
+pub fn set_device_secret(secret: String) {
+    let _ = DEVICE_SECRET.set(secret);
+}
+
+#[cfg(target_os = "android")]
+fn device_id() -> Result<String> {
+    DEVICE_SECRET
+        .get()
+        .cloned()
+        .context("device secret not installed")
+}
+
+#[cfg(all(not(windows), not(target_os = "android")))]
+fn device_id() -> Result<String> {
+    machine_uid::get().map_err(|e| anyhow::anyhow!("failed to read machine id: {e}"))
+}
+
 #[cfg(not(windows))]
 fn machine_id_key() -> Result<age::secrecy::SecretString> {
-    let id = machine_uid::get().map_err(|e| anyhow::anyhow!("failed to read machine id: {e}"))?;
-    // Domain-separate so the raw machine id is never the literal passphrase.
+    // Domain-separate so the raw device id is never the literal passphrase.
     Ok(age::secrecy::SecretString::from(format!(
-        "pactmesh-serve-seal:{id}"
+        "pactmesh-serve-seal:{}",
+        device_id()?
     )))
 }
 

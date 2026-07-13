@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "pactmesh",
+    "pactmesh-android",
     "pactmesh-rpc-build",
 ]
 default-members = ["pactmesh"]
@@ -20,6 +21,13 @@ lto = true
 codegen-units = 1
 opt-level = 3
 strip = true
+
+# The JNI boundary needs unwinding: `panic = "abort"` would turn any panic in
+# Rust into an immediate process kill instead of a Java exception.
+[profile.release-android]
+inherits = "release"
+panic = "unwind"
+lto = "thin"
 
 [profile.ci-artifact]
 inherits = "release"
