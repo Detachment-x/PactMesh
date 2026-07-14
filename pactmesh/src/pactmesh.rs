@@ -3,7 +3,7 @@ use std::{
     ffi::OsString,
     future::Future,
     io::IsTerminal,
-    io::{Read as _, Write as _},
+    io::Write as _,
     net::{IpAddr, SocketAddr},
     path::PathBuf,
     pin::Pin,
@@ -32,13 +32,16 @@ use pactmesh::service_manager::{Service, ServiceInstallOptions};
 use tokio::time::timeout;
 use url::Url;
 
+use pactmesh::control::join::{
+    AcceptInviteOptions as JoinOptions, JoinOutcome, JoinProgress, accept_invite,
+    load_or_create_global_device_identity, parse_bootstrap_source,
+};
 use pactmesh::{
     common::{
         config::TomlConfigLoader,
         config_dir::{pnw_config_dir, pnw_serve_instances_dir, pnw_trust_domains_dir},
         constants::PACTMESH_VERSION,
         stun::{StunInfoCollector, StunInfoCollectorTrait},
-        trust_context::{SK_SELF_AGE_FILE, SK_SELF_RAW_FILE, write_raw_sk_self},
     },
     peers,
     proto::{
@@ -46,9 +49,8 @@ use pactmesh::{
         api::{
             config::{
                 AclPatch, ApproveJoinRequestRequest, ConfigPatchAction, ConfigRpc,
-                ConfigRpcClientFactory, FetchPendingMemberCertRequest, InstanceConfigPatch,
-                ListPendingJoinRequestsRequest, PatchConfigRequest, PortForwardPatch,
-                RejectJoinRequestRequest, StringPatch, SubmitJoinRequestRequest,
+                ConfigRpcClientFactory, InstanceConfigPatch, ListPendingJoinRequestsRequest,
+                PatchConfigRequest, PortForwardPatch, RejectJoinRequestRequest, StringPatch,
                 TrustJoinManageRpc, TrustJoinManageRpcClientFactory, UpgradePeerToRootRequest,
                 UrlPatch,
             },
@@ -87,9 +89,9 @@ use pactmesh::{
     },
     trust::{
         ACL_SCHEMA_VERSION, AclPolicy, AclRule, Action, DeviceFingerprint, HostnameLabel,
-        JoinRequest, MemberCertIndexEntry, NetworkLocalId, NetworkStatePayload, PacketTuple,
-        PeerHint, PeerMatchContext, PortSpec, Proto, Selector as AclSelector, SignKey,
-        SignedNetworkState, TagName, TrustDomainRoot, UnsignedNetworkState, decide, from_cbor,
+        MemberCertIndexEntry, NetworkLocalId, NetworkStatePayload, PacketTuple, PeerHint,
+        PeerMatchContext, PortSpec, Proto, Selector as AclSelector, TagName, TrustDomainRoot,
+        UnsignedNetworkState, decide, from_cbor,
         hostname::check_hostname_unique,
         network_bootstrap::{NetworkBootstrap, bootstrap_to_qr_svg},
         revocation::RevocationReason,
@@ -2566,6 +2568,7 @@ impl<'a> CommandHandler<'a> {
                 token: args.token.clone(),
                 unlock_ttl_secs: args.unlock_ttl_secs,
                 attach_primary,
+                announce_endpoint: true,
             },
         )
         .await
@@ -4016,17 +4019,6 @@ impl<'a> CommandHandler<'a> {
         }
         Ok(ports)
     }
-}
-
-fn parse_bootstrap_source(source: &str) -> Result<NetworkBootstrap, Error> {
-    if source.starts_with("privatenetwork://") {
-        let url = Url::parse(source)?;
-        return Ok(NetworkBootstrap::from_url(&url)?);
-    }
-
-    let text = std::fs::read_to_string(source)
-        .with_context(|| format!("failed to read bootstrap file {source}"))?;
-    Ok(NetworkBootstrap::from_pem(&text)?)
 }
 
 fn write_or_print_output(out: Option<&PathBuf>, content: &str) -> Result<(), Error> {
@@ -8484,105 +8476,6 @@ fn read_optional_device_passphrase(
     Ok(Some(passphrase))
 }
 
-fn seal_device_sign_key(sk_self: &SignKey, password: &str) -> Result<Vec<u8>, Error> {
-    let mut recipient =
-        age::scrypt::Recipient::new(age::secrecy::SecretString::from(password.to_owned()));
-    recipient.set_work_factor(2);
-    let encryptor =
-        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
-            .context("failed to create device-key encryptor")?;
-    let mut encrypted = Vec::new();
-    let mut writer = encryptor.wrap_output(&mut encrypted)?;
-    writer.write_all(&sk_self.to_bytes())?;
-    writer.finish()?;
-    Ok(encrypted)
-}
-
-fn load_device_sign_key(path: &std::path::Path, password: &str) -> Result<SignKey, Error> {
-    let blob = std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let decryptor =
-        age::Decryptor::new(&blob[..]).context("failed to parse device key age file")?;
-    let identity =
-        age::scrypt::Identity::new(age::secrecy::SecretString::from(password.to_owned()));
-    let mut reader = decryptor
-        .decrypt(std::iter::once(&identity as &dyn age::Identity))
-        .context("failed to decrypt device key")?;
-    let mut plaintext = Vec::new();
-    reader.read_to_end(&mut plaintext)?;
-    let bytes: [u8; 32] = plaintext
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("device key plaintext must be 32 bytes"))?;
-    Ok(SignKey::from_bytes(bytes))
-}
-
-fn load_or_create_global_device_identity(
-    password: Option<&str>,
-) -> Result<(SignKey, String, PathBuf, &'static str), Error> {
-    let device_dir = pnw_config_dir()?.join("devices/default");
-    let age_path = device_dir.join(SK_SELF_AGE_FILE);
-    if age_path.exists() {
-        let password = password.ok_or_else(|| {
-            anyhow::anyhow!(
-                "PNW_DEVICE_PASSPHRASE or --passphrase-file is required for existing sk_self.age"
-            )
-        })?;
-        let sk_self = load_device_sign_key(&age_path, password)?;
-        let device_pk = sk_self.verify_key();
-        let pk_path = device_dir.join("pk_self.pem");
-        if pk_path.exists() {
-            let pem = std::fs::read_to_string(&pk_path)
-                .with_context(|| format!("failed to read {}", pk_path.display()))?;
-            let stored = pactmesh::trust::unwrap_armored(&pem, "PNW-PK-SELF")
-                .with_context(|| format!("failed to parse {}", pk_path.display()))?;
-            if stored.as_slice() != device_pk.0 {
-                anyhow::bail!("global device pk_self.pem does not match sk_self.age");
-            }
-        }
-        let device_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(device_pk.0);
-        return Ok((sk_self, device_id, device_dir, SK_SELF_AGE_FILE));
-    }
-    let raw_path = device_dir.join(SK_SELF_RAW_FILE);
-    if raw_path.exists() {
-        let bytes = std::fs::read(&raw_path)
-            .with_context(|| format!("failed to read {}", raw_path.display()))?;
-        let bytes: [u8; 32] = bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("sk_self.raw must contain exactly 32 bytes"))?;
-        let sk_self = SignKey::from_bytes(bytes);
-        let device_pk = sk_self.verify_key();
-        let device_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(device_pk.0);
-        return Ok((sk_self, device_id, device_dir, SK_SELF_RAW_FILE));
-    }
-
-    std::fs::create_dir_all(&device_dir)
-        .with_context(|| format!("failed to create {}", device_dir.display()))?;
-    let sk_self = SignKey::generate();
-    let device_pk = sk_self.verify_key();
-    let device_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(device_pk.0);
-    let key_file = if let Some(password) = password {
-        std::fs::write(&age_path, seal_device_sign_key(&sk_self, password)?)
-            .with_context(|| format!("failed to write {}", age_path.display()))?;
-        SK_SELF_AGE_FILE
-    } else {
-        write_raw_sk_self(&raw_path, &sk_self)
-            .with_context(|| format!("failed to write {}", raw_path.display()))?;
-        SK_SELF_RAW_FILE
-    };
-    std::fs::write(
-        device_dir.join("pk_self.pem"),
-        wrap_armored("PNW-PK-SELF", &device_pk.0),
-    )
-    .with_context(|| {
-        format!(
-            "failed to write {}",
-            device_dir.join("pk_self.pem").display()
-        )
-    })?;
-    Ok((sk_self, device_id, device_dir, key_file))
-}
-
 fn copy_device_key_to_network(
     device_dir: &std::path::Path,
     network_dir: &std::path::Path,
@@ -8593,226 +8486,48 @@ fn copy_device_key_to_network(
     Ok(())
 }
 
-fn ensure_bootstrap_root(
-    domain_dir: &std::path::Path,
-    bootstrap: &NetworkBootstrap,
-) -> Result<(), Error> {
-    std::fs::create_dir_all(domain_dir)
-        .with_context(|| format!("failed to create {}", domain_dir.display()))?;
-    let pk_root_path = domain_dir.join("pk_root.pem");
-    if pk_root_path.exists() {
-        let existing_pem = std::fs::read_to_string(&pk_root_path)
-            .with_context(|| format!("failed to read {}", pk_root_path.display()))?;
-        let existing_bytes = pactmesh::trust::unwrap_armored(&existing_pem, "PNW-PK-ROOT")
-            .with_context(|| format!("failed to parse {}", pk_root_path.display()))?;
-        let existing_bytes: [u8; 32] = existing_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("pk_root.pem must contain 32 bytes"))?;
-        let existing = VerifyingKey::from_bytes(&existing_bytes)
-            .map_err(|err| anyhow::anyhow!("invalid pk_root.pem: {err}"))?;
-        if existing.as_bytes() != bootstrap.pk_root.as_bytes() {
-            anyhow::bail!("existing pk_root.pem does not match invite");
-        }
-        return Ok(());
-    }
-    std::fs::write(
-        &pk_root_path,
-        wrap_armored("PNW-PK-ROOT", bootstrap.pk_root.as_bytes()),
-    )
-    .with_context(|| format!("failed to write {}", pk_root_path.display()))
-}
-
 async fn handle_trust_accept_invite(
-    handler: &CommandHandler<'_>,
+    _handler: &CommandHandler<'_>,
     options: AcceptInviteOptions,
 ) -> Result<(), Error> {
-    let bootstrap = parse_bootstrap_source(&options.source)?;
-    bootstrap.verify_self_consistency()?;
-    let domain_dir = pnw_trust_domains_dir()?.join(bootstrap.trust_domain_id.to_string());
-    ensure_bootstrap_root(&domain_dir, &bootstrap)?;
-
     let passphrase = read_optional_device_passphrase(options.passphrase_file.as_ref())?;
-    let (sk_self, device_id, device_dir, key_file) =
-        load_or_create_global_device_identity(passphrase.as_deref())?;
+    let result = accept_invite(JoinOptions {
+        source: options.source,
+        device_label: options.device_label,
+        hint: options.hint,
+        passphrase,
+        online: options.online,
+        wait_secs: options.wait_secs,
+        poll_secs: options.poll_secs,
+        on_progress: Some(Arc::new(|progress| match progress {
+            JoinProgress::Submitting => println!("Connecting to join admission endpoint..."),
+            JoinProgress::AwaitingApproval => println!("Waiting for approval..."),
+            JoinProgress::Approved => {}
+        })),
+    })
+    .await?;
 
-    let network_dir = domain_dir
-        .join("networks")
-        .join(bootstrap.network_local_id.to_string());
-    std::fs::create_dir_all(&network_dir)
-        .with_context(|| format!("failed to create {}", network_dir.display()))?;
-    std::fs::write(network_dir.join("device_id"), format!("{}\n", device_id)).with_context(
-        || {
-            format!(
-                "failed to write {}",
-                network_dir.join("device_id").display()
-            )
-        },
-    )?;
-    copy_device_key_to_network(&device_dir, &network_dir, key_file)?;
-    std::fs::write(
-        network_dir.join("network_bootstrap.cbor.pem"),
-        bootstrap.to_pem(),
-    )
-    .with_context(|| {
-        format!(
-            "failed to write {}",
-            network_dir.join("network_bootstrap.cbor.pem").display()
-        )
-    })?;
-    let jr = JoinRequest::new_signed(
-        bootstrap.trust_domain_id,
-        bootstrap.network_local_id.clone(),
-        &sk_self,
-        options
-            .device_label
-            .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().to_string()),
-        options.hint,
-    );
-    let join_path = network_dir.join("pending_join_request.cbor.pem");
-    std::fs::write(
-        &join_path,
-        wrap_armored("PNW-JOIN-REQUEST", &to_canonical_cbor(&jr)),
-    )
-    .with_context(|| format!("failed to write {}", join_path.display()))?;
-
-    if options.online {
-        submit_join_request_online(
-            handler,
-            &bootstrap,
-            &network_dir,
-            &jr,
-            options.wait_secs,
-            options.poll_secs,
-        )
-        .await?;
-        println!("Device key stored at {}", device_dir.display());
-        return Ok(());
+    match result.outcome {
+        JoinOutcome::Approved => {
+            if let Some(cert_path) = &result.member_cert_path {
+                println!("Got member cert: {}", cert_path.display());
+            }
+        }
+        JoinOutcome::PreparedOffline => {
+            println!(
+                "Prepared offline join request at {}",
+                result.join_request_path.display()
+            );
+        }
     }
-
-    println!("Prepared offline join request at {}", join_path.display());
-    println!("Device key stored at {}", device_dir.display());
-    println!(
-        "Offline mode: transfer this file to a root operator for approval, then import the returned member cert. Omit --offline to submit automatically."
-    );
+    println!("Device key stored at {}", result.device_dir.display());
+    if result.outcome == JoinOutcome::PreparedOffline {
+        println!(
+            "Offline mode: transfer this file to a root operator for approval, then import the returned member cert. Omit --offline to submit automatically."
+        );
+    }
     Ok(())
 }
-
-fn derive_join_admission_url(seed: &Url) -> Option<Url> {
-    if seed.scheme() != "tcp" {
-        return None;
-    }
-    let port = seed.port()?;
-    let admission_port = port.checked_add(1)?;
-    let mut admission = seed.clone();
-    admission.set_port(Some(admission_port)).ok()?;
-    Some(admission)
-}
-
-async fn connect_join_admission_client(
-    bootstrap: &NetworkBootstrap,
-) -> Result<StandAloneClient<TcpTunnelConnector>, Error> {
-    let mut last_error = None;
-    for seed in &bootstrap.bootstrap_seeds {
-        let Some(admission_url) = derive_join_admission_url(seed) else {
-            continue;
-        };
-        let connector = TcpTunnelConnector::new(admission_url.clone());
-        let mut client = StandAloneClient::new(connector);
-        match client
-            .scoped_client::<TrustJoinManageRpcClientFactory<BaseController>>(String::new())
-            .await
-        {
-            Ok(_) => return Ok(client),
-            Err(err) => {
-                last_error = Some(format!("{admission_url}: {err}"));
-            }
-        }
-    }
-
-    anyhow::bail!(
-        "failed to connect to join admission endpoint from invite peer hints{}",
-        last_error.map(|err| format!(": {err}")).unwrap_or_default()
-    )
-}
-
-async fn submit_join_request_online(
-    _handler: &CommandHandler<'_>,
-    bootstrap: &NetworkBootstrap,
-    network_dir: &std::path::Path,
-    jr: &JoinRequest,
-    wait_secs: u64,
-    poll_secs: u64,
-) -> Result<(), Error> {
-    if poll_secs == 0 {
-        anyhow::bail!("--poll-secs must be greater than 0");
-    }
-
-    let mut admission_rpc = connect_join_admission_client(bootstrap).await?;
-    println!("Connecting to join admission endpoint...");
-    admission_rpc
-        .scoped_client::<TrustJoinManageRpcClientFactory<BaseController>>(String::new())
-        .await?
-        .submit_join_request(
-            BaseController::default(),
-            SubmitJoinRequestRequest {
-                instance: None,
-                join_request_cbor: to_canonical_cbor(jr),
-                ttl: 6,
-            },
-        )
-        .await
-        .context("failed to submit join request to daemon")?;
-
-    println!("Waiting for approval...");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
-    loop {
-        let response = admission_rpc
-            .scoped_client::<TrustJoinManageRpcClientFactory<BaseController>>(String::new())
-            .await?
-            .fetch_pending_member_cert(
-                BaseController::default(),
-                FetchPendingMemberCertRequest {
-                    instance: None,
-                    trust_domain_id: jr.trust_domain_id.0.to_vec(),
-                    network_local_id: jr.network_local_id.as_str().to_owned(),
-                    applicant_pk: jr.applicant_pk.0.to_vec(),
-                },
-            )
-            .await
-            .context("failed to fetch pending member cert from daemon")?;
-
-        if response.found {
-            let cert_path = network_dir.join("member_cert.pem");
-            let cert: pactmesh::trust::MemberCert = from_cbor(&response.member_cert_cbor)
-                .context("daemon returned invalid member cert CBOR")?;
-            std::fs::write(&cert_path, cert.to_pem())
-                .with_context(|| format!("failed to write {}", cert_path.display()))?;
-            if response.network_state_cbor.is_empty() {
-                anyhow::bail!("daemon returned member cert without network_state");
-            }
-            let state: SignedNetworkState = from_cbor(&response.network_state_cbor)
-                .context("daemon returned invalid network_state CBOR")?;
-            if state.details.trust_domain_id != jr.trust_domain_id {
-                anyhow::bail!("daemon returned network_state for a different trust domain");
-            }
-            if state.details.network_local_id != jr.network_local_id {
-                anyhow::bail!("daemon returned network_state for a different network");
-            }
-            let state_path = network_dir.join("network_state.cbor.pem");
-            std::fs::write(&state_path, state.to_pem())
-                .with_context(|| format!("failed to write {}", state_path.display()))?;
-            println!("Got member cert: {}", cert_path.display());
-            return Ok(());
-        }
-
-        if std::time::Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for approval");
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(poll_secs)).await;
-    }
-}
-
 fn parse_url_safe_b64_32(value: &str, kind: &str) -> Result<[u8; 32], Error> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(value)

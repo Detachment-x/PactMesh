@@ -14,7 +14,7 @@ use crate::{
     rpc_service::InstanceRpcService,
 };
 
-pub(crate) struct DaemonGuard {
+pub struct DaemonGuard {
     guard: Option<Arc<()>>,
     stop_check_notifier: Arc<tokio::sync::Notify>,
 }
@@ -254,7 +254,7 @@ impl NetworkInstanceManager {
         self.config_dir.as_ref()
     }
 
-    pub(crate) fn register_daemon(&self) -> DaemonGuard {
+    pub fn register_daemon(&self) -> DaemonGuard {
         DaemonGuard {
             guard: Some(self.guard_counter.clone()),
             stop_check_notifier: self.stop_check_notifier.clone(),

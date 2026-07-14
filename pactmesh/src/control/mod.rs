@@ -4,6 +4,9 @@
 //! 避免重复实现"加载 root → 改状态 → 版本+1 → 签名 → 落盘"。各调用方只提供
 //! 针对 `payload` 的具体变更闭包，并自行处理打印 / RPC 通知 / 响应。
 
+pub mod embedded;
+pub mod join;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

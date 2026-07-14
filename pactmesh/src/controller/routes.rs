@@ -13,6 +13,7 @@ use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use super::{access, auth, session, AppState};
+use crate::control::join::{AcceptInviteOptions as JoinOptions, accept_invite};
 use crate::control::{self, SigningSession};
 use crate::proto::acl::Acl;
 use crate::proto::api::config::{
@@ -2296,8 +2297,9 @@ struct JoinReq {
     listeners: Vec<String>,
 }
 
-/// B-2 发起加入（非阻塞）：解析邀请 → 封存口令 → 起脱离会话子进程 `accept-invite`
-/// （自己等批准）→ 落一份 pending-join meta 供 B-3 判定/挂载 → 立即返回 pending。
+/// B-2 发起加入（非阻塞）：解析邀请 → 落 pending-join meta 供 B-3 判定/挂载 →
+/// 进程内起 join 任务（自己等批准，可达 1 小时）→ 立即返回 pending。
+/// 任务失败写回 meta 的 `error`；过去它是个默默死掉的子进程，前端只能干等到超时。
 async fn api_network_join(State(_s): State<AppState>, Json(req): Json<JoinReq>) -> Response {
     // 1) 解析校验邀请链接（失败 400，与 invite-preview 一致）
     let url = match url::Url::parse(req.invite_url.trim()) {
@@ -2312,52 +2314,26 @@ async fn api_network_join(State(_s): State<AppState>, Json(req): Json<JoinReq>) 
     let nid = bootstrap.network_local_id.to_string();
 
     let result = (|| {
-        // 2) 计算 network_dir（供 meta；设备钥 raw，无口令封存）。accept-invite 会自建该目录。
+        // 2) 计算 network_dir（供 meta）。accept_invite 会自建该目录。
         let domain_dir = crate::common::config_dir::pnw_trust_domains_dir()?.join(&td);
         let network_dir = domain_dir.join("networks").join(&nid);
 
-        // 3) 脱离会话起后台子进程 accept-invite（online 默认；无设备口令 → raw，日志落盘）
+        // 3) 落控制器 meta 供 B-3（join-status）判定 + 批准后挂载 + F-4 重开恢复。
+        //    先落盘再起任务：任务要靠它记录失败。
+        let meta_dir = crate::common::config_dir::pnw_config_dir()?.join("pending-joins");
+        std::fs::create_dir_all(&meta_dir)
+            .with_context(|| format!("failed to create {}", meta_dir.display()))?;
         let device_label = req
             .device_label
             .clone()
             .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().to_string());
-        let exe = std::env::current_exe().context("failed to locate the pactmesh executable")?;
-        let log_path = crate::common::config_dir::pnw_config_dir()?
-            .join(format!("pactmesh-join-{}.log", pending_join_key(&td, &nid)));
-        let log = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .with_context(|| format!("failed to open {}", log_path.display()))?;
-        let log_err = log.try_clone()?;
-        std::process::Command::new(&exe)
-            .args([
-                "trust",
-                "accept-invite",
-                req.invite_url.trim(),
-                "--device-label",
-                &device_label,
-                "--wait-secs",
-                &JOIN_WAIT_SECS.to_string(),
-                "--poll-secs",
-                &JOIN_POLL_SECS.to_string(),
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::from(log))
-            .stderr(std::process::Stdio::from(log_err))
-            .spawn()
-            .context("failed to start accept-invite")?;
-
-        // 4) 落控制器 meta 供 B-3（join-status）判定 + 批准后挂载 + F-4 重开恢复
-        let meta_dir = crate::common::config_dir::pnw_config_dir()?.join("pending-joins");
-        std::fs::create_dir_all(&meta_dir)
-            .with_context(|| format!("failed to create {}", meta_dir.display()))?;
         let meta = serde_json::json!({
             "trust_domain_id": td,
             "network_local_id": nid,
             "domain_label": bootstrap.trust_domain_label,
             "network_name": bootstrap.network_name,
             "network_dir": network_dir.to_string_lossy(),
+            "device_label": device_label,
             "no_tun": req.no_tun,
             "listeners": req.listeners,
             "seeds": bootstrap.bootstrap_seeds.iter().map(|u| u.as_str().to_string()).collect::<Vec<_>>(),
@@ -2368,6 +2344,26 @@ async fn api_network_join(State(_s): State<AppState>, Json(req): Json<JoinReq>) 
         std::fs::write(&meta_path, serde_json::to_vec_pretty(&meta)?)
             .with_context(|| format!("failed to write {}", meta_path.display()))?;
 
+        // 4) 进程内驱动 join（等批准可达 1 小时，绝不能阻塞这个请求）。
+        //    设备口令沿用 serve 进程的环境变量：过去子进程继承它，改成进程内后若
+        //    直接传 None，装了 sk_self.age 的部署会突然打不开自己的设备钥。
+        let options = JoinOptions {
+            source: req.invite_url.trim().to_owned(),
+            device_label: Some(device_label),
+            hint: String::new(),
+            passphrase: std::env::var("PNW_DEVICE_PASSPHRASE").ok(),
+            online: true,
+            wait_secs: JOIN_WAIT_SECS,
+            poll_secs: JOIN_POLL_SECS,
+            on_progress: None,
+        };
+        tokio::spawn(async move {
+            if let Err(err) = accept_invite(options).await {
+                tracing::warn!("join failed: {err:#}");
+                record_join_error(&meta_path, &format!("{err:#}"));
+            }
+        });
+
         Ok::<_, anyhow::Error>(serde_json::json!({
             "trust_domain_id": td,
             "network_local_id": nid,
@@ -2377,6 +2373,85 @@ async fn api_network_join(State(_s): State<AppState>, Json(req): Json<JoinReq>) 
     match result {
         Ok(v) => json_response(StatusCode::OK, v),
         Err(e) => json_error(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+/// 控制器重启会带走进程内的 join 任务（换掉的子进程不会）。启动时把未过期、未完成的
+/// join 重新驱动起来，恢复能力因此比子进程时代更强，而不是更弱。
+/// 邀请正文取自 join 自己落盘的 `network_bootstrap.cbor.pem`，不必把邀请链接留在 meta 里。
+pub(crate) fn resume_pending_joins() {
+    let Ok(meta_dir) =
+        crate::common::config_dir::pnw_config_dir().map(|dir| dir.join("pending-joins"))
+    else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&meta_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let meta_path = entry.path();
+        if meta_path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(meta) = std::fs::read(&meta_path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+        else {
+            continue;
+        };
+        if meta.get("error").is_some() {
+            continue;
+        }
+        let network_dir =
+            std::path::PathBuf::from(meta["network_dir"].as_str().unwrap_or_default());
+        // 已批准的交给 join-status 去挂载，不该再起 join。
+        if network_dir.join("member_cert.pem").exists() {
+            continue;
+        }
+        let bootstrap_path = network_dir.join("network_bootstrap.cbor.pem");
+        if !bootstrap_path.is_file() {
+            continue;
+        }
+        let started_at = meta["started_at"].as_u64().unwrap_or(0);
+        let wait_secs = meta["wait_secs"].as_u64().unwrap_or(JOIN_WAIT_SECS);
+        let Some(remaining) = wait_secs
+            .checked_sub(now_unix().saturating_sub(started_at))
+            .filter(|remaining| *remaining > 0)
+        else {
+            continue;
+        };
+
+        let options = JoinOptions {
+            source: bootstrap_path.to_string_lossy().into_owned(),
+            device_label: meta["device_label"].as_str().map(str::to_owned),
+            hint: String::new(),
+            passphrase: std::env::var("PNW_DEVICE_PASSPHRASE").ok(),
+            online: true,
+            wait_secs: remaining,
+            poll_secs: JOIN_POLL_SECS,
+            on_progress: None,
+        };
+        tracing::info!("resuming pending join for {}", network_dir.display());
+        tokio::spawn(async move {
+            if let Err(err) = accept_invite(options).await {
+                tracing::warn!("resumed join failed: {err:#}");
+                record_join_error(&meta_path, &format!("{err:#}"));
+            }
+        });
+    }
+}
+
+/// 把 join 任务的失败原因写回 meta，让 join-status 立刻报错而不是干等到超时。
+fn record_join_error(meta_path: &std::path::Path, error: &str) {
+    let Ok(raw) = std::fs::read(meta_path) else {
+        return;
+    };
+    let Ok(mut meta) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        return;
+    };
+    meta["error"] = serde_json::json!(error);
+    if let Ok(bytes) = serde_json::to_vec_pretty(&meta) {
+        let _ = std::fs::write(meta_path, bytes);
     }
 }
 
@@ -2432,9 +2507,14 @@ async fn api_join_status(State(s): State<AppState>) -> Response {
         });
         let cert_ok = network_dir.join("member_cert.pem").exists();
         let submitted = network_dir.join("pending_join_request.cbor.pem").exists();
+        let join_error = meta["error"].as_str().map(str::to_owned);
 
         let mut item = base.clone();
-        if cert_ok {
+        if let Some(err) = join_error.filter(|_| !cert_ok) {
+            // join 任务已失败：直接报出去，别让用户盯着"等待批准"耗到超时。
+            item["status"] = serde_json::json!("error");
+            item["error"] = serde_json::json!(err);
+        } else if cert_ok {
             // 批准：挂载到运行中空载 daemon（不重启）→ 成功删 meta。
             match attach_trust_network(&s, &td, &nid, listeners, seeds, no_tun).await {
                 Ok(inst_id) => {

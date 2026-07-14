@@ -33,6 +33,10 @@ pub struct ControllerConfig {
     /// quickstart / serve run 的主网络：控制器启动后经 `run_network_instance`
     /// 挂载到空载 daemon（而非烘焙进 CLI），使主网络成为可管理、可热停的实例。
     pub attach_primary: Option<AttachPrimary>,
+    /// 落 `controller-endpoint.json` 并向 stdout 打印带 token 的浏览器入口。
+    /// 桌面端靠这两样把用户送进控制台；进程内宿主（Android）自带 token 与端口、
+    /// 也没有 stdout，置 false 即可。
+    pub announce_endpoint: bool,
 }
 
 /// 待挂载的主网络描述（quickstart/serve 由既有信任域自举后交由控制器挂载）。
@@ -90,6 +94,9 @@ pub async fn run(
         }
     }
 
+    // 重开控制台时把没走完的 join 接着跑（进程内任务不会跨重启存活）。
+    routes::resume_pending_joins();
+
     let app = routes::router(state);
 
     // 绑定地址由「Web UI 访问来源」决定，只沿用 `--listen` 的端口；来源过滤在 auth::guard。
@@ -107,10 +114,16 @@ pub async fn run(
 
     // 运行时端点文件（Jupyter 式）：存活期间落 {listen,token} 0600，退出删除，
     // 供 `pactmesh web` / Windows 托盘读取后免 token 直达浏览器。
-    let _endpoint = EndpointFileGuard::write(url, &token);
+    let _endpoint = config
+        .announce_endpoint
+        .then(|| EndpointFileGuard::write(url, &token));
 
-    println!("pactmesh controller serving at http://{url}");
-    println!("open in browser: http://{url}/?token={token}");
+    if config.announce_endpoint {
+        println!("pactmesh controller serving at http://{url}");
+        println!("open in browser: http://{url}/?token={token}");
+    } else {
+        tracing::info!("pactmesh controller serving at http://{url}");
+    }
 
     axum::serve(
         listener,
