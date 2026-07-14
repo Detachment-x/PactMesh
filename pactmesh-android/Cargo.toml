@@ -20,8 +20,13 @@ pactmesh = { path = "../pactmesh", default-features = false, features = [
     "quic",
     "zstd",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
-uuid = "1"
 
+# The crate body is `#![cfg(target_os = "android")]`, so on every other host this
+# builds to an empty rlib and `cargo clippy --workspace` stays clean.
 [target.'cfg(target_os = "android")'.dependencies]
+anyhow = "1.0"
 jni = "0.21"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = "1"

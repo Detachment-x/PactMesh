@@ -1,0 +1,6 @@
+.gradle/
+build/
+local.properties
+
+# cargo-ndk drops the core here; it is a build artifact, not a source.
+app/src/main/jniLibs/

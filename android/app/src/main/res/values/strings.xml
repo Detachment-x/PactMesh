@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PactMesh</string>
+    <string name="probe_start">启动核心并读取实例</string>
+</resources>
