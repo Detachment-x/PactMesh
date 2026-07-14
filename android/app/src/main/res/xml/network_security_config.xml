@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The console runs inside this very process and is reached over loopback, so TLS
+  would only be encrypting a conversation the app is having with itself. Cleartext
+  is permitted for 127.0.0.1 alone; everything else still goes through the platform
+  default, which forbids it.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>
