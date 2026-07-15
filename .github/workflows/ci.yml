@@ -19,7 +19,7 @@ jobs:
       # 而它跟系统权限毫无关系。
       - name: user-facing strings never say root
         run: |
-          if grep -rniE 'root' android/app/src/main/res/values/; then
+          if grep -rniE 'root' android/app/src/main/res/values/; then
             echo "user-facing strings must say 网络管理员, not root" >&2
             exit 1
           fi
