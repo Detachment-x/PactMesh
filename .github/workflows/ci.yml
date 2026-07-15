@@ -15,6 +15,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 术语铁律：那个特权角色对用户一律称「网络管理员」。叫它 root 会和系统 root 混淆，
+      # 而它跟系统权限毫无关系。
+      - name: user-facing strings never say root
+        run: |
+          if grep -rniE 'root' android/app/src/main/res/values/; then
+            echo "user-facing strings must say 网络管理员, not root" >&2
+            exit 1
+          fi
+
       - name: Install protoc
         run: |
           PROTOC_VERSION=25.5

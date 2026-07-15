@@ -888,8 +888,11 @@ impl NetworkConfig {
         if self.enable_socks5.unwrap_or_default()
             && let Some(socks5_port) = self.socks5_port
         {
+            // 移动端只绑回环：手机上代理是给同机 App（如 FlClash）转发进内网用的；绑
+            // 0.0.0.0 等于把无鉴权的内网入口送给同 WiFi 的每台设备。桌面维持原行为。
+            let bind = if cfg!(mobile) { "127.0.0.1" } else { "0.0.0.0" };
             cfg.set_socks5_portal(Some(
-                format!("socks5://0.0.0.0:{}", socks5_port).parse().unwrap(),
+                format!("socks5://{bind}:{socks5_port}").parse().unwrap(),
             ));
         }
 

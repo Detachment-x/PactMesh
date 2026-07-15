@@ -19,7 +19,12 @@ object ApiClient {
         .callTimeout(15, TimeUnit.SECONDS)
         .build()
 
-    val json = Json { ignoreUnknownKeys = true }
+    // proto `optional` fields ride the wire as an explicit `null` when unset; coerce lets
+    // any such null fall back to the model's default instead of throwing mid-parse.
+    val json = Json {
+        ignoreUnknownKeys = true
+        coerceInputValues = true
+    }
 
     private val JSON_MEDIA = "application/json".toMediaType()
 

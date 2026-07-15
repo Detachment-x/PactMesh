@@ -2068,6 +2068,7 @@ pub(super) async fn attach_trust_network(
     listeners: Vec<String>,
     peers: Vec<String>,
     no_tun: bool,
+    socks5_port: Option<u16>,
 ) -> anyhow::Result<Option<String>> {
     let domain_dir = crate::common::config_dir::pnw_trust_domains_dir()?.join(trust_domain_id);
     let domain_dir_str = domain_dir.to_string_lossy().into_owned();
@@ -2090,6 +2091,10 @@ pub(super) async fn attach_trust_network(
         listener_urls: listeners,
         peer_urls: peers,
         no_tun: Some(no_tun),
+        // 代理端口仅由调用方按需指定（安卓共存模式：不占 VPN 槽，靠本机 socks5 让别的
+        // VPN 把内网流量转发进来）。不传 = 不开，桌面行为不变。
+        enable_socks5: Some(socks5_port.is_some()),
+        socks5_port: socks5_port.map(i32::from),
         enable_magic_dns: Some(true),
         tld_dns_zone: Some(magic_dns_zone(network_local_id)),
         trust_domain: Some(TrustDomainLocator {
@@ -2203,6 +2208,7 @@ async fn api_network_run(State(s): State<AppState>, Json(req): Json<NetworkRunRe
             req.listeners.clone(),
             Vec::new(),
             req.no_tun,
+            None,
         )
         .await?;
         // 4.5) 推最新 network_state → 运行实例热应用 effective_ipv4（覆盖启动未即建卡的情况）。
@@ -2231,8 +2237,14 @@ struct NetworkMountReq {
     network_local_id: String,
     #[serde(default)]
     listeners: Vec<String>,
+    // 重挂必须自带种子，否则新实例是 Standalone 孤岛。调用方（安卓切模式）在 leave
+    // 前从 /api/config.peer_urls 抓下当前连接器再传回来，网络连通性才不丢。
+    #[serde(default)]
+    peers: Vec<String>,
     #[serde(default)]
     no_tun: bool,
+    #[serde(default)]
+    socks5_port: Option<u16>,
 }
 
 /// 复用并上线：把盘上已有但未挂载的网络重新挂到运行中空载 daemon。跳过建域/建网/
@@ -2243,8 +2255,9 @@ async fn api_network_mount(State(s): State<AppState>, Json(req): Json<NetworkMou
         &req.trust_domain_id,
         &req.network_local_id,
         req.listeners,
-        Vec::new(),
+        req.peers,
         req.no_tun,
+        req.socks5_port,
     )
     .await;
     match result {
@@ -2295,6 +2308,8 @@ struct JoinReq {
     no_tun: bool,
     #[serde(default)]
     listeners: Vec<String>,
+    #[serde(default)]
+    socks5_port: Option<u16>,
 }
 
 /// B-2 发起加入（非阻塞）：解析邀请 → 落 pending-join meta 供 B-3 判定/挂载 →
@@ -2336,6 +2351,7 @@ async fn api_network_join(State(_s): State<AppState>, Json(req): Json<JoinReq>) 
             "device_label": device_label,
             "no_tun": req.no_tun,
             "listeners": req.listeners,
+            "socks5_port": req.socks5_port,
             "seeds": bootstrap.bootstrap_seeds.iter().map(|u| u.as_str().to_string()).collect::<Vec<_>>(),
             "started_at": now_unix(),
             "wait_secs": JOIN_WAIT_SECS,
@@ -2496,6 +2512,9 @@ async fn api_join_status(State(s): State<AppState>) -> Response {
             .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default();
+        let socks5_port = meta["socks5_port"]
+            .as_u64()
+            .and_then(|p| u16::try_from(p).ok());
         let started_at = meta["started_at"].as_u64().unwrap_or(0);
         let wait_secs = meta["wait_secs"].as_u64().unwrap_or(JOIN_WAIT_SECS);
 
@@ -2516,7 +2535,7 @@ async fn api_join_status(State(s): State<AppState>) -> Response {
             item["error"] = serde_json::json!(err);
         } else if cert_ok {
             // 批准：挂载到运行中空载 daemon（不重启）→ 成功删 meta。
-            match attach_trust_network(&s, &td, &nid, listeners, seeds, no_tun).await {
+            match attach_trust_network(&s, &td, &nid, listeners, seeds, no_tun, socks5_port).await {
                 Ok(inst_id) => {
                     let _ = std::fs::remove_file(&path);
                     item["status"] = serde_json::json!("online");

@@ -2,15 +2,52 @@
 <resources>
     <string name="app_name">PactMesh</string>
     <string name="starting">正在启动…</string>
+    <string name="join_title">加入网络</string>
+    <string name="join_hint">粘贴或扫描网络管理员给你的邀请链接。</string>
     <string name="invite_link">邀请链接</string>
     <string name="join">加入</string>
     <string name="scan">扫码</string>
     <string name="cancel">取消</string>
+    <string name="confirm">确定</string>
+    <string name="copy">复制</string>
+    <string name="apply">应用</string>
     <string name="back">返回</string>
     <string name="domain">信任域：%1$s</string>
     <string name="seeds">种子节点 %1$d 个</string>
-    <!-- 术语铁律：这个角色永远叫「网络管理员」，绝不出现 root。 -->
+    <!-- 术语铁律：这个特权角色对用户一律称「网络管理员」，不用任何系统级称谓。 -->
     <string name="awaiting_admin">已提交，等待「%1$s」的网络管理员批准…</string>
+    <string name="awaiting_ip">等待网络管理员指派 IP</string>
     <string name="peers">对端 %1$d 个</string>
     <string name="hops">跳数 %1$d</string>
+    <string name="latency">延迟 %1$d ms</string>
+    <string name="no_peers">还没有其他在线设备</string>
+
+    <string name="tab_dashboard">概览</string>
+    <string name="tab_peers">对端</string>
+    <string name="tab_settings">设置</string>
+
+    <string name="run_mode">运行模式</string>
+    <string name="mode_coexist">共存模式</string>
+    <string name="mode_vpn">VPN 模式</string>
+    <string name="mode_coexist_hint">不占用系统 VPN。本机流量不自动进内网，但其他 VPN 可经下方代理把内网流量转发进来。</string>
+    <string name="mode_vpn_hint">已占用系统 VPN。本机去往内网的流量直接走隧道。</string>
+    <string name="single_vpn_slot">安卓同一时刻只允许一个 App 持有 VPN。要和 FlClash 等一起用，请选共存模式。</string>
+
+    <string name="download">下行</string>
+    <string name="upload">上行</string>
+
+    <string name="proxy_title">本机代理</string>
+    <string name="socks5_port">SOCKS5 端口</string>
+    <string name="proxy_hint">代理只绑在 127.0.0.1，同一 WiFi 下的其他设备连不上，但本机任意 App 都能经它进内网。把上面的网段在 FlClash 里指到这个代理即可；同时记得让 PactMesh 自身的流量直连。</string>
+    <string name="socks5_hint">改端口要重新挂载网络，会短暂断线。代理仅在共存模式监听。</string>
+
+    <string name="this_device">本机</string>
+    <string name="leave_network">退出网络</string>
+    <string name="purge_network">退出并清除</string>
+    <string name="leave_confirm">退出后本机不再连接该网络，证书仍保留，可随时重新挂载。</string>
+    <string name="purge_confirm">退出并删除本机上该网络的证书与配置。要再次加入，需要网络管理员重新邀请并批准。</string>
+    <string name="version">版本 %1$s</string>
+
+    <string name="vpn_channel">隧道状态</string>
+    <string name="vpn_running">内网隧道运行中</string>
 </resources>

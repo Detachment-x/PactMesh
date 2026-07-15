@@ -15,6 +15,7 @@ pactmesh = { path = "../pactmesh", default-features = false, features = [
     "tun",
     "smoltcp",
     "magic-dns",
+    "socks5",
     "wireguard",
     "websocket",
     "quic",
