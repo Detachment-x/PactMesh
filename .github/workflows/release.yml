@@ -14,9 +14,13 @@ concurrency:
 
 jobs:
   build-windows:
-    name: Build Windows x86_64
+    name: Build Windows x86_64 (${{ matrix.edition }})
     runs-on: windows-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [ admin, member ]
     defaults:
       run:
         shell: bash
@@ -37,13 +41,27 @@ jobs:
           version: '25.5'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve edition vars
+        id: vars
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.edition }}" = "member" ]; then
+            echo "features=--no-default-features --features member,mimalloc" >> "$GITHUB_OUTPUT"
+            echo "stage=pactmesh-member-windows-x86_64" >> "$GITHUB_OUTPUT"
+            echo "setup=pactmesh-member-setup-x86_64" >> "$GITHUB_OUTPUT"
+          else
+            echo "features=--features mimalloc" >> "$GITHUB_OUTPUT"
+            echo "stage=pactmesh-windows-x86_64" >> "$GITHUB_OUTPUT"
+            echo "setup=pactmesh-setup-x86_64" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build
-        run: cargo build --profile ci-artifact --target x86_64-pc-windows-msvc -p pactmesh --features mimalloc --bin pactmesh --bin pactmesh-core
+        run: cargo build --profile ci-artifact --target x86_64-pc-windows-msvc -p pactmesh ${{ steps.vars.outputs.features }} --bin pactmesh --bin pactmesh-core
 
       - name: Package
         run: |
           set -euo pipefail
-          stage=pactmesh-windows-x86_64
+          stage="${{ steps.vars.outputs.stage }}"
           mkdir -p "$stage"
           cp target/x86_64-pc-windows-msvc/ci-artifact/pactmesh.exe "$stage"/
           cp target/x86_64-pc-windows-msvc/ci-artifact/pactmesh-core.exe "$stage"/
@@ -51,12 +69,12 @@ jobs:
           cp pactmesh/third_party/x86_64/*.sys "$stage"/
           cp script/install.ps1 script/install.cmd "$stage"/
           cp README.md "$stage"/ || true
-          7z a -tzip pactmesh-windows-x86_64.zip "$stage" >/dev/null
+          7z a -tzip "$stage".zip "$stage" >/dev/null
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pactmesh-windows-x86_64
-          path: pactmesh-windows-x86_64.zip
+          name: ${{ steps.vars.outputs.stage }}
+          path: ${{ steps.vars.outputs.stage }}.zip
           if-no-files-found: error
 
       - name: Build offline installer (Inno Setup)
@@ -68,21 +86,26 @@ jobs:
           iscc="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
           "$iscc" \
             "//DAppVersion=${ver}" \
-            "//DSourceDir=${GITHUB_WORKSPACE}\\pactmesh-windows-x86_64" \
+            "//DEdition=${{ matrix.edition }}" \
+            "//DSourceDir=${GITHUB_WORKSPACE}\\${{ steps.vars.outputs.stage }}" \
             "//DOutDir=${GITHUB_WORKSPACE}" \
             script/pactmesh.iss
-          ls -la pactmesh-setup-x86_64.exe
+          ls -la "${{ steps.vars.outputs.setup }}.exe"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pactmesh-setup-x86_64
-          path: pactmesh-setup-x86_64.exe
+          name: ${{ steps.vars.outputs.setup }}
+          path: ${{ steps.vars.outputs.setup }}.exe
           if-no-files-found: error
 
   build-linux:
-    name: Build Linux x86_64 (musl static)
+    name: Build Linux x86_64 musl (${{ matrix.edition }})
     runs-on: ubuntu-22.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [ admin, member ]
     steps:
       - uses: actions/checkout@v5
 
@@ -109,13 +132,25 @@ jobs:
       - name: Add musl target for pinned toolchain
         run: rustup target add x86_64-unknown-linux-musl
 
+      - name: Resolve edition vars
+        id: vars
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.edition }}" = "member" ]; then
+            echo "features=--no-default-features --features member" >> "$GITHUB_OUTPUT"
+            echo "stage=pactmesh-member-linux-x86_64" >> "$GITHUB_OUTPUT"
+          else
+            echo "features=" >> "$GITHUB_OUTPUT"
+            echo "stage=pactmesh-linux-x86_64" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build (static musl)
-        run: cargo build --release --target x86_64-unknown-linux-musl -p pactmesh --bin pactmesh --bin pactmesh-core
+        run: cargo build --release --target x86_64-unknown-linux-musl -p pactmesh ${{ steps.vars.outputs.features }} --bin pactmesh --bin pactmesh-core
 
       - name: Package
         run: |
           set -euo pipefail
-          stage=pactmesh-linux-x86_64
+          stage="${{ steps.vars.outputs.stage }}"
           bindir=target/x86_64-unknown-linux-musl/release
           mkdir -p "$stage"
           cp "$bindir"/pactmesh "$stage"/
@@ -123,12 +158,12 @@ jobs:
           cp script/install.sh "$stage"/
           cp README.md "$stage"/ || true
           chmod +x "$stage"/pactmesh "$stage"/pactmesh-core "$stage"/install.sh
-          tar -czf pactmesh-linux-x86_64.tar.gz "$stage"
+          tar -czf "$stage".tar.gz "$stage"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pactmesh-linux-x86_64
-          path: pactmesh-linux-x86_64.tar.gz
+          name: ${{ steps.vars.outputs.stage }}
+          path: ${{ steps.vars.outputs.stage }}.tar.gz
           if-no-files-found: error
 
   release:
@@ -149,8 +184,11 @@ jobs:
         with:
           files: |
             dist/pactmesh-windows-x86_64/pactmesh-windows-x86_64.zip
+            dist/pactmesh-member-windows-x86_64/pactmesh-member-windows-x86_64.zip
             dist/pactmesh-setup-x86_64/pactmesh-setup-x86_64.exe
+            dist/pactmesh-member-setup-x86_64/pactmesh-member-setup-x86_64.exe
             dist/pactmesh-linux-x86_64/pactmesh-linux-x86_64.tar.gz
+            dist/pactmesh-member-linux-x86_64/pactmesh-member-linux-x86_64.tar.gz
             script/install.sh
             script/install.ps1
           generate_release_notes: true

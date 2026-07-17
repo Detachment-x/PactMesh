@@ -1,8 +1,13 @@
 ; PactMesh offline Windows installer (Inno Setup 6).
-; Built in CI:
-;   ISCC.exe //DAppVersion=<ver> //DSourceDir=<abs stage dir> //DOutDir=<abs out dir> script\pactmesh.iss
+; Built in CI (per edition):
+;   ISCC.exe //DAppVersion=<ver> //DEdition=<admin|member> \
+;            //DSourceDir=<abs stage dir> //DOutDir=<abs out dir> script\pactmesh.iss
 ; SourceDir/OutDir are passed as ABSOLUTE paths so [Files]/[OutputDir] never
 ; depend on the script's own location.
+;
+; Editions share AppId + install dir so the admin package can be installed
+; straight over a member install (in-place upgrade) to arm a device for the
+; root upgrade -- trust-domain data under %APPDATA%\PactMesh is never touched.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -12,6 +17,9 @@
 #endif
 #ifndef OutDir
   #define OutDir "."
+#endif
+#ifndef Edition
+  #define Edition "admin"
 #endif
 
 #define MyAppName "PactMesh"
@@ -37,18 +45,25 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 OutputDir={#OutDir}
+#if Edition == "member"
+OutputBaseFilename=pactmesh-member-setup-x86_64
+UninstallDisplayName={#MyAppName} (Member)
+#else
 OutputBaseFilename=pactmesh-setup-x86_64
-UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
+#endif
+UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "addtopath"; Description: "Add PactMesh to the system PATH"; GroupDescription: "System integration:"
+#if Edition == "admin"
 Name: "desktopicon"; Description: "Create a desktop shortcut to the PactMesh console"; GroupDescription: "Shortcuts:"
 Name: "traystartup"; Description: "Launch the PactMesh tray icon at sign-in"; GroupDescription: "Shortcuts:"; Flags: unchecked
 Name: "installservice"; Description: "Run PactMesh as an always-on background service (starts now and at every boot)"; GroupDescription: "Service:"
+#endif
 
 [Files]
 Source: "{#SourceDir}\pactmesh.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -58,19 +73,27 @@ Source: "{#SourceDir}\*.sys"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme skipifsourcedoesntexist
 
 [Icons]
+#if Edition == "admin"
 Name: "{group}\PactMesh Console"; Filename: "{app}\{#MyAppExeName}"; Parameters: "web"; Comment: "Open the PactMesh web console in your browser"
 Name: "{group}\PactMesh First-time Setup (advanced)"; Filename: "{app}\{#MyAppExeName}"; Parameters: "quickstart"; Comment: "Optional: create a network from the command line instead of the web console"
+#else
+Name: "{group}\PactMesh (join & status)"; Filename: "{app}\{#MyAppExeName}"; Parameters: "tui"; Comment: "Join a network and watch peers/status"
+#endif
 Name: "{group}\Uninstall PactMesh"; Filename: "{uninstallexe}"
+#if Edition == "admin"
 Name: "{autodesktop}\PactMesh Console"; Filename: "{app}\{#MyAppExeName}"; Parameters: "web"; Tasks: desktopicon
 Name: "{userstartup}\PactMesh Tray"; Filename: "{app}\{#MyAppExeName}"; Parameters: "tray"; Tasks: traystartup
+#endif
 
 [Registry]
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Tasks: addtopath; Check: NeedsAddPath('{app}')
 
 [Run]
+#if Edition == "admin"
 Filename: "{app}\{#MyAppExeName}"; Parameters: "service install --serve"; Flags: runhidden waituntilterminated; Tasks: installservice; StatusMsg: "Registering the always-on PactMesh service..."
 Filename: "{app}\{#MyAppExeName}"; Parameters: "service start"; Flags: runhidden waituntilterminated; Tasks: installservice; StatusMsg: "Starting the PactMesh service..."
 Filename: "{app}\{#MyAppExeName}"; Parameters: "web"; Description: "Open the PactMesh console now"; Flags: postinstall skipifsilent nowait
+#endif
 
 [UninstallRun]
 Filename: "{app}\{#MyAppExeName}"; Parameters: "service stop"; Flags: runhidden; RunOnceId: "PactMeshSvcStop"
@@ -107,6 +130,25 @@ begin
     Delete(NewPath, Length(NewPath), 1);
   RegWriteExpandStringValue(HKLM, EnvKey, 'Path', NewPath);
 end;
+
+#if Edition == "member"
+// Member packages carry no console/governance code. Joining is a CLI step the
+// user runs after install; point them at it once the files are in place.
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if (CurStep = ssPostInstall) and (not WizardSilent) then
+    MsgBox('PactMesh (member) is installed.' + #13#10 + #13#10 +
+           'To join a network:' + #13#10 +
+           '  1. Get an invite link from your network administrator.' + #13#10 +
+           '  2. Open a new terminal and run:' + #13#10 +
+           '       pactmesh trust accept-invite "<invite-link>"' + #13#10 +
+           '  3. Bring up the data plane as a background service:' + #13#10 +
+           '       pactmesh service install' + #13#10 +
+           '       pactmesh service start' + #13#10 + #13#10 +
+           'Or run "pactmesh tui" for an interactive join & status console.',
+           mbInformation, MB_OK);
+end;
+#endif
 
 // Trust-domain data lives under <RoamingAppData>\PactMesh. The console runs as
 // the signed-in user; the always-on service runs as LocalSystem. Wipe both.

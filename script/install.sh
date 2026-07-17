@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # PactMesh installer for Linux x86_64.
 # Downloads the latest release, installs binaries, grants network capabilities,
-# and points you at `pactmesh quickstart` for first-run setup.
+# and points you at first-run setup.
+#
+# Two editions: admin (default, full web console + governance CLI) and member
+# (data plane + join/status CLI only, no console).
 set -euo pipefail
 
 REPO="Detachment-x/PactMesh"
@@ -12,6 +15,7 @@ GH_PROXY="https://ghfast.top/"
 USE_GH_PROXY=false
 COMMAND="install"
 PURGE=false
+EDITION="admin"
 
 HELP() {
   cat <<EOF
@@ -25,12 +29,14 @@ Commands:
   help        Show this message
 
 Options:
-  --gh-proxy [URL]   Route GitHub downloads through a proxy (default: ${GH_PROXY})
-  --no-gh-proxy      Download directly from GitHub (default)
-  --purge            uninstall only: also delete trust-domain data (irreversible)
+  --edition [admin|member]   admin = full console (default); member = data plane + join only
+  --gh-proxy [URL]           Route GitHub downloads through a proxy (default: ${GH_PROXY})
+  --no-gh-proxy              Download directly from GitHub (default)
+  --purge                    uninstall only: also delete trust-domain data (irreversible)
 
 Examples:
   sudo ./install.sh install
+  sudo ./install.sh install --edition member
   sudo ./install.sh install /usr/local/lib/pactmesh
   sudo ./install.sh install --gh-proxy        # use the bundled CN proxy
   sudo ./install.sh uninstall                 # keep your networks/keys
@@ -46,6 +52,9 @@ if [[ "$COMMAND" == "help" ]]; then HELP; exit 0; fi
 if [[ $# -ge 1 && "$1" != --* ]]; then INSTALL_PATH="${1%/}"; shift; fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --edition)
+      [[ $# -ge 2 && "$2" != --* ]] && { EDITION="$2"; shift; }
+      [[ "$EDITION" == "admin" || "$EDITION" == "member" ]] || { echo -e "${RED}--edition must be admin or member${RES}"; exit 1; } ;;
     --gh-proxy) USE_GH_PROXY=true; [[ $# -ge 2 && "$2" != --* ]] && { GH_PROXY="$2"; shift; } ;;
     --no-gh-proxy) USE_GH_PROXY=false ;;
     --purge) PURGE=true ;;
@@ -69,7 +78,11 @@ for tool in curl tar; do
 done
 
 BIN_DIR="/usr/local/bin"
-ASSET="pactmesh-linux-x86_64.tar.gz"
+if [[ "$EDITION" == "member" ]]; then
+  ASSET="pactmesh-member-linux-x86_64.tar.gz"
+else
+  ASSET="pactmesh-linux-x86_64.tar.gz"
+fi
 
 # Trust-domain data lives at <config>/privateNetwork. Mirror the daemon's
 # resolution (XDG_CONFIG_HOME, then ~/.config) for every account that may have
@@ -112,7 +125,7 @@ install() {
   base="https://github.com/${REPO}/releases/latest/download/${ASSET}"
   if $USE_GH_PROXY; then url="${GH_PROXY%/}/${base}"; else url="$base"; fi
 
-  echo -e "${GREEN}Downloading ${ASSET}...${RES}\n  ${url}"
+  echo -e "${GREEN}Downloading ${ASSET} (${EDITION} edition)...${RES}\n  ${url}"
   tmp="$(mktemp -d /tmp/pactmesh-install.XXXXXX)"
   trap 'rm -rf "$tmp"' EXIT
   curl -fL --progress-bar -o "${tmp}/${ASSET}" "$url"
@@ -141,8 +154,21 @@ install() {
     echo -e "${YELLOW}setcap not found; install libcap2-bin, or run via 'pactmesh service install' (root).${RES}"
   fi
 
-  echo -e "\n${GREEN}PactMesh installed.${RES}  Version: $("${INSTALL_PATH}/pactmesh" --version 2>/dev/null || echo unknown)\n"
-  cat <<EOF
+  echo -e "\n${GREEN}PactMesh installed (${EDITION} edition).${RES}  Version: $("${INSTALL_PATH}/pactmesh" --version 2>/dev/null || echo unknown)\n"
+  if [[ "$EDITION" == "member" ]]; then
+    cat <<EOF
+Next steps:
+  1. Get an invite link from your network administrator, then join:
+       ${GREEN}pactmesh trust accept-invite "<invite-link>"${RES}
+
+  2. Bring up the data plane as a system service (root):
+       ${GREEN}sudo pactmesh service install && sudo pactmesh service start${RES}
+     (or run ${GREEN}pactmesh tui${RES} for an interactive join & status console)
+
+  Docs: https://github.com/${REPO}
+EOF
+  else
+    cat <<EOF
 Next steps:
   1. First-run setup (creates your network and opens the web console):
        ${GREEN}pactmesh quickstart${RES}
@@ -153,6 +179,7 @@ Next steps:
 
   Docs: https://github.com/${REPO}
 EOF
+  fi
 }
 
 case "$COMMAND" in

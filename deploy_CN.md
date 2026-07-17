@@ -17,6 +17,7 @@
 - 多信任域部署
 - 跨信任域中继借用（含运行时授权与强制校验）
 - 运维任务（吊销 / 禁用 / 设 hostname / 升级为根 / peer hints）
+- 版本分包（成员包 / 管理包）
 - Windows 部署（CI 制品 + 真机清单）
 - 故障排查
 
@@ -433,6 +434,13 @@ pactmesh trust list-domains
 
 ### 将成员升级为根设备
 
+> **先决条件——先把目标设备换成管理包。** PactMesh 分「成员包」「管理包」两种编译版本
+> （见《版本分包：成员包与管理包》一节）。成员包在**编译期**就不含控制台与治理代码、无法持有
+> `sk_root`，因此普通设备要成为管理设备，先在其上**覆盖安装管理包**：装到同一目录、保留
+> `%APPDATA%\PactMesh`（Windows）/ `~/.config/privateNetwork`（Linux）下的成员身份
+> （`member_cert.pem` / `sk_self`），只补回控制台 + 治理 CLI + 升根受理能力。覆盖安装**绝不能**
+> 清除成员身份，否则设备掉出信任域、需重新 invite。换包后再走下面的推送流程。
+
 一个信任域可以有多个持有 `SK_root` 的设备。要把现有成员节点提升为根设备，当前根
 通过认证后的 mesh 把（重新封装的）根密钥推给目标。目标**永不**从环境变量读口令——它必须
 先显式**武装一次性接受令牌**：
@@ -461,6 +469,44 @@ pactmesh trust list-domains
 ```
 
 在同一 LAN 上，节点还通过本地广播互相再发现，因此失去公网 seed 的网络只要成员同段就能持续收敛。
+
+## 版本分包：成员包与管理包
+
+PactMesh 发布两种编译版本，边界在**编译期**而非运行时：
+
+| 版本 | 含 | 缺 | 适用 |
+|---|---|---|---|
+| **管理包**（admin，默认） | 数据面 + 加入 + 状态 + **Web 控制台 + 治理 CLI**（建域/建网/邀请/吊销/审批/改能力/指派 IP/升根受理） | —— | 网络管理员的设备 |
+| **成员包**（member） | 数据面 + `trust accept-invite` 加入 + `tui`/状态 | 控制台、`quickstart`/`web`/`serve`、全部治理子命令；二进制里**没有**这些代码 | 普通成员设备（类比 zerotier/tailscale 客户端） |
+
+成员包因此**无法持有 `sk_root`**、无法实施任何控制——这是代码级安全边界，不是运行时判断。
+源码构建时，成员包 = `cargo build -p pactmesh --no-default-features --features member`；
+管理包 = 默认 features（含 `management`）。
+
+**产物命名**：管理包沿用原名（`pactmesh-setup-x86_64.exe`、`pactmesh-windows-x86_64.zip`、
+`pactmesh-linux-x86_64.tar.gz`）；成员包加 `-member-`（`pactmesh-member-setup-x86_64.exe` 等）。
+
+**脚本装法**：
+
+```bash
+# Linux
+sudo ./install.sh install --edition member      # 或 --edition admin（默认）
+```
+
+```powershell
+# Windows（PowerShell，管理员）
+.\install.ps1 -Edition member                    # 或 -Edition admin（默认）
+```
+
+**成员设备的加入流程**（没有控制台，全靠 CLI）：
+
+```bash
+pactmesh trust accept-invite "<管理员给的 invite 链接>"
+sudo pactmesh service install && sudo pactmesh service start   # Windows 去掉 sudo
+# 或： pactmesh tui   —— 交互式加入 + 看 peers / 状态
+```
+
+**成员 → 管理（升根）**：见《运维任务 → 将成员升级为根设备》。
 
 ## Windows 部署
 

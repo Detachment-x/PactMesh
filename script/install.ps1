@@ -5,7 +5,11 @@
 .DESCRIPTION
     Downloads a PactMesh release from GitHub, installs pactmesh.exe /
     pactmesh-core.exe and their bundled drivers, and adds the install
-    directory to the system PATH. Run `pactmesh quickstart` afterwards.
+    directory to the system PATH.
+
+    The admin edition (default) ships the web console + governance CLI; run
+    `pactmesh quickstart` afterwards. The member edition ships only the data
+    plane + join/status CLI; join with `pactmesh trust accept-invite`.
 
 .PARAMETER Version
     "latest" (default) or a tag such as "v2.6.2".
@@ -13,13 +17,17 @@
 .PARAMETER InstallDir
     Install directory. Default: "$env:ProgramFiles\PactMesh".
 
+.PARAMETER Edition
+    "admin" (default, full console) or "member" (data plane + join only).
+
 .PARAMETER GhProxy
     Optional GitHub download proxy prefix (e.g. https://ghfast.top/) for
     regions with poor GitHub connectivity.
 
 .EXAMPLE
     .\install.ps1
-    .\install.ps1 -Version v2.6.2
+    .\install.ps1 -Edition member
+    .\install.ps1 -Version v2.6.2 -Edition member
     .\install.ps1 -GhProxy https://ghfast.top/
 #>
 param(
@@ -30,6 +38,9 @@ param(
     [Parameter(Position = 1)]
     [string]$InstallDir = "$env:ProgramFiles\PactMesh",
 
+    [ValidateSet('admin', 'member')]
+    [string]$Edition = 'admin',
+
     [string]$GhProxy = ''
 )
 
@@ -39,7 +50,7 @@ $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $GITHUB_REPO = 'Detachment-x/PactMesh'
-$ASSET = 'pactmesh-windows-x86_64.zip'
+$ASSET = if ($Edition -eq 'member') { 'pactmesh-member-windows-x86_64.zip' } else { 'pactmesh-windows-x86_64.zip' }
 
 # ---- Administrator check ----------------------------------------------------
 $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -56,7 +67,7 @@ if ($cpuArch -ne 'AMD64') {
 }
 
 Write-Host ''
-Write-Host '  ===== PactMesh Windows Installer =====' -ForegroundColor Cyan
+Write-Host "  ===== PactMesh Windows Installer ($Edition) =====" -ForegroundColor Cyan
 Write-Host ''
 
 # ---- Resolve download URL ---------------------------------------------------
@@ -121,11 +132,20 @@ Write-Host ''
 Write-Host '  [OK] PactMesh installed.' -ForegroundColor Green
 Write-Host ''
 Write-Host '  Next steps:' -ForegroundColor White
-Write-Host '    1. First-run setup (creates your network, opens the web console):' -ForegroundColor White
-Write-Host '         pactmesh quickstart' -ForegroundColor Green
-Write-Host '       then open the printed http://127.0.0.1:15810/?token=... URL.'
-Write-Host '    2. Optional - run the daemon as a Windows service:' -ForegroundColor White
-Write-Host '         pactmesh service install ; pactmesh service start' -ForegroundColor Green
+if ($Edition -eq 'member') {
+    Write-Host '    1. Get an invite link from your network administrator, then join:' -ForegroundColor White
+    Write-Host '         pactmesh trust accept-invite "<invite-link>"' -ForegroundColor Green
+    Write-Host '    2. Bring up the data plane as a background service:' -ForegroundColor White
+    Write-Host '         pactmesh service install ; pactmesh service start' -ForegroundColor Green
+    Write-Host '       (or run "pactmesh tui" for an interactive join & status console)'
+}
+else {
+    Write-Host '    1. First-run setup (creates your network, opens the web console):' -ForegroundColor White
+    Write-Host '         pactmesh quickstart' -ForegroundColor Green
+    Write-Host '       then open the printed http://127.0.0.1:15810/?token=... URL.'
+    Write-Host '    2. Optional - run the daemon as a Windows service:' -ForegroundColor White
+    Write-Host '         pactmesh service install ; pactmesh service start' -ForegroundColor Green
+}
 Write-Host ''
 Write-Host '  NOTE: if PATH was just updated, restart your terminal.' -ForegroundColor DarkYellow
 Write-Host "  Docs: https://github.com/$GITHUB_REPO" -ForegroundColor DarkGray
