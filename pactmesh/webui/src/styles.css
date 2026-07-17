@@ -119,6 +119,13 @@ body {
 }
 .nav-pill:hover { background: var(--card); color: var(--text); }
 .nav-pill.active { background: var(--primary-soft); color: var(--primary-strong); font-weight: 600; }
+.nav-badge {
+  display: inline-block; min-width: 16px; padding: 0 4px;
+  margin-left: 5px; border-radius: 999px;
+  background: var(--warn, #d97706); color: #fff;
+  font-size: 10px; font-weight: 700; line-height: 16px;
+  text-align: center; vertical-align: middle;
+}
 .nav-tabs { display: flex; gap: 2px; align-items: stretch; height: 100%; }
 .nav-tab {
   display: flex;

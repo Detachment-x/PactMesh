@@ -10,6 +10,7 @@ export function Pending() {
   const { domains, requireUnlock } = useApp()
   const toast = useToast()
   const [busy, setBusy] = useState('') // 正在处理的 applicant_pk
+  const [bulk, setBulk] = useState(false) // 连批进行中
   const [done, setDone] = useState(() => new Set()) // 乐观隐藏
 
   // 仅持根者网络能审批入网；成员网络无审批权，不纳入。
@@ -42,7 +43,7 @@ export function Pending() {
   const multiNet = rootNets.length > 1
 
   const handle = async (req, kind) => {
-    if (busy) return
+    if (busy || bulk) return
     const net = req._net
     const uid = net.td + ' ' + net.nid + ' ' + req.applicant_pk
     if (kind === 'approve') {
@@ -63,6 +64,42 @@ export function Pending() {
     }
   }
 
+  // 连批：按所属网络分组，每个网络解锁一次（已解锁则复用会话），其内全部就地签发。
+  const approveAll = async () => {
+    if (bulk || busy || !list.length) return
+    const groups = new Map()
+    for (const req of list) {
+      const net = req._net
+      const k = net.td + ' ' + net.nid
+      if (!groups.has(k)) groups.set(k, { net, items: [] })
+      groups.get(k).items.push(req)
+    }
+    setBulk(true)
+    let ok = 0
+    let fail = 0
+    try {
+      for (const { net, items } of groups.values()) {
+        const unlocked = await requireUnlock(net)
+        if (!unlocked) break // 取消解锁：停在此网络，已批准的保留
+        for (const req of items) {
+          const uid = net.td + ' ' + net.nid + ' ' + req.applicant_pk
+          try {
+            await api.approve(req.applicant_pk, req.device_label)
+            setDone((s) => new Set(s).add(uid))
+            ok++
+          } catch {
+            fail++
+          }
+        }
+      }
+    } finally {
+      setBulk(false)
+      pending.refresh()
+      if (ok) toast.ok(`已批准 ${ok} 台设备` + (fail ? `，${fail} 台失败` : ''))
+      else if (fail) toast.err(`批准失败（${fail} 台）`)
+    }
+  }
+
   if (!rootNets.length) {
     return (
       <EmptyState
@@ -80,6 +117,11 @@ export function Pending() {
           {pending.loading && !all.length ? '加载中…' : `${list.length} 条待批申请`}
           {multiNet && ` · 汇总自 ${rootNets.length} 个网络`}
         </span>
+        {list.length > 1 && (
+          <button class="btn btn-primary btn-sm" disabled={bulk || !!busy} onClick={approveAll}>
+            {bulk ? '批准中…' : `批准全部 (${list.length})`}
+          </button>
+        )}
         <button class="btn btn-ghost" onClick={pending.refresh}>刷新</button>
       </div>
 
@@ -106,14 +148,14 @@ export function Pending() {
                 <div class="pending-actions">
                   <button
                     class="btn btn-primary btn-sm"
-                    disabled={busy === uid}
+                    disabled={busy === uid || bulk}
                     onClick={() => handle(req, 'approve')}
                   >
                     {busy === uid ? '处理中…' : '批准'}
                   </button>
                   <button
                     class="btn btn-ghost btn-sm"
-                    disabled={busy === uid}
+                    disabled={busy === uid || bulk}
                     onClick={() => handle(req, 'reject')}
                   >
                     拒绝

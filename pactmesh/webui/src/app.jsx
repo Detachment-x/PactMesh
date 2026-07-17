@@ -31,7 +31,7 @@ const NET_IDS = new Set(NET_TABS.map((i) => i.id))
 
 export function App() {
   const [active, setActive] = useState('overview')
-  const { attached, instancesLoading, domains, network } = useApp()
+  const { attached, instancesLoading, domains, network, pendingCount } = useApp()
   const isRoot = !!network?.isRoot
   const anyRoot = domains.some((d) => d.is_root_holder && d.networks.length)
   // 「未加网」空状态（以 ListNetworkInstance 为键）：空载常驻 daemon 起着但零实例挂载
@@ -56,7 +56,7 @@ export function App() {
     setActive(id)
   }
 
-  const Tab = ({ id, label, kind }) => (
+  const Tab = ({ id, label, kind, badge }) => (
     <div
       class={kind + (active === id ? ' active' : '')}
       role="button"
@@ -66,6 +66,7 @@ export function App() {
       onKeyDown={go(id)}
     >
       {label}
+      {badge > 0 && <span class="nav-badge" title={`${badge} 条待批`}>{badge > 99 ? '99+' : badge}</span>}
     </div>
   )
 
@@ -79,7 +80,9 @@ export function App() {
           </div>
           <NetworkPicker />
           <nav class="nav-global" aria-label="全局导航">
-            {globalItems.map((i) => <Tab key={i.id} id={i.id} label={i.label} kind="nav-pill" />)}
+            {globalItems.map((i) => (
+              <Tab key={i.id} id={i.id} label={i.label} kind="nav-pill" badge={i.id === 'pending' ? pendingCount : 0} />
+            ))}
           </nav>
           <div class="topbar-spacer" />
           <ServiceStatus />

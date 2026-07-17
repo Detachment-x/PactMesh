@@ -231,9 +231,9 @@ fn write_endpoint_file(listen: SocketAddr, token: &str) -> Option<std::path::Pat
     None
 }
 
-/// 读取运行时端点文件，返回浏览器可直达的 URL（含 token）。
-/// 供 `pactmesh web` 与 Windows 托盘复用：机器级优先、回退每用户。
-pub fn read_endpoint_url() -> Result<String> {
+/// 读取运行时端点文件，返回 `(base_url, token)`，如 `("http://127.0.0.1:15810", "ab..")`。
+/// 供 `pactmesh web`、Windows 托盘复用：机器级优先、回退每用户。
+pub fn read_endpoint() -> Result<(String, String)> {
     let candidates = endpoint_path_candidates();
     if candidates.is_empty() {
         anyhow::bail!("could not locate config dir for controller endpoint file");
@@ -253,7 +253,7 @@ pub fn read_endpoint_url() -> Result<String> {
             .get("token")
             .and_then(|x| x.as_str())
             .context("controller endpoint file missing 'token'")?;
-        return Ok(format!("http://{listen}/?token={token}"));
+        return Ok((format!("http://{listen}"), token.to_string()));
     }
     let shown = candidates
         .last()
@@ -262,4 +262,10 @@ pub fn read_endpoint_url() -> Result<String> {
     anyhow::bail!(
         "controller endpoint file not found (looked under {shown}); start it first with `pactmesh serve` or `pactmesh quickstart`"
     )
+}
+
+/// 端点 URL（含 token），浏览器可直达。
+pub fn read_endpoint_url() -> Result<String> {
+    let (base, token) = read_endpoint()?;
+    Ok(format!("{base}/?token={token}"))
 }
