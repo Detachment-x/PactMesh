@@ -316,6 +316,8 @@ tray-icon = "0.24"
 tao = "0.34"
 # tray "pending join" toast; only pulled into management (admin) windows builds
 notify-rust = { version = "4", optional = true }
+# tray polls the loopback console over http (no TLS); runtime reqwest, gated like above
+reqwest = { version = "0.12.12", default-features = false, features = ["blocking"], optional = true }
 
 [target.'cfg(not(windows))'.dependencies]
 jemallocator = { package = "tikv-jemallocator", version = "0.6.0", optional = true, features = [
@@ -380,7 +382,7 @@ member = [
     "zstd",
 ]
 # admin/console + governance CLI; absent from member builds (code-level boundary)
-management = ["dep:axum", "dep:zeroize", "dep:notify-rust"]
+management = ["dep:axum", "dep:zeroize", "dep:notify-rust", "dep:reqwest"]
 default = ["member", "management"]
 full = [
     "member",
