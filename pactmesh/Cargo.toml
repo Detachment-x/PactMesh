@@ -196,9 +196,9 @@ base64 = "0.22"
 rpassword = "7"
 
 # for the local web controller (browser admin console)
-axum = "0.7"
+axum = { version = "0.7", optional = true }
 # zeroize cached root passphrase held in controller memory during an unlock session
-zeroize = "1.8"
+zeroize = { version = "1.8", optional = true }
 
 mimalloc = { version = "*", optional = true }
 
@@ -365,7 +365,7 @@ tokio-socks = "0.5.2"
 
 
 [features]
-default = [
+member = [
     "wireguard",
     "websocket",
     "smoltcp",
@@ -377,19 +377,14 @@ default = [
     "magic-dns",
     "zstd",
 ]
+# admin/console + governance CLI; absent from member builds (code-level boundary)
+management = ["dep:axum", "dep:zeroize"]
+default = ["member", "management"]
 full = [
-    "websocket",
-    "wireguard",
+    "member",
     "aes-gcm",
     "openssl-crypto", # need openssl-dev libs
-    "smoltcp",
-    "tun",
-    "socks5",
-    "kcp",
-    "quic",
-    "faketcp",
-    "magic-dns",
-    "zstd",
+    "management",
 ]
 wireguard = ["dep:boringtun", "dep:ring"]
 quic = ["dep:quinn", "dep:quinn-plaintext", "dep:rustls", "dep:rcgen"]

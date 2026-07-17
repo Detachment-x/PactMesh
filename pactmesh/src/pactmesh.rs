@@ -180,18 +180,23 @@ enum SubCommand {
     #[command(about = "manage privateNetwork trust domains")]
     Trust(TrustArgs),
     #[command(about = "serve the local web controller (browser admin console)")]
+    #[cfg(feature = "management")]
     Controller(ControllerArgs),
     #[command(
         about = "first-run setup: create domain+network, bootstrap this device, start daemon and web console"
     )]
+    #[cfg(feature = "management")]
     Quickstart(QuickstartArgs),
     #[command(about = "open the running web controller in the default browser")]
+    #[cfg(feature = "management")]
     Web,
     #[command(about = "run the Windows system-tray launcher for the web controller")]
+    #[cfg(feature = "management")]
     Tray,
     #[command(
         about = "unattended supervisor: unseal device passphrase, run daemon + web console (for boot autostart)"
     )]
+    #[cfg(feature = "management")]
     Serve(ServeArgs),
     #[command(about = "interactive ratatui console (Node + Peers v0)")]
     Tui,
@@ -384,6 +389,7 @@ struct ServeConfig {
 const SERVE_CONFIG_FILE: &str = "serve.json";
 const SERVE_SEALED_FILE: &str = "serve-device.sealed";
 
+#[cfg(feature = "management")]
 fn serve_seal(args: &ServeSealArgs) -> Result<(), Error> {
     let domains = pactmesh::control::list_domains()?;
     if domains.is_empty() {
@@ -815,6 +821,7 @@ enum LabSubCommand {
         command: LabRunSubCommand,
     },
     #[command(about = "fallback approval command; prefer TUI Joins tab")]
+    #[cfg(feature = "management")]
     Approve {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1121,6 +1128,7 @@ enum LabSubCommand {
         overlay_cidr: String,
     },
     #[command(about = "disable a member interactively")]
+    #[cfg(feature = "management")]
     Disable {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1141,6 +1149,7 @@ enum LabSubCommand {
         passphrase_file: Option<PathBuf>,
     },
     #[command(about = "enable a disabled member interactively")]
+    #[cfg(feature = "management")]
     Enable {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1271,6 +1280,7 @@ struct TrustArgs {
 
 #[derive(Subcommand, Debug)]
 enum TrustSubCommand {
+    #[cfg(feature = "management")]
     CreateDomain {
         #[arg(long, help = "human-readable trust-domain label")]
         label: String,
@@ -1290,6 +1300,7 @@ enum TrustSubCommand {
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
     },
+    #[cfg(feature = "management")]
     CreateNetwork {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1309,6 +1320,7 @@ enum TrustSubCommand {
         )]
         passphrase_file: Option<PathBuf>,
     },
+    #[cfg(feature = "management")]
     BootstrapSelf {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1326,6 +1338,7 @@ enum TrustSubCommand {
         #[arg(long, help = "file containing the device key passphrase")]
         device_passphrase_file: Option<PathBuf>,
     },
+    #[cfg(feature = "management")]
     Invite {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1370,6 +1383,7 @@ enum TrustSubCommand {
         )]
         poll_secs: u64,
     },
+    #[cfg(feature = "management")]
     Revoke {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1392,6 +1406,7 @@ enum TrustSubCommand {
         )]
         passphrase_file: Option<PathBuf>,
     },
+    #[cfg(feature = "management")]
     Disable {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1411,6 +1426,7 @@ enum TrustSubCommand {
         )]
         passphrase_file: Option<PathBuf>,
     },
+    #[cfg(feature = "management")]
     Enable {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1429,6 +1445,7 @@ enum TrustSubCommand {
     #[command(
         about = "assign or clear a member's fixed virtual IPv4 (root-signed network_state; no cert reissue)"
     )]
+    #[cfg(feature = "management")]
     AssignedIpv4 {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1487,6 +1504,7 @@ enum TrustSubCommand {
         #[arg(long, help = "emit machine-readable JSON")]
         json: bool,
     },
+    #[cfg(feature = "management")]
     RenameDevice {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1506,22 +1524,27 @@ enum TrustSubCommand {
         )]
         passphrase_file: Option<PathBuf>,
     },
+    #[cfg(feature = "management")]
     Capability {
         #[command(subcommand)]
         command: TrustCapabilitySubCommand,
     },
+    #[cfg(feature = "management")]
     Tag {
         #[command(subcommand)]
         command: TrustTagSubCommand,
     },
+    #[cfg(feature = "management")]
     PeerHint {
         #[command(subcommand)]
         command: TrustPeerHintSubCommand,
     },
+    #[cfg(feature = "management")]
     Acl {
         #[command(subcommand)]
         command: TrustAclSubCommand,
     },
+    #[cfg(feature = "management")]
     SetHostname {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1539,6 +1562,7 @@ enum TrustSubCommand {
         )]
         passphrase_file: Option<PathBuf>,
     },
+    #[cfg(feature = "management")]
     UnsetHostname {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1552,6 +1576,7 @@ enum TrustSubCommand {
         )]
         passphrase_file: Option<PathBuf>,
     },
+    #[cfg(feature = "management")]
     Approve {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1571,6 +1596,7 @@ enum TrustSubCommand {
         )]
         passphrase_file: Option<PathBuf>,
     },
+    #[cfg(feature = "management")]
     Reject {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -1583,6 +1609,7 @@ enum TrustSubCommand {
         )]
         applicant_pk: String,
     },
+    #[cfg(feature = "management")]
     UpgradePeerToRoot {
         #[arg(help = "trust-domain id", allow_hyphen_values = true)]
         trust_domain_id: String,
@@ -2530,6 +2557,7 @@ impl<'a> CommandHandler<'a> {
         pactmesh::tui::run(self.client.clone(), self.instance_selector.clone()).await
     }
 
+    #[cfg(feature = "management")]
     fn run_web(&self) -> Result<(), Error> {
         use std::io::Write;
         let url = pactmesh::controller::read_endpoint_url()?;
@@ -2542,6 +2570,7 @@ impl<'a> CommandHandler<'a> {
         Ok(())
     }
 
+    #[cfg(feature = "management")]
     fn run_tray(&self) -> Result<(), Error> {
         #[cfg(windows)]
         {
@@ -2555,6 +2584,7 @@ impl<'a> CommandHandler<'a> {
         }
     }
 
+    #[cfg(feature = "management")]
     async fn run_controller(
         &self,
         args: &ControllerArgs,
@@ -2574,6 +2604,7 @@ impl<'a> CommandHandler<'a> {
         .await
     }
 
+    #[cfg(feature = "management")]
     async fn run_quickstart(
         &self,
         rpc_portal: SocketAddr,
@@ -2715,6 +2746,7 @@ impl<'a> CommandHandler<'a> {
         .await
     }
 
+    #[cfg(feature = "management")]
     async fn run_serve(&self, rpc_portal: SocketAddr, args: &ServeArgs) -> Result<(), Error> {
         match args.sub_command.as_ref() {
             Some(ServeSubCommand::Seal(seal_args)) => serve_seal(seal_args),
@@ -2729,6 +2761,7 @@ impl<'a> CommandHandler<'a> {
     /// through the console (see `RunNetworkInstance`). This fixes the desktop
     /// icon flash (the endpoint file now lives as long as the service) and the
     /// plaintext passphrase prompt at boot.
+    #[cfg(feature = "management")]
     async fn serve_empty(&self, rpc_portal: SocketAddr, args: &ServeArgs) -> Result<(), Error> {
         let config_dir = pnw_config_dir()?;
         let exe = std::env::current_exe().context("failed to locate the pactmesh executable")?;
@@ -2781,6 +2814,7 @@ impl<'a> CommandHandler<'a> {
         self.run_controller(&controller_args, None).await
     }
 
+    #[cfg(feature = "management")]
     async fn serve_run(&self, rpc_portal: SocketAddr, args: &ServeRunArgs) -> Result<(), Error> {
         let config_dir = pnw_config_dir()?;
         let config_path = config_dir.join(SERVE_CONFIG_FILE);
@@ -4125,6 +4159,7 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
                 .await
             }
         },
+        #[cfg(feature = "management")]
         LabSubCommand::Approve {
             trust_domain_id,
             network_local_id,
@@ -4272,6 +4307,7 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             c_bind_device_name,
             overlay_cidr,
         }),
+        #[cfg(feature = "management")]
         LabSubCommand::Disable {
             trust_domain_id,
             network_local_id,
@@ -4294,6 +4330,7 @@ async fn handle_lab(handler: &CommandHandler<'_>, args: LabArgs) -> Result<(), E
             )
             .await
         }
+        #[cfg(feature = "management")]
         LabSubCommand::Enable {
             trust_domain_id,
             network_local_id,
@@ -6446,6 +6483,7 @@ fn ssh_capture(host: &str, command: &str) -> Result<String, Error> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "management")]
 async fn handle_lab_member_toggle(
     handler: &CommandHandler<'_>,
     trust_domain_id: String,
@@ -6539,6 +6577,7 @@ fn resolve_device_or_fingerprint(
     }
 }
 
+#[cfg(feature = "management")]
 async fn handle_lab_approve(
     handler: &CommandHandler<'_>,
     trust_domain_id: String,
@@ -6820,6 +6859,7 @@ fn handle_bootstrap_import(domain_dir: PathBuf, source: String) -> Result<(), Er
     Ok(())
 }
 
+#[cfg(feature = "management")]
 fn handle_trust_invite(
     trust_domain_id: String,
     network_local_id: String,
@@ -6892,6 +6932,7 @@ fn revoke_reason_value(reason: RevokeReasonArg) -> RevocationReason {
     }
 }
 
+#[cfg(feature = "management")]
 fn handle_trust_revoke(
     trust_domain_id: String,
     network_local_id: String,
@@ -7266,6 +7307,7 @@ fn resolve_device_view(
     }
 }
 
+#[cfg(feature = "management")]
 fn handle_trust_rename_device(
     trust_domain_id: String,
     network_local_id: String,
@@ -7371,6 +7413,7 @@ fn write_reissued_member_cert(
     pactmesh::control::write_reissued_member_cert(network_dir, cert)
 }
 
+#[cfg(feature = "management")]
 fn handle_trust_capability_set(options: TrustCapabilitySetOptions) -> Result<(), Error> {
     let (network_dir, original_pem, mut state) =
         load_network_state_for_edit(&options.trust_domain_id, &options.network_local_id)?;
@@ -7506,6 +7549,7 @@ struct TrustCapabilitySetOptions {
     passphrase_file: Option<PathBuf>,
 }
 
+#[cfg(feature = "management")]
 fn handle_trust_tag_list(
     trust_domain_id: String,
     network_local_id: String,
@@ -7542,6 +7586,7 @@ fn handle_trust_tag_list(
     Ok(())
 }
 
+#[cfg(feature = "management")]
 fn handle_trust_tag_update(
     trust_domain_id: String,
     network_local_id: String,
@@ -7647,6 +7692,7 @@ fn normalize_peer_hint_capabilities(mut capabilities: Vec<String>) -> Vec<String
     capabilities
 }
 
+#[cfg(feature = "management")]
 fn handle_trust_peer_hint_list(
     trust_domain_id: String,
     network_local_id: String,
@@ -7702,6 +7748,7 @@ struct PeerHintUpdateOptions {
     passphrase_file: Option<PathBuf>,
 }
 
+#[cfg(feature = "management")]
 fn handle_trust_peer_hint_update(options: PeerHintUpdateOptions) -> Result<(), Error> {
     let (network_dir, original_pem, mut state) =
         load_network_state_for_edit(&options.trust_domain_id, &options.network_local_id)?;
@@ -7800,6 +7847,7 @@ struct TrustAclExplainOptions {
     json: bool,
 }
 
+#[cfg(feature = "management")]
 fn handle_trust_acl_explain(options: TrustAclExplainOptions) -> Result<(), Error> {
     let (network_dir, _pem, state) =
         load_network_state_for_edit(&options.trust_domain_id, &options.network_local_id)?;
@@ -8017,6 +8065,7 @@ fn replace_member_index_entry(
     );
 }
 
+#[cfg(feature = "management")]
 fn handle_trust_hostname_update(
     trust_domain_id: String,
     network_local_id: String,
@@ -8161,6 +8210,7 @@ fn load_network_state_for_edit(
     pactmesh::control::read_network_state(trust_domain_id, network_local_id)
 }
 
+#[cfg(feature = "management")]
 fn unlock_domain_root(
     trust_domain_id: &str,
     passphrase_file: Option<PathBuf>,
@@ -8181,6 +8231,7 @@ fn unlock_domain_root(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "management")]
 async fn handle_trust_disable(
     handler: Option<&CommandHandler<'_>>,
     trust_domain_id: String,
@@ -8264,6 +8315,7 @@ async fn handle_trust_disable(
     Ok(())
 }
 
+#[cfg(feature = "management")]
 async fn handle_trust_enable(
     handler: Option<&CommandHandler<'_>>,
     trust_domain_id: String,
@@ -8328,6 +8380,7 @@ async fn handle_trust_enable(
 
 // 主控指派/清除设备固定虚拟 IPv4：写入 root 签名的 network_state.ip_assignments
 // （键=稳定 device_id，不重签证书），与控制器 /api/assigned-ipv4 同源。ipv4=None 清除。
+#[cfg(feature = "management")]
 async fn handle_trust_assigned_ipv4(
     handler: Option<&CommandHandler<'_>>,
     trust_domain_id: String,
@@ -8651,6 +8704,7 @@ async fn resolve_pending_join_summary(
     }
 }
 
+#[cfg(feature = "management")]
 async fn handle_trust_approve(
     handler: &CommandHandler<'_>,
     trust_domain_id: String,
@@ -8780,6 +8834,7 @@ async fn handle_trust_approve(
     Ok(())
 }
 
+#[cfg(feature = "management")]
 async fn handle_trust_reject(
     handler: &CommandHandler<'_>,
     trust_domain_id: String,
@@ -8812,6 +8867,7 @@ async fn handle_trust_reject(
     Ok(())
 }
 
+#[cfg(feature = "management")]
 async fn handle_trust_upgrade_peer_to_root(
     handler: &CommandHandler<'_>,
     trust_domain_id: String,
@@ -9062,6 +9118,7 @@ fn acl_action_name(action: Action) -> &'static str {
     }
 }
 
+#[cfg(feature = "management")]
 fn handle_trust_create_network(
     trust_domain_id: String,
     network_local_id: String,
@@ -9158,6 +9215,7 @@ struct BootstrapSelfOptions {
     device_passphrase_file: Option<PathBuf>,
 }
 
+#[cfg(feature = "management")]
 fn handle_trust_bootstrap_self(options: BootstrapSelfOptions) -> Result<(), Error> {
     let (network_dir, original_pem, mut state) =
         load_network_state_for_edit(&options.trust_domain_id, &options.network_local_id)?;
@@ -9283,6 +9341,7 @@ fn handle_trust_bootstrap_self(options: BootstrapSelfOptions) -> Result<(), Erro
     Ok(())
 }
 
+#[cfg(feature = "management")]
 fn handle_trust_create_domain(
     label: String,
     out_dir: Option<PathBuf>,
@@ -9968,6 +10027,7 @@ async fn main() -> Result<(), Error> {
             handle_lab(&handler, lab_args).await?;
         }
         SubCommand::Trust(trust_args) => match trust_args.sub_command {
+            #[cfg(feature = "management")]
             TrustSubCommand::CreateDomain {
                 label,
                 out_dir,
@@ -9980,6 +10040,7 @@ async fn main() -> Result<(), Error> {
             TrustSubCommand::ListDomains { json } => {
                 handle_trust_list_domains(json)?;
             }
+            #[cfg(feature = "management")]
             TrustSubCommand::CreateNetwork {
                 trust_domain_id,
                 network_local_id,
@@ -9995,6 +10056,7 @@ async fn main() -> Result<(), Error> {
                     passphrase_file,
                 )?;
             }
+            #[cfg(feature = "management")]
             TrustSubCommand::BootstrapSelf {
                 trust_domain_id,
                 network_local_id,
@@ -10012,6 +10074,7 @@ async fn main() -> Result<(), Error> {
                     device_passphrase_file,
                 })?;
             }
+            #[cfg(feature = "management")]
             TrustSubCommand::Invite {
                 trust_domain_id,
                 network_local_id,
@@ -10045,6 +10108,7 @@ async fn main() -> Result<(), Error> {
                 )
                 .await?;
             }
+            #[cfg(feature = "management")]
             TrustSubCommand::Revoke {
                 trust_domain_id,
                 network_local_id,
@@ -10062,6 +10126,7 @@ async fn main() -> Result<(), Error> {
                     passphrase_file,
                 )?;
             }
+            #[cfg(feature = "management")]
             TrustSubCommand::Disable {
                 trust_domain_id,
                 network_local_id,
@@ -10083,6 +10148,7 @@ async fn main() -> Result<(), Error> {
                 )
                 .await?;
             }
+            #[cfg(feature = "management")]
             TrustSubCommand::Enable {
                 trust_domain_id,
                 network_local_id,
@@ -10100,6 +10166,7 @@ async fn main() -> Result<(), Error> {
                 )
                 .await?;
             }
+            #[cfg(feature = "management")]
             TrustSubCommand::AssignedIpv4 {
                 trust_domain_id,
                 network_local_id,
@@ -10143,6 +10210,7 @@ async fn main() -> Result<(), Error> {
             } => {
                 handle_trust_show_device(trust_domain_id, network_local_id, device_id, json)?;
             }
+            #[cfg(feature = "management")]
             TrustSubCommand::RenameDevice {
                 trust_domain_id,
                 network_local_id,
@@ -10160,6 +10228,7 @@ async fn main() -> Result<(), Error> {
                 json,
                 passphrase_file,
             )?,
+            #[cfg(feature = "management")]
             TrustSubCommand::Capability { command } => match command {
                 TrustCapabilitySubCommand::Set {
                     trust_domain_id,
@@ -10185,6 +10254,7 @@ async fn main() -> Result<(), Error> {
                     passphrase_file,
                 })?,
             },
+            #[cfg(feature = "management")]
             TrustSubCommand::Tag { command } => match command {
                 TrustTagSubCommand::List {
                     trust_domain_id,
@@ -10224,6 +10294,7 @@ async fn main() -> Result<(), Error> {
                     passphrase_file,
                 )?,
             },
+            #[cfg(feature = "management")]
             TrustSubCommand::PeerHint { command } => match command {
                 TrustPeerHintSubCommand::List {
                     trust_domain_id,
@@ -10268,6 +10339,7 @@ async fn main() -> Result<(), Error> {
                     passphrase_file,
                 })?,
             },
+            #[cfg(feature = "management")]
             TrustSubCommand::Acl { command } => match command {
                 TrustAclSubCommand::Explain {
                     trust_domain_id,
@@ -10291,6 +10363,7 @@ async fn main() -> Result<(), Error> {
                     json,
                 })?,
             },
+            #[cfg(feature = "management")]
             TrustSubCommand::SetHostname {
                 trust_domain_id,
                 network_local_id,
@@ -10308,6 +10381,7 @@ async fn main() -> Result<(), Error> {
                     passphrase_file,
                 )?;
             }
+            #[cfg(feature = "management")]
             TrustSubCommand::UnsetHostname {
                 trust_domain_id,
                 network_local_id,
@@ -10323,6 +10397,7 @@ async fn main() -> Result<(), Error> {
                     passphrase_file,
                 )?;
             }
+            #[cfg(feature = "management")]
             TrustSubCommand::Approve {
                 trust_domain_id,
                 network_local_id,
@@ -10340,6 +10415,7 @@ async fn main() -> Result<(), Error> {
                 )
                 .await?;
             }
+            #[cfg(feature = "management")]
             TrustSubCommand::Reject {
                 trust_domain_id,
                 network_local_id,
@@ -10348,6 +10424,7 @@ async fn main() -> Result<(), Error> {
                 handle_trust_reject(&handler, trust_domain_id, network_local_id, applicant_pk)
                     .await?;
             }
+            #[cfg(feature = "management")]
             TrustSubCommand::UpgradePeerToRoot {
                 trust_domain_id,
                 network_local_id,
@@ -10374,16 +10451,21 @@ async fn main() -> Result<(), Error> {
                     .await?;
             }
         },
+        #[cfg(feature = "management")]
         SubCommand::Controller(controller_args) => {
             handler.run_controller(&controller_args, None).await?
         }
+        #[cfg(feature = "management")]
         SubCommand::Quickstart(quickstart_args) => {
             handler
                 .run_quickstart(cli.rpc_portal, &quickstart_args)
                 .await?
         }
+        #[cfg(feature = "management")]
         SubCommand::Web => handler.run_web()?,
+        #[cfg(feature = "management")]
         SubCommand::Tray => handler.run_tray()?,
+        #[cfg(feature = "management")]
         SubCommand::Serve(serve_args) => handler.run_serve(cli.rpc_portal, &serve_args).await?,
         SubCommand::Tui => handler.run_tui().await?,
 

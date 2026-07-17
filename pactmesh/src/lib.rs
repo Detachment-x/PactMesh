@@ -13,6 +13,7 @@ mod vpn_portal;
 pub mod common;
 pub mod connector;
 pub mod control;
+#[cfg(feature = "management")]
 pub mod controller;
 pub mod core;
 pub mod dns;
@@ -23,7 +24,7 @@ pub mod proto;
 pub mod rpc_service;
 pub mod secret_seal;
 pub mod service_manager;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "management"))]
 pub mod tray;
 pub mod trust;
 pub mod tui;
